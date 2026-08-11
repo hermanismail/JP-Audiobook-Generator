@@ -38,17 +38,41 @@ def process_chapter(chapter_path):
     chapter_name = os.path.splitext(os.path.basename(chapter_path))
     print(f"\n>>> Processing: {chapter_name}")
     
-    # Step 1: Read and Clean Text
+    # Step 1: Read Raw Text
     with open(chapter_path, "r", encoding="utf-8") as f:
         raw_text = f.read()
 
-    # Retain only words and Japanese punctuation (、 and 。)
-    cleaned_text = re.sub(r"[^\w\u3040-\u30ff\u4e03-\u9faf、。\s]", "", raw_text)
+    # --- Custom Symbol Cleaning Logic ---
+    # 1. Replace …… with Japanese comma (、)
+    cleaned_text = raw_text.replace("……", "、")
+    
+    # 2. Replace 」 with Japanese comma (、)
+    cleaned_text = cleaned_text.replace("」", "、")
+    
+    # 3. Handle specific overlapping patterns where a quote follows an ellipsis or question mark:
+    # Rule 4: If character after …… is 」, remove the redundant 」 (handled above by replacement, but we can clean up double commas if needed)
+    # Rule 5: When character after ？ 」? (or ？ followed by unnecessary closing bracket), clean up trailing brackets.
+    # Let's target specific trailing garbage patterns like "、」" or "？、" resulting from replacements:
+    cleaned_text = cleaned_text.replace("、、", "、")
+    cleaned_Text = re.sub(r"？\s*、", "？", cleaned_text)
+
+    # Retain only words, Japanese characters, spaces, and allowed punctuation (、, 。, ？)
+    cleaned_text = re.sub(r"[^\w\u3040-\u30ff\u4e03-\u9faf、。？\s]", "", cleaned_text)
     cleaned_text = re.sub(r"\s+", "", cleaned_text)
     
-    # Step 2: Split into sentences (keeping the period)
-    raw_sentences = cleaned_text.split("。")
-    sentences = [s + "。" for s in raw_sentences if s.strip()]
+    # Step 2: Split into sentences (keeping the period or question mark as sentence boundaries)
+    # Splitting by 。 or ？ while retaining them
+    raw_sentences = re.split(r"([。？])", cleaned_text)
+    sentences = []
+    for i in range(0, len(raw_sentences) - 1, 2):
+        sentence = raw_sentences[i] + raw_sentences[i+1]
+        if sentence.strip():
+            sentences.append(sentence)
+            
+    # Fallback if text doesn't end with standard punctuation
+    if len(raw_sentences) % 2 != 0 and raw_sentences[-1].strip():
+        sentences.append(raw_sentences[-1])
+
     print(f"Found {len(sentences)} sentences.")
 
     audio_files = []
@@ -85,7 +109,6 @@ def process_chapter(chapter_path):
     output_mp3 = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.mp3")
     
     # Build FFmpeg filter complex for silence gaps
-    # [0:a]apad=pad_dur=0.4[a0]; [1:a]apad=pad_dur=0.4[a1]... concat=n=X:v=0:a=1
     filter_complex = ""
     for idx in range(len(audio_files)):
         filter_complex += f"[{idx}:a]apad=pad_dur={SILENCE_DURATION}[a{idx}];"
