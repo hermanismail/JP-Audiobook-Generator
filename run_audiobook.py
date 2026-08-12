@@ -126,7 +126,8 @@ def process_chapter(chapter_path):
         "-filter_complex", filter_complex,
         "-map", "[outa]",
         "-acodec", "libmp3lame",
-        "-q:a", "2",
+        "-ac", "2",
+        "-b:a", "320k",
         output_mp3
     ])
 
