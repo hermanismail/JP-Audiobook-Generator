@@ -36,7 +36,7 @@ def clean_temp_dir():
 
 def process_chapter(chapter_path):
     chapter_name = os.path.splitext(os.path.basename(chapter_path))
-    print(f"\n>>> Processing: {chapter_name}")
+    print(f"\n>>> Processing: {chapter_name[0]}")
     
     # Step 1: Read Raw Text
     with open(chapter_path, "r", encoding="utf-8") as f:
@@ -54,7 +54,7 @@ def process_chapter(chapter_path):
     # Rule 5: When character after ？ 」? (or ？ followed by unnecessary closing bracket), clean up trailing brackets.
     # Let's target specific trailing garbage patterns like "、」" or "？、" resulting from replacements:
     cleaned_text = cleaned_text.replace("、、", "、")
-    cleaned_Text = re.sub(r"？\s*、", "？", cleaned_text)
+    cleaned_text = re.sub(r"？\s*、", "？", cleaned_text)
 
     # Retain only words, Japanese characters, spaces, and allowed punctuation (、, 。, ？)
     cleaned_text = re.sub(r"[^\w\u3040-\u30ff\u4e03-\u9faf、。？\s]", "", cleaned_text)
@@ -101,37 +101,40 @@ def process_chapter(chapter_path):
         if os.path.exists(wav_filename):
             audio_files.append(wav_filename)
 
-    # Step 5: Combine parts into final MP3 with silence gaps
+    # Step 5: Combine parts into final MP3 with silence gaps using text list demuxer
     if not audio_files:
-        print(f"Error: No audio parts generated for {chapter_name}")
+        print(f"Error: No audio parts generated for {chapter_name[0]}")
         return
 
     output_mp3 = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.mp3")
     
-    # Build FFmpeg filter complex for silence gaps
-    filter_complex = ""
-    for idx in range(len(audio_files)):
-        filter_complex += f"[{idx}:a]apad=pad_dur={SILENCE_DURATION}[a{idx}];"
-    
-    for idx in range(len(audio_files)):
-        filter_complex += f"[a{idx}]"
-    
-    filter_complex += f"concat=n={len(audio_files)}:v=0:a=1[outa]"
+    # Generate temporary silence file matching SILENCE_DURATION
+    silence_wav_path = os.path.join(TEMP_DIR, "silence.wav")
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+        "-t", str(SILENCE_DURATION), silence_wav_path
+    ], capture_output=True)
 
-    ffmpeg_cmd = ["ffmpeg", "-y"]
-    for f in audio_files:
-        ffmpeg_cmd.extend(["-i", f])
-    
-    ffmpeg_cmd.extend([
-        "-filter_complex", filter_complex,
-        "-map", "[outa]",
+    # Write concat list file to bypass Windows command-line character length limits (WinError 206)
+    concat_list_path = os.path.join(TEMP_DIR, "concat_list.txt")
+    with open(concat_list_path, "w", encoding="utf-8") as f:
+        for idx, audio_file in enumerate(audio_files):
+            f.write(f"file '{os.path.abspath(audio_file)}'\n")
+            if idx < len(audio_files) - 1:
+                f.write(f"file '{os.path.abspath(silence_wav_path)}'\n")
+
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_list_path,
         "-acodec", "libmp3lame",
         "-ac", "2",
         "-b:a", "320k",
         output_mp3
-    ])
+    ]
 
-    print(f"Stitching {chapter_name} into final MP3...")
+    print(f"Stitching {chapter_name[0]} into final MP3...")
     subprocess.run(ffmpeg_cmd, capture_output=True)
     print(f"Done! Saved to: {output_mp3}")
 
