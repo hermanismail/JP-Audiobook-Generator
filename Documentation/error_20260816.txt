@@ -1,0 +1,15 @@
+PS>& "C:\JP-Audiobook-Generator\Run-Settings.ps1"
+Traceback (most recent call last):
+  File "C:\JP-Audiobook-Generator\gui_settings.py", line 286, in <module>
+    app = SettingsApp()
+  File "C:\JP-Audiobook-Generator\gui_settings.py", line 116, in __init__
+    self._build_ui()
+  File "C:\JP-Audiobook-Generator\gui_settings.py", line 148, in _build_ui
+    self.toggle = ToggleSwitch(toggle_frame, initial=initial_keep)
+  File "C:\JP-Audiobook-Generator\gui_settings.py", line 70, in __init__
+    self._draw()
+  File "C:\JP-Audiobook-Generator\gui_settings.py", line 73, in _draw
+    self.delete("all")
+  File "C:\Users\herma\AppData\Roaming\uv\python\cpython-3.10-windows-x86_64-none\lib\tkinter\__init__.py", line 2852, in delete
+    self.tk.call((self._w, 'delete') + args)
+_tkinter.TclError: invalid command name "52"

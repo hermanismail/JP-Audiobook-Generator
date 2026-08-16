@@ -1,22 +1,55 @@
 import os
 import re
+import json
 import subprocess
 import glob
 import shutil
 
 # --- Configuration ---
-# Paths for your environment
-INPUT_FOLDER = r"E:\AUDIOBOOK\chapter"
-OUTPUT_FOLDER = r"E:\AUDIOBOOK\output"
-TEMP_DIR = r"D:\AUDIOBOOK_TMP"
+# Settings are now stored in settings.json (same folder as this script)
+# instead of being hardcoded here. If settings.json is missing, it will be
+# created automatically using the defaults below.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_PATH = os.path.join(SCRIPT_DIR, "settings.json")
 
-# AI Model Configuration (Using your C: drive local path)
-MODEL_PATH = r"C:\Irodori-TTS\model.safetensors"
-# Replace with your actual trained speaker path
-SPEAKER_PATH = r"C:\Irodori-TTS\seiyuu\ueshama.speaker.safetensors"
+DEFAULT_SETTINGS = {
+    "input_folder": r"E:\AUDIOBOOK\chapter",
+    "output_folder": r"E:\AUDIOBOOK\output",
+    "temp_dir": r"D:\AUDIOBOOK_TMP",
+    "model_path": r"C:\Irodori-TTS\model.safetensors",
+    "speaker_path": r"C:\Irodori-TTS\seiyuu\ueshama.speaker.safetensors",
+    "silence_duration": 1.0,
+    "clean_temp_after_run": True,
+    "uv_project_dir": r"C:\Irodori-TTS",  # not used by this script directly, kept for the GUI launcher
+}
 
-# Narration settings
-SILENCE_DURATION = 1.0  # Pause in seconds between sentences
+
+def load_settings():
+    """Loads settings.json, creating it with defaults if it doesn't exist.
+    Any keys missing from an existing file are filled in with defaults,
+    so older settings.json files stay compatible with new options."""
+    if not os.path.exists(SETTINGS_PATH):
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_SETTINGS, f, indent=2)
+        return dict(DEFAULT_SETTINGS)
+
+    with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+        loaded = json.load(f)
+
+    merged = dict(DEFAULT_SETTINGS)
+    merged.update(loaded)
+    return merged
+
+
+SETTINGS = load_settings()
+
+INPUT_FOLDER = SETTINGS["input_folder"]
+OUTPUT_FOLDER = SETTINGS["output_folder"]
+TEMP_DIR = SETTINGS["temp_dir"]
+MODEL_PATH = SETTINGS["model_path"]
+SPEAKER_PATH = SETTINGS["speaker_path"]
+SILENCE_DURATION = float(SETTINGS["silence_duration"])
+CLEAN_TEMP_AFTER_RUN = bool(SETTINGS["clean_temp_after_run"])
 
 # Ensure folders exist
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -138,9 +171,12 @@ def process_chapter(chapter_path):
     subprocess.run(ffmpeg_cmd, capture_output=True)
     print(f"Done! Saved to: {output_mp3}")
 
-    # Step 5: Cleanup temporary files for this chapter
-    print(f"Cleaning up temporary files in {TEMP_DIR}...")
-    clean_temp_dir()
+    # Step 5: Cleanup temporary files for this chapter (unless disabled in settings.json)
+    if CLEAN_TEMP_AFTER_RUN:
+        print(f"Cleaning up temporary files in {TEMP_DIR}...")
+        clean_temp_dir()
+    else:
+        print(f"Skipping temp cleanup (clean_temp_after_run is disabled). Files remain in {TEMP_DIR}")
 
 def main():
     # Find all chapter_*.txt files in E:\AUDIOBOOK\chapter

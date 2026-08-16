@@ -1,0 +1,10 @@
+{
+  "input_folder": "F:\\AUDIOBOOK_CHAPTER\\test_001",
+  "output_folder": "F:\\AUDIOBOOK_OUTPUT",
+  "temp_dir": "F:\\AUDIOBOOK_TMP",
+  "model_path": "C:\\Irodori-TTS\\model.safetensors",
+  "speaker_path": "C:\\Irodori-TTS\\seiyuu\\ueshama.speaker.safetensors",
+  "silence_duration": 1.2,
+  "clean_temp_after_run": false,
+  "uv_project_dir": "C:\\Irodori-TTS"
+}
