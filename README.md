@@ -57,6 +57,13 @@ Final Chapter Audiobook (.mp3) ──> Final assembly & Temp Cleanup<br><br>
 .mp3 : Final Compressed Audiobook<br>
 
 <h2>6. User Configuration Guide</h2>
+<b>Settings GUI (Recommended)</b><br>
+A GUI (gui_settings.py) is now available so you no longer need to hand-edit run_audiobook.py for routine changes. Once set up, you can open it directly from the Windows taskbar:<br>
+1. Run Create-Shortcut.ps1 once to create a desktop shortcut pointing to Launch-Settings-Silent.vbs.<br>
+2. Pin that shortcut to the taskbar (right-click it → Pin to taskbar).<br>
+3. Click the taskbar icon anytime to open the settings window, change values, and run the program without touching the terminal.<br><br>
+Below is a look at the settings interface:<br>
+<img src="interface_screenshot.png" alt="Settings GUI Screenshot" width="600"><br><br>
 Users must configure the absolute paths in the run_audiobook.py script.<br>
 Note on Raw Strings: When defining Windows paths, you must use the r prefix (e.g., r"C:\Path"). This creates a "Raw String," preventing Python from interpreting backslashes as escape characters, a common cause of execution failure on Windows.<br>
 --- Configuration ---<br>
