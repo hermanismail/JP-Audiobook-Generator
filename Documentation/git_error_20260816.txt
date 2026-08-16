@@ -1,0 +1,4 @@
+warning: in the working copy of 'run_audiobook.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'Documentation/claude-projects-walkthrough-story.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'Run-Settings.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'gui_settings.py', LF will be replaced by CRLF the next time Git touches it
