@@ -8,37 +8,22 @@
 #   .\Run-Settings.ps1
 #
 # NOTE: This environment has no standalone system Python - Python only exists
-# inside the venv managed by 'uv' in the uv project folder (see UvProjectDir
-# below / "uv_project_dir" in settings.json). So this script runs the GUI via
-# `uv run --no-sync python <gui path>` from that folder, the same way
-# run_audiobook.py itself is normally launched.
+# inside uv-managed venvs. The GUI now has its OWN uv project (pyproject.toml
+# / uv.lock / .venv) living right here in C:\JP-Audiobook-Generator, separate
+# from the Irodori-TTS venv used to actually run the audiobook pipeline.
+#
+# This keeps GUI-only dependencies (customtkinter, pillow, etc.) isolated from
+# the heavier ML/TTS environment in C:\Irodori-TTS. The "uv_project_dir"
+# setting in settings.json is unrelated to this script - it's only used by
+# gui_settings.py's "Save & Run" button to launch run_audiobook.py in the
+# Irodori-TTS venv.
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $GuiScript = Join-Path $ScriptDir "gui_settings.py"
-$SettingsPath = Join-Path $ScriptDir "settings.json"
+$PyprojectPath = Join-Path $ScriptDir "pyproject.toml"
 
 if (-not (Test-Path $GuiScript)) {
     Write-Error "Could not find gui_settings.py at: $GuiScript"
-    exit 1
-}
-
-# Default uv project folder (fallback if settings.json is missing/unreadable)
-$UvProjectDir = "C:\Irodori-TTS"
-
-if (Test-Path $SettingsPath) {
-    try {
-        $settingsJson = Get-Content -Raw -Path $SettingsPath | ConvertFrom-Json
-        if ($settingsJson.uv_project_dir) {
-            $UvProjectDir = $settingsJson.uv_project_dir
-        }
-    }
-    catch {
-        Write-Warning "Could not parse settings.json, using default uv project folder: $UvProjectDir"
-    }
-}
-
-if (-not (Test-Path $UvProjectDir)) {
-    Write-Error "uv project folder not found: $UvProjectDir`nUpdate 'uv_project_dir' in settings.json, or edit `$UvProjectDir at the top of this script."
     exit 1
 }
 
@@ -48,9 +33,16 @@ if (-not $uvCmd) {
     exit 1
 }
 
-Push-Location $UvProjectDir
+if (-not (Test-Path $PyprojectPath)) {
+    Write-Error "No pyproject.toml found in: $ScriptDir`nRun 'uv init --no-workspace' and 'uv add customtkinter pillow' in this folder first (see setup notes)."
+    exit 1
+}
+
+Push-Location $ScriptDir
 try {
-    & uv run --no-sync python $GuiScript
+    # No --no-sync here (unlike the Irodori-TTS launch) - this is a small,
+    # fast-syncing local venv, so let uv auto-sync if the lock/venv drift.
+    & uv run python $GuiScript
 }
 finally {
     Pop-Location
