@@ -11,5 +11,6 @@
   "book_title": "\u8857\u3068\u305d\u306e\u4e0d\u78ba\u304b\u306a\u58c1",
   "genre": "Audiobook",
   "auto_number_chapters": true,
-  "cover_art_path": "E:\\AUDIOBOOK\\output\\wall.png"
+  "cover_art_path": "E:\\AUDIOBOOK\\output\\wall.png",
+  "auto_tag_generated_files": true
 }

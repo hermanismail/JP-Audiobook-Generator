@@ -21,6 +21,7 @@ DEFAULT_SETTINGS = {
     "silence_duration": 1.0,
     "clean_temp_after_run": True,
     "uv_project_dir": r"C:\Irodori-TTS",  # not used by this script directly, kept for the GUI launcher
+    "auto_tag_generated_files": False,
 }
 
 
@@ -192,6 +193,28 @@ def main():
         process_chapter(chapter_file)
 
     print("\nAll chapters completed successfully!")
+
+    # Auto-tag step: runs the mp3_metadata.py tagger from the GUI project's
+    # OWN lightweight uv venv (via `--project`), not this heavy Irodori-TTS
+    # venv, so mutagen never needs to be installed here. Only runs when
+    # "Auto-tag generated files" is turned on in the Metadata settings tab -
+    # otherwise the person applies tags manually afterwards via the GUI's
+    # "Apply Tags to Output MP3s" button.
+    if SETTINGS.get("auto_tag_generated_files", False):
+        print("\nAuto-tag generated files is ON - tagging output MP3s...")
+        try:
+            tag_result = subprocess.run(
+                ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python",
+                 os.path.join(SCRIPT_DIR, "mp3_metadata.py")],
+                cwd=SCRIPT_DIR, capture_output=True, text=True,
+            )
+            if tag_result.stdout:
+                print(tag_result.stdout.strip())
+            if tag_result.returncode != 0:
+                print(f"Auto-tagging failed (exit code {tag_result.returncode}):")
+                print(tag_result.stderr.strip())
+        except Exception as e:
+            print(f"Auto-tagging failed to start: {e}")
 
 if __name__ == "__main__":
     main()

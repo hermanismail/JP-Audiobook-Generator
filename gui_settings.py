@@ -67,6 +67,7 @@ DEFAULT_SETTINGS = {
     "genre": "Audiobook",
     "auto_number_chapters": True,
     "cover_art_path": "",
+    "auto_tag_generated_files": False,
 }
 
 # ---------------------------------------------------------------------------
@@ -111,6 +112,7 @@ ICON_BOOK_TITLE = ("\U0001F4D5", "#FCEAEA", "#D85A5A")  # 📕 closed book
 ICON_GENRE = ("\U0001F3F7", "#FFF3DD", "#C98A2E")       # 🏷 tag
 ICON_TRACK_NUM = ("\U0001F522", "#E6F8ED", "#2FB668")   # 🔢 numbers
 ICON_COVER_ART = ("\U0001F5BC", "#E6F1FB", "#3378C9")   # 🖼 picture
+ICON_AUTO_TAG = ("\u26A1", "#FFF3DD", "#C98A2E")         # ⚡ lightning (automation)
 
 # Sidebar nav icons
 NAV_ICON_GENERAL = "\u2699"      # ⚙ gear
@@ -249,6 +251,8 @@ class SettingsApp(ctk.CTk):
         }
         self.auto_number_var = ctk.IntVar(
             value=1 if self.settings.get("auto_number_chapters", True) else 0)
+        self.auto_tag_var = ctk.IntVar(
+            value=1 if self.settings.get("auto_tag_generated_files", False) else 0)
 
         self.pages = {}
         self.nav_buttons = {}
@@ -456,25 +460,41 @@ class SettingsApp(ctk.CTk):
         self._add_text_row(meta_card, *ICON_GENRE, "Genre",
                             "Written to the Genre tag",
                             self.metadata_vars["genre"], placeholder="Audiobook")
-        self._add_checkbox_row(meta_card, *ICON_TRACK_NUM, "Auto-number chapters",
-                                "Sets the Track Number tag from chapter order",
-                                self.auto_number_var)
+        self.auto_number_switch = self._add_switch_row(
+            meta_card, *ICON_TRACK_NUM, "Auto-number chapters",
+            "Sets the Track Number tag from the chapter's file name",
+            self.auto_number_var,
+            on_text="(Sets the track number based on chapter filename)",
+            off_text="(set track number manually)")
+        self.auto_tag_switch = self._add_switch_row(
+            meta_card, *ICON_AUTO_TAG, "Auto-tag generated files",
+            "Sets the metadata of output files automatically",
+            self.auto_tag_var,
+            on_text="(Tag the output mp3 files automatically upon generation)",
+            off_text="(Tag the output mp3 files manually)",
+            command=self._on_auto_tag_changed)
         self._add_cover_art_row(meta_card)
 
         apply_card = ctk.CTkFrame(parent, fg_color="transparent")
         apply_card.pack(fill="x", pady=(16, 0))
 
-        ctk.CTkButton(
+        self.apply_tags_button = ctk.CTkButton(
             apply_card, text="\U0001F3F7  Apply Tags to Output MP3s", height=40,
             corner_radius=8, fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             text_color="white", font=ctk.CTkFont(size=13, weight="bold"),
             command=self.on_apply_metadata_tags,
-        ).pack(side="left")
+        )
+        self.apply_tags_button.pack(side="left")
 
         self.metadata_status_label = ctk.CTkLabel(
             apply_card, text="", text_color=COLOR_SUBTITLE, font=ctk.CTkFont(size=12),
             anchor="w", justify="left")
         self.metadata_status_label.pack(side="left", padx=(14, 0))
+
+        # Reflect the loaded "Auto-tag generated files" state on the Apply
+        # button right away (disabled if auto-tagging is already ON, since
+        # tagging then happens automatically at the end of generation).
+        self._on_auto_tag_changed()
 
     def _row_shell(self, parent):
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -585,6 +605,10 @@ class SettingsApp(ctk.CTk):
 
     def _add_checkbox_row(self, parent, glyph, pastel_bg, icon_color, title, subtitle,
                            int_var):
+        # NOTE: kept for potential future use, but the Metadata tab's
+        # "Auto-number chapters" switched from this checkbox style to
+        # _add_switch_row() below, to stay visually consistent with the
+        # toggle switches used elsewhere (e.g. Advanced tab).
         row = self._row_shell(parent)
         IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
             side="left", padx=(0, 14))
@@ -596,6 +620,49 @@ class SettingsApp(ctk.CTk):
             width=24, checkbox_width=22, checkbox_height=22, corner_radius=6,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             border_color=COLOR_ENTRY_BORDER).pack(side="right")
+
+    def _add_switch_row(self, parent, glyph, pastel_bg, icon_color, title, subtitle,
+                         int_var, on_text, off_text, command=None):
+        """Same visual pattern as _add_toggle_row (Keep temp files, on the
+        Advanced tab): an icon badge, a title/subtitle block, and a switch
+        on the right whose own label text changes between on_text/off_text
+        depending on state. Generalized here so the Metadata tab's two
+        switches (Auto-number chapters, Auto-tag generated files) share the
+        exact same look. `command`, if given, runs after the label updates -
+        used by Auto-tag generated files to enable/disable the Apply button.
+        """
+        row = self._row_shell(parent)
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+        text_frame = self._title_block(row, title, subtitle)
+        text_frame.pack(side="left", fill="x", expand=True)
+
+        switch = ctk.CTkSwitch(
+            row, text=on_text if int_var.get() else off_text,
+            variable=int_var, onvalue=1, offvalue=0,
+            progress_color=COLOR_TOGGLE_ON, button_color="white",
+            switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
+            font=ctk.CTkFont(size=12),
+            command=lambda: self._on_switch_toggled(switch, int_var, on_text, off_text, command))
+        switch.pack(side="right")
+        return switch
+
+    def _on_switch_toggled(self, switch, int_var, on_text, off_text, extra_command):
+        switch.configure(text=on_text if int_var.get() else off_text)
+        if extra_command:
+            extra_command()
+
+    def _on_auto_tag_changed(self):
+        """Auto-tag generated files ON -> tagging happens automatically at
+        the end of run_audiobook.py, so the manual Apply Tags button is
+        greyed out and disabled (avoids double-tagging / confusion about
+        which metadata actually landed). OFF -> button is enabled again."""
+        if self.auto_tag_var.get():
+            self.apply_tags_button.configure(
+                state="disabled", fg_color="#C9C4EA", hover_color="#C9C4EA")
+        else:
+            self.apply_tags_button.configure(
+                state="normal", fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER)
 
     def _add_cover_art_row(self, parent):
         row = self._row_shell(parent)
@@ -658,7 +725,19 @@ class SettingsApp(ctk.CTk):
         for key in ("author_name", "book_title", "genre", "cover_art_path"):
             self.metadata_vars[key].set(DEFAULT_SETTINGS[key])
         self.auto_number_var.set(1 if DEFAULT_SETTINGS["auto_number_chapters"] else 0)
+        self.auto_tag_var.set(1 if DEFAULT_SETTINGS["auto_tag_generated_files"] else 0)
         self.metadata_status_label.configure(text="")
+        # Refresh both switches' on/off label text and the Apply button's
+        # enabled state so the UI matches the values we just reset to.
+        for switch, var, on_text, off_text in (
+            (self.auto_number_switch, self.auto_number_var,
+             "(Sets the track number based on chapter filename)", "(set track number manually)"),
+            (self.auto_tag_switch, self.auto_tag_var,
+             "(Tag the output mp3 files automatically upon generation)",
+             "(Tag the output mp3 files manually)"),
+        ):
+            switch.configure(text=on_text if var.get() else off_text)
+        self._on_auto_tag_changed()
 
     def _collect_and_validate(self):
         try:
@@ -685,6 +764,7 @@ class SettingsApp(ctk.CTk):
             "genre": self.metadata_vars["genre"].get().strip(),
             "auto_number_chapters": bool(self.auto_number_var.get()),
             "cover_art_path": self.metadata_vars["cover_art_path"].get().strip(),
+            "auto_tag_generated_files": bool(self.auto_tag_var.get()),
         }
 
         for key in ("input_folder", "output_folder", "temp_dir", "model_path", "speaker_path",
