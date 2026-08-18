@@ -10,24 +10,24 @@ correct venv automatically).
 
 Dependencies (installed in THIS project's own uv-managed venv, separate
 from the Irodori-TTS venv used to actually run the audiobook pipeline):
-    customtkinter, pillow
+    customtkinter, pillow, mutagen
 
 Layout notes (2026-08 tab restructure):
-    The window is now split into a left sidebar (General / Metadata /
+    The window is split into a left sidebar (General / Metadata /
     Advanced) and a right content area. Only one page is visible at a
-    time; switching pages just raises a different frame - all three
-    pages are built once at startup so field values aren't lost when
-    you switch tabs.
+    time; switching pages just remaps a different frame into the grid -
+    all three pages are built once at startup so field values aren't lost
+    when you switch tabs.
 
-    - General page  = unchanged path/model settings (previously the
-      only page).
-    - Advanced page = Silence Duration + Keep Temp Files, unchanged in
-      behavior, just relocated out of the old single page.
-    - Metadata page = NEW. UI-only for now (Author, Book Title, Genre,
-      auto chapter numbering, cover art picker). These fields are NOT
-      yet wired into settings.json or save/load - that's the next
-      step once the layout itself is confirmed working. See the
-      "# TODO(metadata-backend)" markers below.
+    - General page  = path/model settings (previously the only page).
+    - Advanced page = Silence Duration + Keep Temp Files.
+    - Metadata page = Author / Book Title / Genre / auto chapter
+      numbering / cover art, all persisted to settings.json. "Apply Tags
+      to Output MP3s" (mp3_metadata.py, using mutagen) writes the actual
+      ID3v2 tags onto the already-generated chapter MP3s in output_folder
+      - it's a separate manual step from generation, since Save & Run
+      launches run_audiobook.py in a detached console the GUI doesn't
+      wait on.
 """
 
 import os
@@ -37,6 +37,12 @@ import subprocess
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
+
+# mp3_metadata (mutagen-based tagging) is imported lazily inside
+# on_apply_metadata_tags() rather than here, so a missing `mutagen`
+# install (e.g. before running `uv sync` after this feature was added)
+# doesn't crash the whole settings GUI on launch - only the Apply Tags
+# button, with a clear error message telling you what to run.
 
 # ---------------------------------------------------------------------------
 # Paths / defaults
@@ -56,6 +62,11 @@ DEFAULT_SETTINGS = {
     "silence_duration": 1.0,
     "clean_temp_after_run": True,
     "uv_project_dir": r"C:\Irodori-TTS",
+    "author_name": "",
+    "book_title": "",
+    "genre": "Audiobook",
+    "auto_number_chapters": True,
+    "cover_art_path": "",
 }
 
 # ---------------------------------------------------------------------------
@@ -230,17 +241,14 @@ class SettingsApp(ctk.CTk):
         initial_keep = not bool(self.settings.get("clean_temp_after_run", True))
         self.keep_temp_var = ctk.IntVar(value=1 if initial_keep else 0)
 
-        # TODO(metadata-backend): these are UI-only placeholders for now -
-        # not read from or written to settings.json yet. Wiring these up
-        # (plus the actual Mutagen tag-writing step) is the next task once
-        # this layout is confirmed working.
         self.metadata_vars = {
-            "author_name": ctk.StringVar(value=""),
-            "book_title": ctk.StringVar(value=""),
-            "genre": ctk.StringVar(value="Audiobook"),
-            "cover_art_path": ctk.StringVar(value=""),
+            "author_name": ctk.StringVar(value=self.settings.get("author_name", "")),
+            "book_title": ctk.StringVar(value=self.settings.get("book_title", "")),
+            "genre": ctk.StringVar(value=self.settings.get("genre", "Audiobook")),
+            "cover_art_path": ctk.StringVar(value=self.settings.get("cover_art_path", "")),
         }
-        self.auto_number_var = ctk.IntVar(value=1)
+        self.auto_number_var = ctk.IntVar(
+            value=1 if self.settings.get("auto_number_chapters", True) else 0)
 
         self.pages = {}
         self.nav_buttons = {}
@@ -429,7 +437,7 @@ class SettingsApp(ctk.CTk):
         self._add_silence_row(prefs_card)
         self._add_toggle_row(prefs_card)
 
-    # ---------- Metadata page (UI-only for now) ----------
+    # ---------- Metadata page ----------
     def _build_metadata_page(self, parent):
         self._page_header(
             parent, "Metadata Settings",
@@ -452,6 +460,21 @@ class SettingsApp(ctk.CTk):
                                 "Sets the Track Number tag from chapter order",
                                 self.auto_number_var)
         self._add_cover_art_row(meta_card)
+
+        apply_card = ctk.CTkFrame(parent, fg_color="transparent")
+        apply_card.pack(fill="x", pady=(16, 0))
+
+        ctk.CTkButton(
+            apply_card, text="\U0001F3F7  Apply Tags to Output MP3s", height=40,
+            corner_radius=8, fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            text_color="white", font=ctk.CTkFont(size=13, weight="bold"),
+            command=self.on_apply_metadata_tags,
+        ).pack(side="left")
+
+        self.metadata_status_label = ctk.CTkLabel(
+            apply_card, text="", text_color=COLOR_SUBTITLE, font=ctk.CTkFont(size=12),
+            anchor="w", justify="left")
+        self.metadata_status_label.pack(side="left", padx=(14, 0))
 
     def _row_shell(self, parent):
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -631,8 +654,11 @@ class SettingsApp(ctk.CTk):
         keep_temp = not DEFAULT_SETTINGS["clean_temp_after_run"]
         self.keep_temp_var.set(1 if keep_temp else 0)
         self._on_toggle_changed()
-        # Metadata fields are UI-only (not yet in DEFAULT_SETTINGS) so they're
-        # intentionally left untouched by Reset to Defaults for now.
+
+        for key in ("author_name", "book_title", "genre", "cover_art_path"):
+            self.metadata_vars[key].set(DEFAULT_SETTINGS[key])
+        self.auto_number_var.set(1 if DEFAULT_SETTINGS["auto_number_chapters"] else 0)
+        self.metadata_status_label.configure(text="")
 
     def _collect_and_validate(self):
         try:
@@ -654,9 +680,12 @@ class SettingsApp(ctk.CTk):
             "silence_duration": silence,
             "clean_temp_after_run": not bool(self.keep_temp_var.get()),
             "uv_project_dir": self.vars["uv_project_dir"].get().strip(),
+            "author_name": self.metadata_vars["author_name"].get().strip(),
+            "book_title": self.metadata_vars["book_title"].get().strip(),
+            "genre": self.metadata_vars["genre"].get().strip(),
+            "auto_number_chapters": bool(self.auto_number_var.get()),
+            "cover_art_path": self.metadata_vars["cover_art_path"].get().strip(),
         }
-        # TODO(metadata-backend): once approved, merge self.metadata_vars /
-        # self.auto_number_var into `data` here and persist to settings.json.
 
         for key in ("input_folder", "output_folder", "temp_dir", "model_path", "speaker_path",
                     "uv_project_dir"):
@@ -711,6 +740,83 @@ class SettingsApp(ctk.CTk):
                 "or run run_audiobook.py manually from your existing environment.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start run_audiobook.py:\n{e}")
+
+    def on_apply_metadata_tags(self):
+        data = self._collect_and_validate()
+        if data is None:
+            return
+
+        if not data["author_name"] or not data["book_title"]:
+            messagebox.showerror(
+                "Missing Metadata",
+                "Author Name and Book Title are required before applying tags - "
+                "these are what Spotify uses (Album Artist + Album) to group all "
+                "the chapters together as one album.")
+            return
+
+        cover_path = data["cover_art_path"]
+        if cover_path and not os.path.isfile(cover_path):
+            messagebox.showerror(
+                "Cover Art Not Found", f"'{cover_path}' does not exist.\n"
+                "Clear the field or browse to a valid .jpg/.jpeg/.png file.")
+            return
+
+        if not os.path.isdir(data["input_folder"]):
+            messagebox.showerror(
+                "Input Folder Not Found",
+                f"'{data['input_folder']}' does not exist.\n"
+                "Chapter order and track numbers are read from the chapter_*.txt "
+                "files there, so this needs to be correct even though we're only "
+                "tagging MP3s right now.")
+            return
+        if not os.path.isdir(data["output_folder"]):
+            messagebox.showerror(
+                "Output Folder Not Found",
+                f"'{data['output_folder']}' does not exist yet. Run generation "
+                "first (Save & Run), then come back and apply tags.")
+            return
+
+        # Persist settings first, so settings.json always reflects what was
+        # actually just tagged (and so General/Advanced edits aren't lost
+        # if the person only meant to click Apply Tags).
+        save_settings(data)
+
+        try:
+            import mp3_metadata
+        except ImportError:
+            messagebox.showerror(
+                "mutagen Not Installed",
+                "The 'mutagen' package isn't installed in this project's venv yet.\n\n"
+                "Run this in PowerShell from the project folder, then try again:\n"
+                "    uv sync")
+            return
+
+        try:
+            result = mp3_metadata.apply_metadata(data, data)
+        except Exception as e:
+            messagebox.showerror("Tagging Failed", f"Unexpected error while tagging:\n{e}")
+            return
+
+        summary_lines = [f"Tagged {result.tagged_count} MP3 file(s)."]
+        if result.missing:
+            summary_lines.append(
+                f"{len(result.missing)} chapter(s) have no MP3 yet in the output "
+                "folder (skipped): " + ", ".join(result.missing[:5]) +
+                ("..." if len(result.missing) > 5 else ""))
+        if result.errors:
+            summary_lines.append(f"{len(result.errors)} file(s) failed:")
+            summary_lines.extend(f"  - {name}: {err}" for name, err in result.errors[:5])
+
+        summary_text = "\n".join(summary_lines)
+        self.metadata_status_label.configure(
+            text=(f"\u2714 Tagged {result.tagged_count} file(s)"
+                  + (f", {len(result.missing)} missing" if result.missing else "")
+                  + (f", {len(result.errors)} errors" if result.errors else "")))
+
+        if result.errors:
+            messagebox.showwarning("Tagging Finished With Errors", summary_text)
+        else:
+            messagebox.showinfo("Tagging Complete", summary_text)
 
 
 if __name__ == "__main__":

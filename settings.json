@@ -5,6 +5,11 @@
   "model_path": "C:\\Irodori-TTS\\model.safetensors",
   "speaker_path": "C:\\Irodori-TTS\\seiyuu\\ueshama.speaker.safetensors",
   "silence_duration": 1.0,
-  "clean_temp_after_run": false,
-  "uv_project_dir": "C:\\Irodori-TTS"
+  "clean_temp_after_run": true,
+  "uv_project_dir": "C:\\Irodori-TTS",
+  "author_name": "\u6751\u4e0a\u6625\u6a39",
+  "book_title": "\u8857\u3068\u305d\u306e\u4e0d\u78ba\u304b\u306a\u58c1",
+  "genre": "Audiobook",
+  "auto_number_chapters": true,
+  "cover_art_path": "E:\\AUDIOBOOK\\output\\wall.png"
 }
