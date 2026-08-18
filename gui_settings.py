@@ -510,10 +510,17 @@ class SettingsApp(ctk.CTk):
             text_frame.configure(width=fixed_width or 1, height=fixed_height or 44)
             text_frame.pack_propagate(False)
         text_frame.pack(side="left", padx=(0, 14))
+        # When a fixed width is given, wrap title/subtitle text to that width
+        # instead of letting it overflow past the column - this is what
+        # keeps every row's description text from spilling into the
+        # input/switch column on the right.
+        wrap_len = max(fixed_width - 6, 40) if fixed_width else 0
         ctk.CTkLabel(text_frame, text=title, text_color=COLOR_TITLE,
-                     font=ctk.CTkFont(size=14, weight="bold"), anchor="w").pack(anchor="w")
+                     font=ctk.CTkFont(size=14, weight="bold"), anchor="w",
+                     justify="left", wraplength=wrap_len).pack(anchor="w", fill="x")
         ctk.CTkLabel(text_frame, text=subtitle, text_color=COLOR_SUBTITLE,
-                     font=ctk.CTkFont(size=11), anchor="w").pack(anchor="w")
+                     font=ctk.CTkFont(size=11), anchor="w", justify="left",
+                     wraplength=wrap_len).pack(anchor="w", fill="x")
         return text_frame
 
     def _add_path_row(self, parent, glyph, bg_color, title, subtitle, key,
@@ -595,7 +602,7 @@ class SettingsApp(ctk.CTk):
         row = self._row_shell(parent)
         IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
             side="left", padx=(0, 14))
-        self._title_block(row, title, subtitle, fixed_width=220, fixed_height=44)
+        self._title_block(row, title, subtitle, fixed_width=220, fixed_height=56)
 
         entry = ctk.CTkEntry(
             row, textvariable=string_var, placeholder_text=placeholder, height=36,
@@ -625,17 +632,19 @@ class SettingsApp(ctk.CTk):
                          int_var, on_text, off_text, command=None):
         """Same visual pattern as _add_toggle_row (Keep temp files, on the
         Advanced tab): an icon badge, a title/subtitle block, and a switch
-        on the right whose own label text changes between on_text/off_text
-        depending on state. Generalized here so the Metadata tab's two
-        switches (Auto-number chapters, Auto-tag generated files) share the
-        exact same look. `command`, if given, runs after the label updates -
+        whose own label text changes between on_text/off_text depending on
+        state. Generalized here so the Metadata tab's two switches
+        (Auto-number chapters, Auto-tag generated files) share the exact
+        same look. Uses the same fixed-width title column as the text rows
+        above/below it so the switch itself starts at the same left edge as
+        every input box on this tab, rather than floating at the far right
+        of the card. `command`, if given, runs after the label updates -
         used by Auto-tag generated files to enable/disable the Apply button.
         """
         row = self._row_shell(parent)
         IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
             side="left", padx=(0, 14))
-        text_frame = self._title_block(row, title, subtitle)
-        text_frame.pack(side="left", fill="x", expand=True)
+        self._title_block(row, title, subtitle, fixed_width=220, fixed_height=56)
 
         switch = ctk.CTkSwitch(
             row, text=on_text if int_var.get() else off_text,
@@ -644,7 +653,7 @@ class SettingsApp(ctk.CTk):
             switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
             font=ctk.CTkFont(size=12),
             command=lambda: self._on_switch_toggled(switch, int_var, on_text, off_text, command))
-        switch.pack(side="right")
+        switch.pack(side="left")
         return switch
 
     def _on_switch_toggled(self, switch, int_var, on_text, off_text, extra_command):
@@ -659,10 +668,12 @@ class SettingsApp(ctk.CTk):
         which metadata actually landed). OFF -> button is enabled again."""
         if self.auto_tag_var.get():
             self.apply_tags_button.configure(
-                state="disabled", fg_color="#C9C4EA", hover_color="#C9C4EA")
+                state="disabled", fg_color="#D3D3D3", hover_color="#D3D3D3",
+                text_color=COLOR_SUBTITLE)
         else:
             self.apply_tags_button.configure(
-                state="normal", fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER)
+                state="normal", fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+                text_color="white")
 
     def _add_cover_art_row(self, parent):
         row = self._row_shell(parent)
@@ -670,7 +681,7 @@ class SettingsApp(ctk.CTk):
         IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
             side="left", padx=(0, 14))
         self._title_block(row, "Cover Art", "Embedded as artwork in every chapter's MP3",
-                           fixed_width=220, fixed_height=44)
+                           fixed_width=220, fixed_height=56)
 
         entry = ctk.CTkEntry(
             row, textvariable=self.metadata_vars["cover_art_path"],
