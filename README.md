@@ -33,28 +33,8 @@ uv run python -c "import torch; print('GPU Available:', torch.cuda.is_available(
 
 
 <h2>5. Script Workflow Diagram</h2>
-The following diagram visualizes the data path from ingestion to the final output:
-Raw Chapter Text (.txt) <br>
-       │<br>
-       ▼<br>
-[Text Pre-processing & Cleaning] ──> Sequential rules for `」`, `……`, `？`<br>
-       │<br>
-       ▼<br>
-[Sentence Splitting & Chunking] ──> Generates input_000x.txt parts<br>
-       │<br>
-       ▼<br>
-[Irodori-TTS AI Inference via uv] ──> Generates parts_000x.wav (Flow Matching)<br>
-       │<br>
-       ▼<br>
-[FFmpeg Audio Filtering & Stitching] ──> apad filter inserts silence gaps<br>
-       │<br>
-       ▼<br>
-Final Chapter Audiobook (.mp3) ──> Final assembly & Temp Cleanup<br><br>
-
---- LEGEND ---<br>
-.txt : Raw/Cleaned Text<br>
-.wav : Uncompressed Audio Chunks<br>
-.mp3 : Final Compressed Audiobook<br>
+The following diagram visualizes the data path from ingestion to the final output:<br>
+<img src="JP-Audiobook-Generator-Flow-Diagram.png" alt="Script Workflow Diagram" width="600">
 
 <h2>6. User Configuration Guide</h2>
 <b>Settings GUI (Recommended)</b><br>
