@@ -43,7 +43,10 @@ A GUI (gui_settings.py) is now available so you no longer need to hand-edit run_
 2. Pin that shortcut to the taskbar (right-click it → Pin to taskbar).<br>
 3. Click the taskbar icon anytime to open the settings window, change values, and run the program without touching the terminal.<br><br>
 Below is a look at the settings interface:<br>
-<img src="interface_screenshot.png" alt="Settings GUI Screenshot" width="600"><br><br>
+<img src="GUI-General.png" alt="Settings GUI General" width="600"><br>
+<img src="GUI-Metadata.png" alt="Settings GUI Metadata" width="600"><br>
+<img src="GUI-Advanced.png" alt="Settings GUI Advanced" width="600"><br>
+<br>
 Users must configure the absolute paths in the run_audiobook.py script.<br>
 Note on Raw Strings: When defining Windows paths, you must use the r prefix (e.g., r"C:\Path"). This creates a "Raw String," preventing Python from interpreting backslashes as escape characters, a common cause of execution failure on Windows.<br>
 --- Configuration ---<br>
