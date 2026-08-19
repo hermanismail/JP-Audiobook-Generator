@@ -1,10 +1,10 @@
 {
-  "input_folder": "F:\\AUDIOBOOK_CHAPTER\\test_001",
+  "input_folder": "F:\\AUDIOBOOK_CHAPTER\\chapter51_55",
   "output_folder": "F:\\AUDIOBOOK_OUTPUT",
   "temp_dir": "F:\\AUDIOBOOK_TMP",
   "model_path": "C:\\Irodori-TTS\\model.safetensors",
   "speaker_path": "C:\\Irodori-TTS\\seiyuu\\ueshama.speaker.safetensors",
-  "silence_duration": 1.0,
+  "silence_duration": 2.0,
   "clean_temp_after_run": true,
   "uv_project_dir": "C:\\Irodori-TTS",
   "author_name": "\u6751\u4e0a\u6625\u6a39",

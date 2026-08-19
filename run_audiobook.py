@@ -1,9 +1,10 @@
 import os
-import re
 import json
 import subprocess
 import glob
 import shutil
+
+import text_pipeline
 
 # --- Configuration ---
 # Settings are now stored in settings.json (same folder as this script)
@@ -49,12 +50,23 @@ OUTPUT_FOLDER = SETTINGS["output_folder"]
 TEMP_DIR = SETTINGS["temp_dir"]
 MODEL_PATH = SETTINGS["model_path"]
 SPEAKER_PATH = SETTINGS["speaker_path"]
-SILENCE_DURATION = float(SETTINGS["silence_duration"])
+SILENCE_DURATION = float(SETTINGS["silence_duration"])  # base "1x" unit, in seconds
 CLEAN_TEMP_AFTER_RUN = bool(SETTINGS["clean_temp_after_run"])
+
+# Silence multiplier per boundary type - see text-cleaning-logic-spec.md
+# section 5. "sentence" here really means "chunk boundary that isn't also
+# a paragraph or section boundary" (chunks can contain several merged
+# sentences - see text_pipeline.py).
+SILENCE_MULTIPLIER = {
+    "sentence": 1,
+    "paragraph": 2,
+    "section": 3,
+}
 
 # Ensure folders exist
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
+
 
 def clean_temp_dir():
     """Clears all files in the temporary directory."""
@@ -68,94 +80,132 @@ def clean_temp_dir():
         except Exception as e:
             print(f"Failed to delete {file_path}. Reason: {e}")
 
+
+def write_working_files(working_data, chunks, work_dir):
+    """Writes out the sec/par/sen/input working files described in
+    text-cleaning-logic-spec.md, for inspection/debugging. Returns the
+    absolute path of each chunk's input .txt file, keyed by
+    (section, paragraph, chunk)."""
+    os.makedirs(work_dir, exist_ok=True)
+
+    # sec001.txt
+    for sec_idx, section_text in enumerate(working_data["sections"], start=1):
+        with open(os.path.join(work_dir, f"sec{sec_idx:03d}.txt"), "w", encoding="utf-8") as f:
+            f.write(section_text)
+
+    # sec001par001.txt
+    for sec_idx, paragraphs in working_data["paragraphs"].items():
+        for par_idx, para_text in enumerate(paragraphs, start=1):
+            fname = f"sec{sec_idx:03d}par{par_idx:03d}.txt"
+            with open(os.path.join(work_dir, fname), "w", encoding="utf-8") as f:
+                f.write(para_text)
+
+    # sec001par001sen001.txt
+    for (sec_idx, par_idx), units in working_data["sentences"].items():
+        for sen_idx, (sen_text, isolated) in enumerate(units, start=1):
+            fname = f"sec{sec_idx:03d}par{par_idx:03d}sen{sen_idx:03d}.txt"
+            with open(os.path.join(work_dir, fname), "w", encoding="utf-8") as f:
+                f.write(sen_text)
+
+    # sec001par001input001.txt  <- what actually gets sent to TTS
+    input_paths = {}
+    for chunk in chunks:
+        fname = text_pipeline.chunk_filename(chunk)
+        path = os.path.join(work_dir, fname)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(chunk["text"])
+        key = (chunk["section"], chunk["paragraph"], chunk["chunk"])
+        input_paths[key] = path
+
+    return input_paths
+
+
+def get_silence_wav(work_dir):
+    """Generates (once) a single base silence.wav of SILENCE_DURATION
+    seconds. Longer gaps (2x/3x) are produced by repeating this same file
+    multiple times in the ffmpeg concat list, rather than rendering
+    separate longer silence files."""
+    silence_wav_path = os.path.join(work_dir, "silence.wav")
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+        "-t", str(SILENCE_DURATION), silence_wav_path
+    ], capture_output=True)
+    return silence_wav_path
+
+
 def process_chapter(chapter_path):
     chapter_name = os.path.splitext(os.path.basename(chapter_path))
     print(f"\n>>> Processing: {chapter_name[0]}")
-    
-    # Step 1: Read Raw Text
+
+    # Step 1: Read raw text
     with open(chapter_path, "r", encoding="utf-8") as f:
         raw_text = f.read()
 
-    # --- Custom Symbol Cleaning Logic ---
-    # 1. Replace …… with Japanese comma (、)
-    cleaned_text = raw_text.replace("……", "、")
-    
-    # 2. Replace 」 with Japanese comma (、)
-    cleaned_text = cleaned_text.replace("」", "、")
-    
-    # 3. Handle specific overlapping patterns where a quote follows an ellipsis or question mark:
-    # Rule 4: If character after …… is 」, remove the redundant 」 (handled above by replacement, but we can clean up double commas if needed)
-    # Rule 5: When character after ？ 」? (or ？ followed by unnecessary closing bracket), clean up trailing brackets.
-    # Let's target specific trailing garbage patterns like "、」" or "？、" resulting from replacements:
-    cleaned_text = cleaned_text.replace("、、", "、")
-    cleaned_text = re.sub(r"？\s*、", "？", cleaned_text)
+    # Step 2: Run the new text pipeline (section -> paragraph -> sentence
+    # -> merged TTS input chunks, with 「」/（） always isolated as their
+    # own chunk). See text_pipeline.py / text-cleaning-logic-spec.md.
+    chunks, working_data = text_pipeline.build_chunks(raw_text)
 
-    # Retain only words, Japanese characters, spaces, and allowed punctuation (、, 。, ？)
-    cleaned_text = re.sub(r"[^\w\u3040-\u30ff\u4e03-\u9faf、。？\s]", "", cleaned_text)
-    cleaned_text = re.sub(r"\s+", "", cleaned_text)
-    
-    # Step 2: Split into sentences (keeping the period or question mark as sentence boundaries)
-    # Splitting by 。 or ？ while retaining them
-    raw_sentences = re.split(r"([。？])", cleaned_text)
-    sentences = []
-    for i in range(0, len(raw_sentences) - 1, 2):
-        sentence = raw_sentences[i] + raw_sentences[i+1]
-        if sentence.strip():
-            sentences.append(sentence)
-            
-    # Fallback if text doesn't end with standard punctuation
-    if len(raw_sentences) % 2 != 0 and raw_sentences[-1].strip():
-        sentences.append(raw_sentences[-1])
+    if not chunks:
+        print(f"Error: No text chunks produced for {chapter_name[0]} - is the file empty?")
+        return
 
-    print(f"Found {len(sentences)} sentences.")
+    print(f"Found {len(working_data['sections'])} section(s), "
+          f"{sum(len(p) for p in working_data['paragraphs'].values())} paragraph(s), "
+          f"{len(chunks)} TTS input chunk(s).")
 
-    audio_files = []
+    # Step 3: Write out the sec/par/sen/input working files for this
+    # chapter so they can be inspected if something looks off.
+    work_dir = os.path.join(TEMP_DIR, chapter_name[0])
+    input_paths = write_working_files(working_data, chunks, work_dir)
 
-    # Step 3: Generate Audio for each sentence
-    for i, sentence in enumerate(sentences, start=1):
-        txt_filename = os.path.join(TEMP_DIR, f"input_{i:04d}.txt")
-        wav_filename = os.path.join(TEMP_DIR, f"parts_{i:04d}.wav")
-        
-        with open(txt_filename, "w", encoding="utf-8") as out_f:
-            out_f.write(sentence)
-        
-        # Run Irodori-TTS Inference via uv
-        # Note: We use --no-sync to keep the RTX 4060 active
+    # Step 4: Generate audio for each input chunk
+    audio_files = []          # list of wav paths, in order
+    boundary_before_wav = []  # boundary type preceding each wav (None for the first)
+
+    for i, chunk in enumerate(chunks, start=1):
+        key = (chunk["section"], chunk["paragraph"], chunk["chunk"])
+        txt_filename = input_paths[key]
+        wav_filename = os.path.join(
+            work_dir, text_pipeline.chunk_filename(chunk, ext="wav"))
+
         cmd = [
             "uv", "run", "--no-sync", "python", "infer.py",
             "--checkpoint", MODEL_PATH,
             "--ref-embed", SPEAKER_PATH,
-            "--text", sentence,
+            "--text", chunk["text"],
             "--output-wav", wav_filename
         ]
-        
-        print(f" Generating part {i}/{len(sentences)}...")
+
+        print(f" Generating chunk {i}/{len(chunks)} "
+              f"(sec {chunk['section']:03d} par {chunk['paragraph']:03d}, "
+              f"{len(chunk['text'])} chars"
+              f"{', dialogue/aside' if chunk['isolated'] else ''})...")
         subprocess.run(cmd, capture_output=True)
-        
+
         if os.path.exists(wav_filename):
             audio_files.append(wav_filename)
+            boundary_before_wav.append(chunk["boundary"])
 
-    # Step 5: Combine parts into final MP3 with silence gaps using text list demuxer
+    # Step 5: Combine parts into final MP3, inserting silence sized by the
+    # boundary type before each chunk (1x sentence/chunk, 2x paragraph,
+    # 3x section - see text-cleaning-logic-spec.md section 5).
     if not audio_files:
         print(f"Error: No audio parts generated for {chapter_name[0]}")
         return
 
     output_mp3 = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.mp3")
-    
-    # Generate temporary silence file matching SILENCE_DURATION
-    silence_wav_path = os.path.join(TEMP_DIR, "silence.wav")
-    subprocess.run([
-        "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
-        "-t", str(SILENCE_DURATION), silence_wav_path
-    ], capture_output=True)
+    silence_wav_path = get_silence_wav(work_dir)
 
-    # Write concat list file to bypass Windows command-line character length limits (WinError 206)
-    concat_list_path = os.path.join(TEMP_DIR, "concat_list.txt")
+    concat_list_path = os.path.join(work_dir, "concat_list.txt")
     with open(concat_list_path, "w", encoding="utf-8") as f:
         for idx, audio_file in enumerate(audio_files):
+            boundary = boundary_before_wav[idx]
+            if boundary is not None:
+                multiplier = SILENCE_MULTIPLIER.get(boundary, 1)
+                for _ in range(multiplier):
+                    f.write(f"file '{os.path.abspath(silence_wav_path)}'\n")
             f.write(f"file '{os.path.abspath(audio_file)}'\n")
-            if idx < len(audio_files) - 1:
-                f.write(f"file '{os.path.abspath(silence_wav_path)}'\n")
 
     ffmpeg_cmd = [
         "ffmpeg", "-y",
@@ -172,23 +222,25 @@ def process_chapter(chapter_path):
     subprocess.run(ffmpeg_cmd, capture_output=True)
     print(f"Done! Saved to: {output_mp3}")
 
-    # Step 5: Cleanup temporary files for this chapter (unless disabled in settings.json)
+    # Step 6: Cleanup temporary files for this chapter (unless disabled in
+    # settings.json)
     if CLEAN_TEMP_AFTER_RUN:
         print(f"Cleaning up temporary files in {TEMP_DIR}...")
         clean_temp_dir()
     else:
         print(f"Skipping temp cleanup (clean_temp_after_run is disabled). Files remain in {TEMP_DIR}")
 
+
 def main():
     # Find all chapter_*.txt files in E:\AUDIOBOOK\chapter
     chapter_files = sorted(glob.glob(os.path.join(INPUT_FOLDER, "chapter_*.txt")))
-    
+
     if not chapter_files:
         print(f"No files found in {INPUT_FOLDER} matching 'chapter_*.txt'")
         return
 
     print(f"Found {len(chapter_files)} chapters to process.")
-    
+
     for chapter_file in chapter_files:
         process_chapter(chapter_file)
 
@@ -215,6 +267,7 @@ def main():
                 print(tag_result.stderr.strip())
         except Exception as e:
             print(f"Auto-tagging failed to start: {e}")
+
 
 if __name__ == "__main__":
     main()
