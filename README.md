@@ -10,10 +10,10 @@ The Automated Japanese Audiobook Generator is a Python automation pipeline desig
 
 ## 2. Core Functional Features
 
-- **Text Pre-processing:** The pipeline parses raw Japanese text into a structured hierarchy of sections, paragraphs, and sentences, isolating dialogue (`「」`) and parenthetical asides (`（）`) so they always get their own audio chunk and their own silence gap. See [Section 7](#7-detailed-text-cleaning-logic) for the full logic.
-- **Sentence-Level Chunking:** To respect model token limits and prevent prosodic degradation, the script merges sentences into ~100-character chunks (130-character hard limit) using `。`, `？`, `……`, `「」`, and `（）` as boundaries. This keeps intonation natural across long-form content while minimizing the number of TTS calls.
+- **Text Pre-processing:** The pipeline parses raw Japanese text into a structured hierarchy of sections, paragraphs, and sentences. Dialogue (`「」`) and parenthetical asides (`（）`) are no longer isolated as whole, unsplittable spans - instead each bracket edge is a guaranteed silence point, while the content between/around them is chunked by the same character-count rules as ordinary narration. A mid-sentence `──` is also a forced silence point. See [Section 7](#7-detailed-text-cleaning-logic) for the full logic.
+- **Sentence-Level Chunking:** To respect model token limits and prevent prosodic degradation, the script merges sentences into ~100-character chunks (130-character hard limit) using `。`, `？`, `……`, and the forced break points above (`「`, `（`, `」`, `）`, `──`) as boundaries. This keeps intonation natural across long-form content (including long dialogue) while minimizing the number of TTS calls.
 - **AI Speech Synthesis:** The system integrates the Irodori-TTS engine, which utilizes a Flow Matching architecture for better voice quality. Local GPU inference is managed via the `uv` package manager to ensure environment stability.
-- **Automated Audio Stitching:** Using FFmpeg's concat demuxer, the script merges individual chunk waveforms into a final chapter file, inserting tiered silence gaps (1×/2×/3×, scaled by whether the gap is a sentence, paragraph, or section boundary) to simulate natural human pacing.
+- **Automated Audio Stitching:** Using FFmpeg's concat demuxer, the script merges individual chunk waveforms into a final chapter file, inserting tiered silence gaps (1×/2×/3×, scaled by boundary type - sentence, paragraph/chapter start, or section - plus extra gaps around dialogue/asides and `──` pauses) to simulate natural human pacing.
 
 ## 3. System Prerequisites
 
@@ -73,22 +73,31 @@ Below is a look at the settings interface:
 
 ## 7. Detailed Text Cleaning Logic
 
-> **2026-08 rewrite note:** this section previously described a search-and-replace pass that converted `」` and `……` into commas before splitting on `。`/`？`. That approach was replaced with the structured section/paragraph/sentence pipeline below (`text_pipeline.py`), which treats dialogue and parenthetical asides as first-class boundaries instead of substituting them away. This keeps dialogue and asides intact in the output text and gives them a guaranteed silence gap, rather than flattening them into a generic pause.
+> **2026-08 rewrite note:** this section previously described a search-and-replace pass that converted `」` and `……` into commas before splitting on `。`/`？`. That approach was replaced with the structured section/paragraph/sentence pipeline below (`text_pipeline.py`), which treats dialogue and parenthetical asides as first-class boundaries instead of substituting them away.
+>
+> **2026-08 v2 update:** the original rewrite isolated every `「」`/`（）` span as one indivisible chunk, regardless of length. In practice some dialogue lines ran to 200+ characters (this author's writing style leans long on dialogue), producing single TTS calls far past the 130-character hard limit. v2 replaces whole-span isolation with **forced break points**: each bracket edge, and each mid-sentence `──`, guarantees a silence gap at that exact point, but the text on either side is chunked by the normal 100/130-character rules just like narration. This fixes the long-dialogue problem while keeping the original guarantee that dialogue/asides always get a silence gap around them.
 
-The text pipeline (`text_pipeline.py`) runs in four stages: it defines sentence/paragraph/section boundaries, splits the chapter into working files along those boundaries, merges sentences into TTS-sized input chunks, and finally drives silence insertion when the chunk audio is stitched back together.
+The text pipeline (`text_pipeline.py`) runs in four stages: it defines sentence/paragraph/section boundaries and forced break points, splits the chapter into working files along those boundaries, merges sentences into TTS-sized input chunks, and finally drives silence insertion when the chunk audio is stitched back together.
 
 ### 7.1 Definitions
 
-**Sentence** — text found in any of these spans:
-1. Text ending at `。`, `？`, or `……` (ellipsis)
-2. Text between `「` and `」`
-3. Text between `（` and `）`
+**Sentence** — text ending at `。`, `？`, or `……` (ellipsis), same as before.
 
-**Dialogue/aside priority rule:** `「」` and `（）` spans both take priority over the plain `。`/`？`/`……` rule. Whenever either is found, it is cut out as its own sentence, regardless of where it sits relative to a `。`-terminated sentence around it — if a `。`-sentence contains a `「...」` quote or a `（...）` aside inside it, that span is split off as its own separate sentence unit, and the surrounding narration text (before/after) becomes its own separate sentence(s) too. This also means a `「」` or `（）` sentence is never merged with neighboring sentences when building TTS input chunks — each always becomes its own input chunk, so each always gets a silence gap around it.
+**Forced break points** — four situations where the text is always cut, regardless of the 100/130-character merge rules, and a silence gap is guaranteed at that exact point:
+
+| Trigger | Cut position | Gap tag | Silence weight |
+|---|---|---|---|
+| `「` or `（` | Immediately **before** the bracket | `bracket_open` | 1× |
+| `」` or `）` | Immediately **after** the bracket | `bracket_close` | 1× |
+| `──` | At the dash itself (dash is dropped from the TTS text — the model ignores it anyway, so there's no point sending it) | `dash` | 2× |
+
+Unlike the old priority rule, brackets no longer isolate their *entire* contents as one chunk — only the two edges are forced cut points. Everything between an opening and closing bracket (and everything outside brackets) is chunked by the same character-count merge logic described in 7.3, so a long line of dialogue now gets split into several ~100-character chunks internally, just like narration would.
 
 **Paragraph** — a run of sentences that ends with a single CRLF.
 
 **Section** — a run of sentences that ends with more than one CRLF in a row (i.e. a blank line).
+
+**Chapter start** — the very first chunk of every chapter gets its own guaranteed lead-in silence (2×), so consecutive chapters don't run into each other when played back-to-back on a playlist.
 
 **Ordering note:** since paragraph/section boundaries are defined by CRLF patterns, boundary detection happens *before* the CRLF characters are removed — the parser reads the raw file once to mark section/paragraph/sentence boundaries, then strips whitespace/CRLF/IDSP when writing each working file's content.
 
@@ -100,7 +109,7 @@ Working from the original chapter `.txt` file, three passes:
 
 1. **Section split** — find section boundaries (blank-line-separated runs), write each to `sec001.txt`, `sec002.txt`, … up to the last section.
 2. **Paragraph split** — within each section, split on single-CRLF paragraph boundaries, write `sec001par001.txt`, `sec001par002.txt`, … (paragraph numbering resets to `001` at the start of each new section).
-3. **Sentence split** — within each paragraph, split on sentence boundaries, write `sec001par001sen001.txt`, `sec001par001sen002.txt`, … (sentence numbering resets to `001` at the start of each new paragraph).
+3. **Sentence split** — within each paragraph, split on sentence boundaries and forced break points, write `sec001par001sen001.txt`, `sec001par001sen002.txt`, … (sentence numbering resets to `001` at the start of each new paragraph).
 
 All spaces, CRLFs, and IDSP are stripped from the content of every working file produced in this stage.
 
@@ -108,11 +117,11 @@ All spaces, CRLFs, and IDSP are stripped from the content of every working file 
 
 Goal: instead of one audio generation call per sentence, combine sentences so each TTS input lands close to **100 characters**, never exceeding a **130-character hard limit** where avoidable.
 
-Per paragraph, walk its sentence files in order and maintain a running buffer:
+Per paragraph, walk its sentence units in order and maintain a running buffer:
 
-0. **Dialogue/aside check first** — if the next sentence is a `「」` or `（）` span, it does not enter the merge buffer at all; it's written out immediately as its own standalone input chunk (whatever's currently in the buffer, if anything, is closed out first as its own chunk too). This guarantees every dialogue line and parenthetical aside gets its own silence gap on both sides.
+0. **Forced break check first** — if the next unit immediately follows a forced break point (7.1), it never merges backward into whatever's currently buffered; the current buffer (if any) is closed out as its own chunk first, and this unit starts a brand-new buffer. That new buffer still goes through the normal merge rules below for anything added to it afterward — the forced break only guarantees the cut *before* it, not that the resulting chunk stays short.
 1. Otherwise, add the next sentence to the buffer; sum its character count into the running total.
-2. If the running total is **≤ 100 chars**: keep going — pull in the next sentence (repeating the dialogue check each time) and repeat step 1.
+2. If the running total is **≤ 100 chars**: keep going — pull in the next sentence (repeating the forced-break check each time) and repeat step 1.
 3. If the running total lands **between 100 and 130 chars**: stop here, close the chunk, save it, start a new empty buffer for the next chunk.
 4. If the running total **exceeds 130 chars** (hard limit): look inside the sentence that just pushed it over 130 for a `、` (comma) split point — "whichever sentence just caused the overflow," not necessarily literally the second sentence in the buffer.
    - If a `、` is found: recalculate the total using only the portion of that sentence up to the `、`. Close the chunk with that partial sentence included. The remainder (after the `、`) becomes the start of the next chunk's buffer.
@@ -137,15 +146,27 @@ Each `...input00x.txt` goes through the TTS pipeline and produces a matching `..
 
 ### 7.5 Stage 4 — Concatenation & silence insertion
 
-When stitching the `.wav` files back together with FFmpeg, silence is inserted based on the boundary type between consecutive chunks:
+When stitching the `.wav` files back together with FFmpeg, silence is inserted before each chunk based on the tags describing the gap immediately before it (7.1). Every gap always has exactly one **structural** tag (mutually exclusive, highest-scoped one wins) and may additionally carry **content** tags from forced break points (additive with each other, but not with the structural tag):
 
-| Boundary between chunks | Silence inserted |
+| Structural tag | Weight | | Content tag | Weight |
+|---|---|---|---|---|
+| `section` (new section) | 3× | | `bracket_open` | 1× |
+| `paragraph` (new paragraph) | 2× | | `bracket_close` | 1× |
+| `chapter_start` (first chunk of the chapter) | 2× | | `dash` | 2× |
+| `sentence` (default, plain within-paragraph gap) | 1× | | | |
+
+**Combination rule:** `silence units = MAX(structural weight, sum of content weights present at that gap)`. In practice this means a forced break point never gets *less* silence than the structural boundary it happens to coincide with, but content tags don't stack on top of an already-larger structural gap either. Worked examples:
+
+| Situation | Result |
 |---|---|
-| Chunk boundary within the same paragraph | 1× silence unit |
-| Between paragraphs | 2× silence units |
-| Between sections | 3× silence units |
+| Plain sentence gap, no bracket/dash | 1× |
+| Before a `「` mid-paragraph | max(1, 1) = **1×** |
+| `」` immediately followed by `「` (no text between) | max(1, 1+1) = **2×** |
+| A new paragraph that happens to open with `「` | max(2, 1) = **2×** |
+| A `──` cut mid-paragraph | max(1, 2) = **2×** |
+| First chunk of the chapter | max(2, 0) = **2×** |
 
-Silence is only inserted at chunk boundaries, not between individual sentences that got merged inside the same chunk (those are spoken as one continuous TTS render, with pacing left to the TTS module). So in practice: between chunk *N* and chunk *N+1*, use 2× if that boundary is also a paragraph boundary, 3× if it's also a section boundary, otherwise 1×. Since every `「」` and `（）` sentence is always its own standalone chunk, this also means dialogue lines and parenthetical asides automatically get a silence gap before and after them.
+Silence is only inserted at chunk boundaries, not between individual sentences that got merged inside the same chunk (those are spoken as one continuous TTS render, with pacing left to the TTS module).
 
 ## 8. Execution and Deployment
 

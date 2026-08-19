@@ -53,15 +53,12 @@ SPEAKER_PATH = SETTINGS["speaker_path"]
 SILENCE_DURATION = float(SETTINGS["silence_duration"])  # base "1x" unit, in seconds
 CLEAN_TEMP_AFTER_RUN = bool(SETTINGS["clean_temp_after_run"])
 
-# Silence multiplier per boundary type - see text-cleaning-logic-spec.md
-# section 5. "sentence" here really means "chunk boundary that isn't also
-# a paragraph or section boundary" (chunks can contain several merged
-# sentences - see text_pipeline.py).
-SILENCE_MULTIPLIER = {
-    "sentence": 1,
-    "paragraph": 2,
-    "section": 3,
-}
+# Silence-unit count per chunk gap is now computed directly by
+# text_pipeline.py (chunk["silence_units"]), combining structural
+# boundaries (chapter_start=5/section=3/paragraph=2/sentence=1) with any
+# forced-break content tags (bracket edges, "──") via the MAX-based rule
+# in text_pipeline.silence_units_for(). See text-cleaning-logic-spec.md
+# section 5. No separate lookup table needed here anymore.
 
 # Ensure folders exist
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -102,10 +99,10 @@ def write_working_files(working_data, chunks, work_dir):
 
     # sec001par001sen001.txt
     for (sec_idx, par_idx), units in working_data["sentences"].items():
-        for sen_idx, (sen_text, isolated) in enumerate(units, start=1):
+        for sen_idx, unit in enumerate(units, start=1):
             fname = f"sec{sec_idx:03d}par{par_idx:03d}sen{sen_idx:03d}.txt"
             with open(os.path.join(work_dir, fname), "w", encoding="utf-8") as f:
-                f.write(sen_text)
+                f.write(unit["text"])
 
     # sec001par001input001.txt  <- what actually gets sent to TTS
     input_paths = {}
@@ -120,14 +117,37 @@ def write_working_files(working_data, chunks, work_dir):
     return input_paths
 
 
-def get_silence_wav(work_dir):
+def probe_sample_rate(wav_path, default=48000):
+    """Reads the actual sample rate of a generated TTS wav via ffprobe, so
+    silence.wav can be generated to match it exactly. A mismatch here (the
+    ffmpeg concat demuxer expects every segment to share the same sample
+    rate/channels/format) is what caused the 2026-08 "weird sound" bug -
+    silence.wav was hardcoded to 24kHz while Irodori-TTS actually outputs
+    48kHz, so the concat demuxer misread the timing across the join and
+    produced pitch/speed-distorted audio. Falls back to `default` if
+    ffprobe fails or the wav can't be read for any reason."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=sample_rate",
+             "-of", "default=noprint_wrappers=1:nokey=1", wav_path],
+            capture_output=True, text=True,
+        )
+        return int(result.stdout.strip())
+    except (ValueError, OSError):
+        return default
+
+
+def get_silence_wav(work_dir, sample_rate):
     """Generates (once) a single base silence.wav of SILENCE_DURATION
-    seconds. Longer gaps (2x/3x) are produced by repeating this same file
-    multiple times in the ffmpeg concat list, rather than rendering
-    separate longer silence files."""
+    seconds, at the given sample_rate - this MUST match the sample rate of
+    the actual generated TTS wavs (see probe_sample_rate()) or the ffmpeg
+    concat demuxer will distort the stitched audio. Longer gaps (2x/3x/5x)
+    are produced by repeating this same file multiple times in the ffmpeg
+    concat list, rather than rendering separate longer silence files."""
     silence_wav_path = os.path.join(work_dir, "silence.wav")
     subprocess.run([
-        "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+        "ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=mono",
         "-t", str(SILENCE_DURATION), silence_wav_path
     ], capture_output=True)
     return silence_wav_path
@@ -141,9 +161,10 @@ def process_chapter(chapter_path):
     with open(chapter_path, "r", encoding="utf-8") as f:
         raw_text = f.read()
 
-    # Step 2: Run the new text pipeline (section -> paragraph -> sentence
-    # -> merged TTS input chunks, with 「」/（） always isolated as their
-    # own chunk). See text_pipeline.py / text-cleaning-logic-spec.md.
+    # Step 2: Run the text pipeline (section -> paragraph -> sentence ->
+    # merged TTS input chunks, with 「」/（） edges and "──" as forced
+    # break points rather than whole-span isolation). See text_pipeline.py
+    # / text-cleaning-logic-spec.md.
     chunks, working_data = text_pipeline.build_chunks(raw_text)
 
     if not chunks:
@@ -160,8 +181,8 @@ def process_chapter(chapter_path):
     input_paths = write_working_files(working_data, chunks, work_dir)
 
     # Step 4: Generate audio for each input chunk
-    audio_files = []          # list of wav paths, in order
-    boundary_before_wav = []  # boundary type preceding each wav (None for the first)
+    audio_files = []            # list of wav paths, in order
+    silence_units_before_wav = []  # silence-unit count preceding each wav
 
     for i, chunk in enumerate(chunks, start=1):
         key = (chunk["section"], chunk["paragraph"], chunk["chunk"])
@@ -179,32 +200,34 @@ def process_chapter(chapter_path):
 
         print(f" Generating chunk {i}/{len(chunks)} "
               f"(sec {chunk['section']:03d} par {chunk['paragraph']:03d}, "
-              f"{len(chunk['text'])} chars"
-              f"{', dialogue/aside' if chunk['isolated'] else ''})...")
+              f"{len(chunk['text'])} chars, "
+              f"{chunk['silence_units']}x silence before "
+              f"[{','.join(chunk['boundary_tags'])}])...")
         subprocess.run(cmd, capture_output=True)
 
         if os.path.exists(wav_filename):
             audio_files.append(wav_filename)
-            boundary_before_wav.append(chunk["boundary"])
+            silence_units_before_wav.append(chunk["silence_units"])
 
-    # Step 5: Combine parts into final MP3, inserting silence sized by the
-    # boundary type before each chunk (1x sentence/chunk, 2x paragraph,
-    # 3x section - see text-cleaning-logic-spec.md section 5).
+    # Step 5: Combine parts into final MP3, inserting silence sized by
+    # chunk["silence_units"] before each chunk (1x sentence, 2x paragraph
+    # or chapter start, 3x section, plus content tags for bracket edges/
+    # "──" - see text-cleaning-logic-spec.md section 5).
     if not audio_files:
         print(f"Error: No audio parts generated for {chapter_name[0]}")
         return
 
     output_mp3 = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.mp3")
-    silence_wav_path = get_silence_wav(work_dir)
+    tts_sample_rate = probe_sample_rate(audio_files[0])
+    print(f"Detected TTS output sample rate: {tts_sample_rate}Hz - generating matching silence.wav...")
+    silence_wav_path = get_silence_wav(work_dir, tts_sample_rate)
 
     concat_list_path = os.path.join(work_dir, "concat_list.txt")
     with open(concat_list_path, "w", encoding="utf-8") as f:
         for idx, audio_file in enumerate(audio_files):
-            boundary = boundary_before_wav[idx]
-            if boundary is not None:
-                multiplier = SILENCE_MULTIPLIER.get(boundary, 1)
-                for _ in range(multiplier):
-                    f.write(f"file '{os.path.abspath(silence_wav_path)}'\n")
+            units_count = silence_units_before_wav[idx]
+            for _ in range(units_count):
+                f.write(f"file '{os.path.abspath(silence_wav_path)}'\n")
             f.write(f"file '{os.path.abspath(audio_file)}'\n")
 
     ffmpeg_cmd = [
