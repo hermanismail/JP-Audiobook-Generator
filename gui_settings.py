@@ -33,10 +33,21 @@ Layout notes (2026-08 tab restructure):
 import os
 import sys
 import json
+import glob
+import queue
+import re
+import threading
 import subprocess
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
+
+from progress_window import ProgressWindow, default_log_path
+from ui_common import (
+    COLOR_BG, COLOR_CARD, COLOR_CARD_BORDER, COLOR_TITLE, COLOR_SUBTITLE,
+    COLOR_ENTRY_BORDER, COLOR_ENTRY_TEXT, COLOR_ACCENT, COLOR_ACCENT_HOVER,
+    COLOR_TOGGLE_ON, COLOR_BTN_NEUTRAL_BORDER, COLOR_BTN_NEUTRAL_TEXT, IconBadge,
+)
 
 # mp3_metadata (mutagen-based tagging) is imported lazily inside
 # on_apply_metadata_tags() rather than here, so a missing `mutagen`
@@ -73,19 +84,10 @@ DEFAULT_SETTINGS = {
 # ---------------------------------------------------------------------------
 # Design tokens (matches Documentation/mockup_GUI_20260817.png)
 # ---------------------------------------------------------------------------
-
-COLOR_BG = "#F7F7FA"
-COLOR_CARD = "#FFFFFF"
-COLOR_CARD_BORDER = "#E7E7EC"
-COLOR_TITLE = "#17171C"
-COLOR_SUBTITLE = "#8B8B94"
-COLOR_ENTRY_BORDER = "#E2E2E8"
-COLOR_ENTRY_TEXT = "#3A3A42"
-COLOR_ACCENT = "#6C5DD3"
-COLOR_ACCENT_HOVER = "#5B4FC0"
-COLOR_TOGGLE_ON = "#34C773"
-COLOR_BTN_NEUTRAL_BORDER = "#D8D8DE"
-COLOR_BTN_NEUTRAL_TEXT = "#3A3A42"
+# The core palette (COLOR_BG, COLOR_CARD, COLOR_TITLE, etc.) and IconBadge
+# now live in ui_common.py, shared with progress_window.py - see that
+# module's docstring for why (avoiding a circular import). Only the tokens
+# specific to this file's sidebar remain here.
 
 # Sidebar nav specific tokens
 COLOR_SIDEBAR = "#FFFFFF"
@@ -141,20 +143,40 @@ def save_settings(data):
 
 
 # ---------------------------------------------------------------------------
-# Small reusable widgets
+# Live progress wiring for Save & Run (step 2 of progress_window_spec.md)
 # ---------------------------------------------------------------------------
 
-class IconBadge(ctk.CTkFrame):
-    """Rounded colored square with a centered glyph/emoji or short text."""
+# Matches run_audiobook.py's own print() formatting exactly - see
+# process_chapter() in run_audiobook.py. If that wording ever changes,
+# these need updating too; a more robust alternative (a dedicated
+# machine-parseable `PROGRESS n/total` line) is spec'd as step 3 but not
+# implemented yet - these regexes are what step 2 has to work with in the
+# meantime, and already give real per-chunk progress for free.
+_PROCESSING_LINE_RE = re.compile(r">>> Processing: (\S+)")
+_CHUNK_LINE_RE = re.compile(r"Generating chunk (\d+)/(\d+)")
 
-    def __init__(self, parent, glyph, bg_color, text_color="white",
-                 size=44, font_size=18, corner_radius=12, **kwargs):
-        super().__init__(parent, width=size, height=size, corner_radius=corner_radius,
-                          fg_color=bg_color, **kwargs)
-        self.pack_propagate(False)
-        ctk.CTkLabel(self, text=glyph, text_color=text_color,
-                     font=ctk.CTkFont(size=font_size, weight="bold")).place(
-            relx=0.5, rely=0.5, anchor="center")
+
+def _read_process_output(process, log_queue):
+    """Runs in a background thread (started from on_save_and_run): reads
+    run_audiobook.py's stdout line by line and hands each one to the main
+    thread via log_queue, since Tkinter widgets are only safe to touch
+    from the main thread. Puts None as a sentinel once the pipe closes -
+    the process has finished writing output, though it may not have
+    fully exited yet (see SettingsApp._finish_run, which waits on the
+    actual return code before deciding completed vs. failed)."""
+    try:
+        for line in process.stdout:
+            log_queue.put(line.rstrip("\n"))
+    except Exception as e:
+        log_queue.put(f"[GUI] Lost connection to run_audiobook.py's output: {e}")
+    finally:
+        log_queue.put(None)
+
+
+# ---------------------------------------------------------------------------
+# Small reusable widgets
+# ---------------------------------------------------------------------------
+# IconBadge moved to ui_common.py (shared with progress_window.py).
 
 
 class NumberSpinner(ctk.CTkFrame):
@@ -257,6 +279,18 @@ class SettingsApp(ctk.CTk):
         self.pages = {}
         self.nav_buttons = {}
         self.current_page = "general"
+
+        # State for whatever Save & Run has in flight, if anything - see
+        # on_save_and_run/_drain_run_queue/_finish_run/_cancel_run. All
+        # reset fresh at the top of on_save_and_run for each new run.
+        self._run_process = None
+        self._run_queue = None
+        self._run_window = None
+        self._run_cancelled = False
+        self._run_total_chapters = 0
+        self._run_current_chapter = 0
+        self._run_current_chapter_name = ""
+        self._run_completed_chapters = 0
 
         self._build_ui()
 
@@ -794,6 +828,13 @@ class SettingsApp(ctk.CTk):
         messagebox.showinfo("Saved", "Settings saved to settings.json")
 
     def on_save_and_run(self):
+        if self._run_window is not None and self._run_window.winfo_exists():
+            messagebox.showinfo(
+                "Already Running",
+                "A generation run is already in progress. Close its progress "
+                "window (or wait for it to finish) before starting another.")
+            return
+
         data = self._collect_and_validate()
         if data is None:
             return
@@ -811,26 +852,161 @@ class SettingsApp(ctk.CTk):
                 "Set the correct 'uv Project Folder' (where you normally run 'uv run ...' from).")
             return
 
+        # Count chapters up front the same way run_audiobook.py itself will
+        # (chapter_*.txt in input_folder, sorted), so the progress window
+        # can show "Chapter 1 of N" from its very first line rather than
+        # waiting to see what the subprocess reports.
+        chapter_files = sorted(glob.glob(os.path.join(data["input_folder"], "chapter_*.txt")))
+        total_chapters = len(chapter_files)
+        if total_chapters == 0:
+            messagebox.showerror(
+                "No Chapters Found",
+                f"No 'chapter_*.txt' files found in:\n{data['input_folder']}\n\n"
+                "Add chapter files there before running.")
+            return
+
         try:
-            # uv (and the venv it manages) lives in uv_project_dir, so we must run
-            # `uv` from there, passing the absolute path of run_audiobook.py as the
-            # script to execute. This mirrors:
-            #   cd <uv_project_dir>
-            #   uv run --no-sync python "C:\JP-Audiobook-Generator\run_audiobook.py"
-            subprocess.Popen(
-                ["uv", "run", "--no-sync", "python", RUN_SCRIPT_PATH],
+            process = subprocess.Popen(
+                # "-u": unbuffered stdout/stderr. Without it, Python block-
+                # buffers when writing to a pipe instead of a terminal, and
+                # the log panel would only update in big, laggy chunks
+                # rather than live, line by line.
+                ["uv", "run", "--no-sync", "python", "-u", RUN_SCRIPT_PATH],
                 cwd=uv_project_dir,
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            messagebox.showinfo(
-                "Started", "run_audiobook.py has been started in a new console window.")
         except FileNotFoundError:
             messagebox.showerror(
                 "uv not found",
                 "Could not launch via 'uv'. Make sure 'uv' is installed and on PATH,\n"
                 "or run run_audiobook.py manually from your existing environment.")
+            return
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start run_audiobook.py:\n{e}")
+            return
+
+        self._run_process = process
+        self._run_queue = queue.Queue()
+        self._run_cancelled = False
+        self._run_total_chapters = total_chapters
+        self._run_current_chapter = 0
+        self._run_current_chapter_name = ""
+        self._run_completed_chapters = 0
+
+        log_path = default_log_path(data["temp_dir"])
+        self._run_window = ProgressWindow(
+            self, total_chapters=total_chapters, log_file_path=log_path,
+            on_cancel=self._cancel_run,
+            on_open_output=lambda: self._open_output_folder(data["output_folder"]),
+        )
+
+        threading.Thread(
+            target=_read_process_output, args=(process, self._run_queue), daemon=True,
+        ).start()
+        self.after(100, self._drain_run_queue)
+
+    def _drain_run_queue(self):
+        """Polls self._run_queue on the main thread (the only thread
+        allowed to touch Tk widgets) and feeds each line to the progress
+        window. Reschedules itself via self.after() as long as the window
+        is still open - this IS the "queue-draining self.after() loop"
+        progress_window.py's docstring describes step 2 as needing."""
+        if self._run_window is None or not self._run_window.winfo_exists():
+            return
+        try:
+            while True:
+                line = self._run_queue.get_nowait()
+                if line is None:
+                    self._finish_run()
+                    return
+                self._handle_run_log_line(line)
+        except queue.Empty:
+            pass
+        self.after(100, self._drain_run_queue)
+
+    def _handle_run_log_line(self, line):
+        stripped = line.strip()
+        if not stripped:
+            # process_chapter() prints a leading "\n" before ">>> Processing:",
+            # which arrives here as a separate blank line - skip it rather
+            # than showing an empty line in the log.
+            return
+
+        lower = stripped.lower()
+        if lower.startswith("error") or "failed" in lower:
+            tag = "error"
+        elif "completed successfully" in lower or stripped.startswith("Done! Saved to:"):
+            tag = "success"
+        elif stripped.startswith(">>> Processing:"):
+            tag = "processing"
+        else:
+            tag = "text"
+        self._run_window.append_log(stripped, tag=tag)
+
+        processing_match = _PROCESSING_LINE_RE.match(stripped)
+        if processing_match:
+            self._run_current_chapter += 1
+            self._run_current_chapter_name = processing_match.group(1)
+            self._run_window.set_chapter_progress(
+                self._run_current_chapter, self._run_total_chapters,
+                f"Processing: {self._run_current_chapter_name}", percent=0)
+            self._run_window.set_stats(in_progress=1)
+            return
+
+        chunk_match = _CHUNK_LINE_RE.search(stripped)
+        if chunk_match and self._run_current_chapter:
+            done, total = int(chunk_match.group(1)), int(chunk_match.group(2))
+            percent = (done / total * 100) if total else 0
+            self._run_window.set_chapter_progress(
+                self._run_current_chapter, self._run_total_chapters,
+                f"Processing: {self._run_current_chapter_name}", percent=percent)
+            return
+
+        if stripped.startswith("Done! Saved to:"):
+            self._run_completed_chapters += 1
+            self._run_window.set_stats(completed=self._run_completed_chapters)
+
+    def _finish_run(self):
+        """Called once run_audiobook.py's stdout has closed. Waits on the
+        actual exit code rather than assuming success just because the
+        process stopped printing - auto-tagging (mp3_metadata.py) runs
+        after the "all chapters completed" line and could itself fail."""
+        returncode = self._run_process.wait()
+        if self._run_window is None or not self._run_window.winfo_exists():
+            return
+        if self._run_cancelled:
+            return  # _cancel_run already set state to "cancelled" - leave it
+        if returncode == 0:
+            self._run_window.set_state("completed")
+        else:
+            self._run_window.append_log(
+                f"run_audiobook.py exited with code {returncode}.", tag="error")
+            self._run_window.set_state("failed")
+
+    def _cancel_run(self):
+        self._run_cancelled = True
+        try:
+            # terminate()/kill() on Windows only stops the immediate `uv`
+            # process, not the infer.py/ffmpeg children it spawns
+            # underneath - taskkill /T recursively kills the whole process
+            # tree instead, so TTS inference or ffmpeg don't keep running
+            # as orphans after Cancel is clicked.
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(self._run_process.pid)],
+                capture_output=True)
+        except Exception as e:
+            if self._run_window and self._run_window.winfo_exists():
+                self._run_window.append_log(f"Failed to stop process: {e}", tag="error")
+        if self._run_window and self._run_window.winfo_exists():
+            self._run_window.set_state("cancelled")
+
+    def _open_output_folder(self, output_folder):
+        try:
+            os.startfile(output_folder)
+        except Exception as e:
+            messagebox.showerror("Couldn't Open Folder", f"{output_folder}\n\n{e}")
 
     def on_apply_metadata_tags(self):
         data = self._collect_and_validate()
@@ -911,5 +1087,16 @@ class SettingsApp(ctk.CTk):
 
 
 if __name__ == "__main__":
+    # Must happen before the first CTk window is created in this process
+    # (SettingsApp's root, below) - see progress_window.py's __main__ for
+    # why: window geometry is always literal pixels but CTk auto-scales
+    # widget sizes to display DPI by default, and the two disagreeing is
+    # what squished ProgressWindow's layout during testing. Pinning both
+    # here too keeps ProgressWindow consistent once it's opened as a real
+    # child Toplevel of this already-running app, not just in its own
+    # standalone demo.
+    ctk.set_widget_scaling(1.0)
+    ctk.set_window_scaling(1.0)
+
     app = SettingsApp()
     app.mainloop()
