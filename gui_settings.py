@@ -978,6 +978,11 @@ class SettingsApp(ctk.CTk):
             return
         if self._run_cancelled:
             return  # _cancel_run already set state to "cancelled" - leave it
+        # in_progress was only ever set to 1 (each time a chapter started,
+        # in _handle_run_log_line) - nothing else zeroed it back out once
+        # the last chapter actually finished, so it stayed stuck at 1
+        # after "Completed!".
+        self._run_window.set_stats(in_progress=0)
         if returncode == 0:
             self._run_window.set_state("completed")
         else:
@@ -1000,6 +1005,7 @@ class SettingsApp(ctk.CTk):
             if self._run_window and self._run_window.winfo_exists():
                 self._run_window.append_log(f"Failed to stop process: {e}", tag="error")
         if self._run_window and self._run_window.winfo_exists():
+            self._run_window.set_stats(in_progress=0)  # same reset as _finish_run above
             self._run_window.set_state("cancelled")
 
     def _open_output_folder(self, output_folder):

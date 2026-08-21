@@ -1,6 +1,6 @@
 {
-  "input_folder": "F:\\AUDIOBOOK_CHAPTER\\test_003",
-  "output_folder": "F:\\AUDIOBOOK_OUTPUT\\test003",
+  "input_folder": "F:\\AUDIOBOOK_CHAPTER\\sputnik",
+  "output_folder": "F:\\AUDIOBOOK_OUTPUT\\sputnik",
   "temp_dir": "F:\\AUDIOBOOK_TMP",
   "model_path": "C:\\Irodori-TTS\\model.safetensors",
   "speaker_path": "C:\\Irodori-TTS\\seiyuu\\ueshama.speaker.safetensors",
@@ -8,9 +8,9 @@
   "clean_temp_after_run": true,
   "uv_project_dir": "C:\\Irodori-TTS",
   "author_name": "\u6751\u4e0a\u6625\u6a39",
-  "book_title": "\u8857\u3068\u305d\u306e\u4e0d\u78ba\u304b\u306a\u58c1",
+  "book_title": "\u30b9\u30d7\u30fc\u30c8\u30cb\u30af\u306e\u604b\u4eba",
   "genre": "Audiobook",
   "auto_number_chapters": true,
-  "cover_art_path": "E:\\AUDIOBOOK\\output\\wall.png",
+  "cover_art_path": "F:\\AUDIOBOOK_OUTPUT\\sputnik\\cover.jpg",
   "auto_tag_generated_files": true
 }
