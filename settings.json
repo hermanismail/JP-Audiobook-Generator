@@ -1,6 +1,6 @@
 {
-  "input_folder": "F:\\AUDIOBOOK_CHAPTER\\after-dark",
-  "output_folder": "F:\\AUDIOBOOK_OUTPUT\\after-dark",
+  "input_folder": "F:\\AUDIOBOOK_CHAPTER\\test-20260826",
+  "output_folder": "F:\\AUDIOBOOK_OUTPUT\\test-20260826",
   "temp_dir": "E:\\after-dark",
   "model_path": "C:\\Irodori-TTS\\model.safetensors",
   "speaker_path": "C:\\Irodori-TTS\\seiyuu\\ueshama.speaker.safetensors",

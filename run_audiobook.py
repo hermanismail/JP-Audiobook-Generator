@@ -231,6 +231,28 @@ def channel_layout_for(channels):
     return {1: "mono", 2: "stereo"}.get(channels, f"{channels}c")
 
 
+def get_audio_duration(path):
+    """Returns the duration of an audio file in seconds via ffprobe, or 0.0
+    if it can't be determined (missing file, ffprobe failure, etc).
+
+    Used only to build each chapter's sync.json (chunk start/end offsets
+    for the Android player - see android-player-phase0-spec.md). Reads the
+    duration of the actual rendered file rather than trusting the
+    requested/configured value, so timestamps match what's really in the
+    stitched MP3 (matters most for the silence wavs, whose real duration
+    can differ very slightly from the `-t` value passed to ffmpeg)."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True,
+        )
+        return float(result.stdout.strip())
+    except (ValueError, OSError):
+        return 0.0
+
+
 def get_silence_wavs(audio_format):
     """Renders the three named silence wavs - silence_sentence.wav,
     silence_paragraph.wav and silence_section.wav - into SILENCE_DIR, one
@@ -294,6 +316,42 @@ def get_silence_wavs(audio_format):
     return _SILENCE_WAVS
 
 
+def build_sync_data(audio_files, sync_chunk_texts, silence_kind_before_wav, silence_wavs):
+    """Builds the chunk timing list for a chapter's sync.json (consumed by
+    the Android player app - see android-player-phase0-spec.md section B).
+
+    Mirrors concat_list.txt's exact ordering: one silence file then one
+    chunk audio file, per chunk. Walking that same sequence and summing
+    ffprobe'd durations as we go gives each chunk's [start, end) window in
+    the final stitched MP3 for free, with no separate alignment pass.
+    Silence-wav durations are probed once per kind and reused (the wavs
+    themselves are already shared/cached the same way by get_silence_wavs)."""
+    cumulative = 0.0
+    silence_durations = {}
+    entries = []
+
+    for idx, audio_file in enumerate(audio_files):
+        kind = silence_kind_before_wav[idx]
+        if kind not in silence_durations:
+            silence_durations[kind] = get_audio_duration(silence_wavs[kind])
+        cumulative += silence_durations[kind]
+
+        chunk_duration = get_audio_duration(audio_file)
+        start = cumulative
+        end = cumulative + chunk_duration
+
+        entries.append({
+            "index": idx,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": sync_chunk_texts[idx],
+        })
+
+        cumulative = end
+
+    return {"version": 1, "chunks": entries}
+
+
 def process_chapter(chapter_path):
     chapter_name = os.path.splitext(os.path.basename(chapter_path))
     print(f"\n>>> Processing: {chapter_name[0]}")
@@ -324,6 +382,8 @@ def process_chapter(chapter_path):
     # Step 4: Generate audio for each input chunk
     audio_files = []          # list of wav paths, in order
     silence_kind_before_wav = []  # which silence wav precedes each entry
+    sync_chunk_texts = []     # chunk["text"], parallel to audio_files - only
+                               # used to build sync.json (see build_sync_data)
 
     for i, chunk in enumerate(chunks, start=1):
         key = (chunk["section"], chunk["paragraph"], chunk["chunk"])
@@ -349,6 +409,7 @@ def process_chapter(chapter_path):
         if os.path.exists(wav_filename):
             audio_files.append(wav_filename)
             silence_kind_before_wav.append(chunk["silence_kind"])
+            sync_chunk_texts.append(chunk["text"])
 
     # Step 5: Combine parts into final MP3, inserting exactly one silence
     # file before each chunk - silence_sentence.wav, silence_paragraph.wav
@@ -396,6 +457,17 @@ def process_chapter(chapter_path):
     print(f"Stitching {chapter_name[0]} into final MP3...")
     subprocess.run(ffmpeg_cmd, capture_output=True)
     print(f"Done! Saved to: {output_mp3}")
+
+    # Step 5b: Build and write sync.json - chunk start/end offsets (in
+    # seconds) into the just-stitched MP3, for the Android player app (see
+    # android-player-phase0-spec.md). MUST run before Step 6's cleanup:
+    # build_sync_data() needs ffprobe access to the individual per-chunk
+    # wav files, which clean_temp_dir() deletes right afterwards.
+    sync_data = build_sync_data(audio_files, sync_chunk_texts, silence_kind_before_wav, silence_wavs)
+    sync_path = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.sync.json")
+    with open(sync_path, "w", encoding="utf-8") as f:
+        json.dump(sync_data, f, ensure_ascii=False, indent=2)
+    print(f"Sync data saved to: {sync_path}")
 
     # Step 6: Cleanup temporary files for this chapter (unless disabled in
     # settings.json)
