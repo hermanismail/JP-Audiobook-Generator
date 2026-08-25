@@ -46,7 +46,11 @@ Pipeline stages implemented here (see the spec doc for full rationale):
                                 below - this is exactly what
                                 run_audiobook.py uses to size the silence
                                 inserted before each chunk (including x2
-                                before the very first chunk of a chapter).
+                                before the very first chunk of a chapter)
+                              - "silence_kind": that count bucketed into
+                                "sentence"/"paragraph"/"section", naming
+                                which pre-rendered silence wav goes into
+                                the concat list for that gap
 
 Working-file naming convention (written by run_audiobook.py, not this
 module - this module only computes text + structure):
@@ -97,6 +101,39 @@ def silence_units_for(gap_tags):
         elif tag in CONTENT_WEIGHTS:
             content_sum += CONTENT_WEIGHTS[tag]
     return max(structural, content_sum)
+
+
+# --- Silence kinds -------------------------------------------------------
+# As of 2026-08 run_audiobook.py no longer renders long gaps by repeating a
+# single 1x silence.wav (the old "x2 / x3" trick). Instead it renders three
+# distinct silence files up front - silence_sentence.wav,
+# silence_paragraph.wav and silence_section.wav - each with its own
+# user-configurable duration set on the GUI's Advanced page, and the
+# concat list references the right one by name exactly once per gap.
+#
+# The unit-count rules above are unchanged; this just buckets the resolved
+# count into one of the three named kinds:
+#     1  -> "sentence"
+#     2  -> "paragraph"
+#     3+ -> "section"
+# So a "」" immediately followed by "「" (2x) uses the paragraph silence,
+# and a "──" cut (2x on its own, more when it lands on a bracket edge)
+# uses paragraph or section silence accordingly.
+SILENCE_KINDS = ("sentence", "paragraph", "section")
+
+
+def silence_kind_for_units(units):
+    """Bucket a resolved silence-unit count into one of SILENCE_KINDS."""
+    if units <= 1:
+        return "sentence"
+    if units == 2:
+        return "paragraph"
+    return "section"
+
+
+def silence_kind_for(gap_tags):
+    """Convenience: tag list -> silence kind name, in one step."""
+    return silence_kind_for_units(silence_units_for(gap_tags))
 
 
 def strip_whitespace(text):
@@ -346,6 +383,11 @@ def build_chunks(raw_text):
                                       # gap (see silence_units_for()) -
                                       # always >= 1, including x2 for the
                                       # very first chunk of the chapter
+          "silence_kind": str,       # "sentence" / "paragraph" / "section"
+                                      # - which of the three pre-rendered
+                                      # silence wavs run_audiobook.py drops
+                                      # into the concat list for this gap
+                                      # (see silence_kind_for_units())
         }
     plus the raw section/paragraph/sentence structure (needed by
     run_audiobook.py to also write out the sec/par/sen working files for
@@ -397,6 +439,7 @@ def build_chunks(raw_text):
                     "text": clean_text,
                     "boundary_tags": boundary_tags,
                     "silence_units": silence_units_for(boundary_tags),
+                    "silence_kind": silence_kind_for(boundary_tags),
                 })
 
                 prev_section = sec_idx
@@ -432,5 +475,6 @@ if __name__ == "__main__":
     )
     chunks, _ = build_chunks(sample)
     for c in chunks:
-        print(f"{chunk_filename(c)}  {c['silence_units']}x [{','.join(c['boundary_tags'])}]  "
+        print(f"{chunk_filename(c)}  {c['silence_units']}x -> silence_{c['silence_kind']}.wav "
+              f"[{','.join(c['boundary_tags'])}]  "
               f"({len(c['text'])} chars)  {c['text']}")

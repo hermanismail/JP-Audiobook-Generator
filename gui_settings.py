@@ -20,7 +20,8 @@ Layout notes (2026-08 tab restructure):
     when you switch tabs.
 
     - General page  = path/model settings (previously the only page).
-    - Advanced page = Silence Duration + Keep Temp Files.
+    - Advanced page = Sentence/Paragraph/Section Silence Duration
+      + Keep Temp Files.
     - Metadata page = Author / Book Title / Genre / auto chapter
       numbering / cover art, all persisted to settings.json. "Apply Tags
       to Output MP3s" (mp3_metadata.py, using mutagen) writes the actual
@@ -70,7 +71,9 @@ DEFAULT_SETTINGS = {
     "temp_dir": r"D:\AUDIOBOOK_TMP",
     "model_path": r"C:\Irodori-TTS\model.safetensors",
     "speaker_path": r"C:\Irodori-TTS\seiyuu\ueshama.speaker.safetensors",
-    "silence_duration": 1.0,
+    "silence_duration_sentence": 1.0,
+    "silence_duration_paragraph": 1.2,
+    "silence_duration_section": 1.5,
     "clean_temp_after_run": True,
     "uv_project_dir": r"C:\Irodori-TTS",
     "author_name": "",
@@ -132,9 +135,43 @@ def load_settings():
             loaded = json.load(f)
     except (json.JSONDecodeError, OSError):
         return dict(DEFAULT_SETTINGS)
+    # Migrate BEFORE merging in the defaults - see the matching comment in
+    # run_audiobook.load_settings() for why the order matters.
+    loaded = migrate_silence_settings(loaded)
+
     merged = dict(DEFAULT_SETTINGS)
     merged.update(loaded)
     return merged
+
+
+def migrate_silence_settings(settings):
+    """Backwards compatibility for settings.json files written before the
+    per-kind silence durations existed. Kept deliberately identical to
+    run_audiobook.migrate_silence_settings() - if one changes, change both.
+
+    Older versions stored a single "silence_duration" (the 1x base unit)
+    and produced longer gaps by repeating silence.wav 2x/3x in the concat
+    list. The legacy value becomes the sentence duration, with paragraph
+    and section derived as 2x and 3x it, so an upgraded config sounds
+    exactly like it did before the person tunes anything."""
+    legacy = settings.pop("silence_duration", None)
+    if legacy is None:
+        return settings
+
+    try:
+        legacy = float(legacy)
+    except (TypeError, ValueError):
+        return settings
+
+    # round(): 0.8 * 3 is 2.4000000000000004 in binary floating point, and
+    # that full value would end up rendered verbatim in the GUI's spinner.
+    if "silence_duration_sentence" not in settings:
+        settings["silence_duration_sentence"] = round(legacy, 3)
+    if "silence_duration_paragraph" not in settings:
+        settings["silence_duration_paragraph"] = round(legacy * 2, 3)
+    if "silence_duration_section" not in settings:
+        settings["silence_duration_section"] = round(legacy * 3, 3)
+    return settings
 
 
 def save_settings(data):
@@ -258,7 +295,12 @@ class SettingsApp(ctk.CTk):
             "temp_dir": ctk.StringVar(value=self.settings["temp_dir"]),
             "model_path": ctk.StringVar(value=self.settings["model_path"]),
             "speaker_path": ctk.StringVar(value=self.settings["speaker_path"]),
-            "silence_duration": ctk.StringVar(value=str(self.settings["silence_duration"])),
+            "silence_duration_sentence": ctk.StringVar(
+                value=str(self.settings["silence_duration_sentence"])),
+            "silence_duration_paragraph": ctk.StringVar(
+                value=str(self.settings["silence_duration_paragraph"])),
+            "silence_duration_section": ctk.StringVar(
+                value=str(self.settings["silence_duration_section"])),
             "uv_project_dir": ctk.StringVar(value=self.settings["uv_project_dir"]),
         }
 
@@ -472,7 +514,18 @@ class SettingsApp(ctk.CTk):
                                    border_width=1, border_color=COLOR_CARD_BORDER)
         prefs_card.pack(fill="x")
 
-        self._add_silence_row(prefs_card)
+        self._add_silence_row(
+            prefs_card, "silence_duration_sentence",
+            "Sentence Silence (seconds)",
+            "Gap between sentences within a paragraph")
+        self._add_silence_row(
+            prefs_card, "silence_duration_paragraph",
+            "Paragraph Silence (seconds)",
+            "Gap between paragraphs, and before the first line of a chapter")
+        self._add_silence_row(
+            prefs_card, "silence_duration_section",
+            "Section Silence (seconds)",
+            "Gap between sections (text separated by a blank line)")
         self._add_toggle_row(prefs_card)
 
     # ---------- Metadata page ----------
@@ -596,16 +649,19 @@ class SettingsApp(ctk.CTk):
             text_color=COLOR_ENTRY_TEXT, fg_color="white")
         entry.pack(side="left", fill="x", expand=True, padx=(0, 14))
 
-    def _add_silence_row(self, parent):
+    def _add_silence_row(self, parent, var_key, title, subtitle):
+        """One spinner row on the Advanced page. There are three of these -
+        sentence, paragraph and section - each feeding its own duration into
+        settings.json. run_audiobook.py renders one silence wav per kind and
+        picks between them via text_pipeline's silence_kind_for()."""
         row = self._row_shell(parent)
         glyph, pastel_bg, icon_color = ICON_SILENCE
         IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
             side="left", padx=(0, 14))
-        text_frame = self._title_block(
-            row, "Silence Duration (seconds)", "Duration of silence between sentences")
+        text_frame = self._title_block(row, title, subtitle)
         text_frame.pack(side="left", fill="x", expand=True)
 
-        NumberSpinner(row, self.vars["silence_duration"], step=0.5, minval=0.0).pack(side="right")
+        NumberSpinner(row, self.vars[var_key], step=0.5, minval=0.0).pack(side="right")
 
     def _add_toggle_row(self, parent):
         row = self._row_shell(parent)
@@ -762,7 +818,9 @@ class SettingsApp(ctk.CTk):
         for key in ("input_folder", "output_folder", "temp_dir", "model_path",
                     "speaker_path", "uv_project_dir"):
             self.vars[key].set(DEFAULT_SETTINGS[key])
-        self.vars["silence_duration"].set(str(DEFAULT_SETTINGS["silence_duration"]))
+        for key in ("silence_duration_sentence", "silence_duration_paragraph",
+                    "silence_duration_section"):
+            self.vars[key].set(str(DEFAULT_SETTINGS[key]))
         keep_temp = not DEFAULT_SETTINGS["clean_temp_after_run"]
         self.keep_temp_var.set(1 if keep_temp else 0)
         self._on_toggle_changed()
@@ -785,15 +843,20 @@ class SettingsApp(ctk.CTk):
         self._on_auto_tag_changed()
 
     def _collect_and_validate(self):
-        try:
-            silence = float(self.vars["silence_duration"].get())
-            if silence < 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror(
-                "Invalid Value",
-                "Silence Duration must be a positive number (e.g. 1.0).")
-            return None
+        silences = {}
+        for key, label in (("silence_duration_sentence", "Sentence Silence"),
+                           ("silence_duration_paragraph", "Paragraph Silence"),
+                           ("silence_duration_section", "Section Silence")):
+            try:
+                value = float(self.vars[key].get())
+                if value < 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Value",
+                    f"{label} must be a positive number (e.g. 1.0).")
+                return None
+            silences[key] = value
 
         data = {
             "input_folder": self.vars["input_folder"].get().strip(),
@@ -801,7 +864,9 @@ class SettingsApp(ctk.CTk):
             "temp_dir": self.vars["temp_dir"].get().strip(),
             "model_path": self.vars["model_path"].get().strip(),
             "speaker_path": self.vars["speaker_path"].get().strip(),
-            "silence_duration": silence,
+            "silence_duration_sentence": silences["silence_duration_sentence"],
+            "silence_duration_paragraph": silences["silence_duration_paragraph"],
+            "silence_duration_section": silences["silence_duration_section"],
             "clean_temp_after_run": not bool(self.keep_temp_var.get()),
             "uv_project_dir": self.vars["uv_project_dir"].get().strip(),
             "author_name": self.metadata_vars["author_name"].get().strip(),

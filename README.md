@@ -25,7 +25,7 @@ The Automated Japanese Audiobook Generator is a Python automation pipeline desig
 - **Text Pre-processing:** The pipeline parses raw Japanese text into a structured hierarchy of sections, paragraphs, and sentences. Dialogue (`「」`) and parenthetical asides (`（）`) are no longer isolated as whole, unsplittable spans - instead each bracket edge is a guaranteed silence point, while the content between/around them is chunked by the same character-count rules as ordinary narration. A mid-sentence `──` is also a forced silence point. See [Section 6](#6-detailed-text-cleaning-logic) for the full logic.
 - **Sentence-Level Chunking:** To respect model token limits and prevent prosodic degradation, the script merges sentences into ~100-character chunks (130-character hard limit) using `。`, `？`, `……`, and the forced break points above (`「`, `（`, `」`, `）`, `──`) as boundaries. This keeps intonation natural across long-form content (including long dialogue) while minimizing the number of TTS calls.
 - **AI Speech Synthesis:** The system integrates the Irodori-TTS engine, which utilizes a Flow Matching architecture for better voice quality. Local GPU inference is managed via the `uv` package manager to ensure environment stability.
-- **Automated Audio Stitching:** Using FFmpeg's concat demuxer, the script merges individual chunk waveforms into a final chapter file, inserting tiered silence gaps (1×/2×/3×, scaled by boundary type - sentence, paragraph/chapter start, or section - plus extra gaps around dialogue/asides and `──` pauses) to simulate natural human pacing.
+- **Automated Audio Stitching:** Using FFmpeg's concat demuxer, the script merges individual chunk waveforms into a final chapter file, inserting tiered silence gaps to simulate natural human pacing. Each gap is one of three separately configurable durations - sentence, paragraph/chapter start, or section - chosen by boundary type, with dialogue/aside edges and `──` pauses promoted to a longer gap where appropriate.
 
 ## 3. System Prerequisites
 
@@ -81,11 +81,13 @@ The text pipeline (`text_pipeline.py`) runs in four stages: it defines sentence/
 
 **Forced break points** — four situations where the text is always cut, regardless of the 100/130-character merge rules, and a silence gap is guaranteed at that exact point:
 
-| Trigger | Cut position | Gap tag | Silence weight |
+| Trigger | Cut position | Gap tag | Break value |
 |---|---|---|---|
-| `「` or `（` | Immediately **before** the bracket | `bracket_open` | 1× |
-| `」` or `）` | Immediately **after** the bracket | `bracket_close` | 1× |
-| `──` | At the dash itself (dash is dropped from the TTS text — the model ignores it anyway, so there's no point sending it) | `dash` | 2× |
+| `「` or `（` | Immediately **before** the bracket | `bracket_open` | 1 |
+| `」` or `）` | Immediately **after** the bracket | `bracket_close` | 1 |
+| `──` | At the dash itself (dash is dropped from the TTS text — the model ignores it anyway, so there's no point sending it) | `dash` | 2 |
+
+The **break value** is not a duration — it feeds the level calculation in [Section 6.5](#65-stage-4--concatenation--silence-insertion), which decides which of the three silence files ends up at that gap.
 
 Unlike the old priority rule, brackets no longer isolate their *entire* contents as one chunk — only the two edges are forced cut points. Everything between an opening and closing bracket (and everything outside brackets) is chunked by the same character-count merge logic described in 6.3, so a long line of dialogue now gets split into several ~100-character chunks internally, just like narration would.
 
@@ -93,7 +95,7 @@ Unlike the old priority rule, brackets no longer isolate their *entire* contents
 
 **Section** — a run of sentences that ends with more than one CRLF in a row (i.e. a blank line).
 
-**Chapter start** — the very first chunk of every chapter gets its own guaranteed lead-in silence (2×), so consecutive chapters don't run into each other when played back-to-back on a playlist.
+**Chapter start** — the very first chunk of every chapter gets its own guaranteed lead-in silence (the paragraph-level one), so consecutive chapters don't run into each other when played back-to-back on a playlist.
 
 **Ordering note:** since paragraph/section boundaries are defined by CRLF patterns, boundary detection happens *before* the CRLF characters are removed — the parser reads the raw file once to mark section/paragraph/sentence boundaries, then strips whitespace/CRLF/IDSP when writing each working file's content.
 
@@ -142,27 +144,61 @@ Each `...input00x.txt` goes through the TTS pipeline and produces a matching `..
 
 ### 6.5 Stage 4 — Concatenation & silence insertion
 
-When stitching the `.wav` files back together with FFmpeg, silence is inserted before each chunk based on the tags describing the gap immediately before it (6.1). Every gap always has exactly one **structural** tag (mutually exclusive, highest-scoped one wins) and may additionally carry **content** tags from forced break points (additive with each other, but not with the structural tag):
+When stitching the `.wav` files back together with FFmpeg, **exactly one** silence file is inserted before each chunk. Which of the three it is depends on the tags describing the gap immediately before that chunk (6.1).
 
-| Structural tag | Weight | | Content tag | Weight |
+The three silence levels, each with its own pre-rendered file and its own independently configurable duration on the [Advanced Settings](#73-advanced-settings) page:
+
+| Level | Silence kind | File inserted | Duration setting |
+|---|---|---|---|
+| 1 | sentence | `silence_sentence.wav` | **Sentence Silence (seconds)** |
+| 2 | paragraph | `silence_paragraph.wav` | **Paragraph Silence (seconds)** |
+| 3 | section | `silence_section.wav` | **Section Silence (seconds)** |
+
+Levels are a **ranking, not a multiplier** — level 3 is not "three times level 1". The three durations are set independently, so the section gap could be 1.5s while the sentence gap is 1.0s, or all three could be identical.
+
+Every gap always carries exactly one **structural** tag, which sets the baseline level (mutually exclusive — the highest-scoped one wins), and may additionally carry **content** tags from forced break points (additive with each other, but not with the structural baseline):
+
+| Structural tag | Baseline level | | Content tag | Adds |
 |---|---|---|---|---|
-| `section` (new section) | 3× | | `bracket_open` | 1× |
-| `paragraph` (new paragraph) | 2× | | `bracket_close` | 1× |
-| `chapter_start` (first chunk of the chapter) | 2× | | `dash` | 2× |
-| `sentence` (default, plain within-paragraph gap) | 1× | | | |
+| `section` (new section) | 3 — section | | `bracket_open` | 1 |
+| `paragraph` (new paragraph) | 2 — paragraph | | `bracket_close` | 1 |
+| `chapter_start` (first chunk of the chapter) | 2 — paragraph | | `dash` | 2 |
+| `sentence` (default, plain within-paragraph gap) | 1 — sentence | | | |
 
-**Combination rule:** `silence units = MAX(structural weight, sum of content weights present at that gap)`. In practice this means a forced break point never gets *less* silence than the structural boundary it happens to coincide with, but content tags don't stack on top of an already-larger structural gap either. Worked examples:
+**Combination rule:** `level = MIN(3, MAX(structural baseline, sum of break values at that gap))`
 
-| Situation | Result |
-|---|---|
-| Plain sentence gap, no bracket/dash | 1× |
-| Before a `「` mid-paragraph | max(1, 1) = **1×** |
-| `」` immediately followed by `「` (no text between) | max(1, 1+1) = **2×** |
-| A new paragraph that happens to open with `「` | max(2, 1) = **2×** |
-| A `──` cut mid-paragraph | max(1, 2) = **2×** |
-| First chunk of the chapter | max(2, 0) = **2×** |
+A forced break point therefore never gets a *shorter* silence than the structural boundary it happens to coincide with, but content tags don't stack on top of an already-larger structural gap either, and nothing goes past the section level. Worked examples:
+
+| Situation | Calculation | Silence inserted |
+|---|---|---|
+| Plain sentence gap, no bracket/dash | max(1, 0) = 1 | `silence_sentence.wav` |
+| Before a `「` mid-paragraph | max(1, 1) = 1 | `silence_sentence.wav` |
+| `」` immediately followed by `「` (no text between) | max(1, 1+1) = 2 | `silence_paragraph.wav` |
+| A new paragraph that happens to open with `「` | max(2, 1) = 2 | `silence_paragraph.wav` |
+| A `──` cut mid-paragraph | max(1, 2) = 2 | `silence_paragraph.wav` |
+| First chunk of the chapter | max(2, 0) = 2 | `silence_paragraph.wav` |
+| A new section | max(3, 0) = 3 | `silence_section.wav` |
+| A `──` landing on a `」「` join | min(3, max(1, 2+1+1)) = 3 | `silence_section.wav` |
 
 Silence is only inserted at chunk boundaries, not between individual sentences that got merged inside the same chunk (those are spoken as one continuous TTS render, with pacing left to the TTS module).
+
+#### How the three silence files are produced
+
+They are rendered **once per run**, not once per chapter, into a `_silence` subfolder of the Temp Folder. Generation is deferred until the first chunk of the first chapter exists, so FFprobe can read that chunk's real **sample rate, channel count and sample format** and match them exactly — the concat demuxer does no resampling, so any drift between the silence files and the TTS output corrupts the timing of the stitched audio. Per-chapter temp cleanup deliberately skips `_silence`; it is removed at the end of the run if **Keep temp files after run** is OFF.
+
+The resulting `concat_list.txt` alternates strictly — one silence file, one chunk, one silence file, one chunk:
+
+```
+file 'E:\after-dark-test\_silence\silence_section.wav'
+file 'E:\after-dark-test\chapter_001\sec001par001input001.wav'
+file 'E:\after-dark-test\_silence\silence_sentence.wav'
+file 'E:\after-dark-test\chapter_001\sec001par002input001.wav'
+file 'E:\after-dark-test\_silence\silence_paragraph.wav'
+file 'E:\after-dark-test\chapter_001\sec001par003input001.wav'
+file 'E:\after-dark-test\_silence\silence_section.wav'
+```
+
+> **2026-08 update — one file per gap.** Earlier versions rendered a single `silence.wav` and produced longer gaps by listing that same file two or three times in a row in `concat_list.txt`, which is where the old `1×`/`2×`/`3×` notation came from. Every gap length was therefore locked to a whole multiple of one base number. The three durations are now genuinely independent and each gap references exactly one correctly-sized file. Setting them to 1.0 / 2.0 / 3.0 reproduces the old behaviour exactly.
 
 ## 7. Execution and Deployment
 
@@ -186,7 +222,7 @@ Paths and basic preferences for the audiobook generation process.
 | --- | --- |
 | **Input Folder** | Folder containing the input chapters — `chapter_001.txt`, `chapter_002.txt`, etc. This is the `chapter_*.txt` naming that [JP-ePub-Text-Extractor](https://github.com/hermanismail/JP-ePub-Text-Extractor) writes to its output folder, so that tool's output can be pointed at directly as this one's input. |
 | **Output Folder** | Where the generated MP3 files are saved, one per chapter. |
-| **Temp Folder** | Where intermediate working files (split sections/paragraphs/sentences, per-chunk `.wav` files, the run log) are written during a generation run. See **Keep temp files after run** (Advanced) for whether these are cleaned up afterward. |
+| **Temp Folder** | Where intermediate working files (split sections/paragraphs/sentences, per-chunk `.wav` files, the run log) are written during a generation run, one subfolder per chapter, plus a shared `_silence` subfolder holding the three silence `.wav` files for the run. See **Keep temp files after run** (Advanced) for whether these are cleaned up afterward. |
 | **Model Path** | Path to the Irodori-TTS `model.safetensors` weights file (see [Section 3](#3-system-prerequisites)). |
 | **Speaker Path** | Path to your trained `.speaker.safetensors` file, produced by the speaker inversion step (see **Speaker setup** in [Section 3](#3-system-prerequisites)). |
 | **uv Project Folder** | The base folder of your Irodori-TTS `uv` project — i.e. the folder you'd normally run `uv run ...` from. Generation is launched as a subprocess inside this folder, so it needs to match wherever Irodori-TTS was cloned and synced. |
@@ -217,8 +253,14 @@ Fine-tune generation behavior.
 
 | Field / control | What it does |
 | --- | --- |
-| **Silence Duration (seconds)** | The base unit (1×) used for the tiered silence gaps described in [Section 6.5](#65-stage-4--concatenation--silence-insertion) — e.g. a 2× gap is twice this value. Defaults to 1.0 seconds; must be a positive number. |
+| **Sentence Silence (seconds)** | Length of the gap inserted between sentences inside a paragraph — the shortest of the three. Defaults to 1.0 seconds; must be a positive number. |
+| **Paragraph Silence (seconds)** | Length of the gap inserted between paragraphs, and as the lead-in before the very first line of a chapter. Defaults to 1.2 seconds; must be a positive number. |
+| **Section Silence (seconds)** | Length of the gap inserted between sections (text separated by a blank line) — the longest of the three. Defaults to 1.5 seconds; must be a positive number. |
 | **Keep temp files after run** | **ON** by default, meaning the split section/paragraph/sentence files and per-chunk `.wav` files in the Temp Folder are left on disk after a run finishes (useful for inspecting/debugging a chapter). Turn **OFF** to have them deleted automatically once generation completes. |
+
+The three durations are fully independent — there is no longer a single "base unit" that the longer gaps are multiples of. Each one is rendered to its own silence `.wav` before stitching, and [Section 6.5](#65-stage-4--concatenation--silence-insertion) explains which of the three lands at any given gap. Setting all three to the same number gives uniform pacing throughout; widening only **Section Silence** gives a clearer beat between scene breaks without slowing down ordinary narration.
+
+> **Upgrading from an earlier version:** older `settings.json` files stored one `silence_duration` value. On first load it is migrated automatically into `silence_duration_sentence` (the old value), `silence_duration_paragraph` (2× it) and `silence_duration_section` (3× it), which reproduces the previous output exactly. Nothing changes audibly until you actually edit the numbers here.
 
 ### 7.4 Bottom action bar
 

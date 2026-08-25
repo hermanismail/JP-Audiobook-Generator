@@ -19,7 +19,9 @@ DEFAULT_SETTINGS = {
     "temp_dir": r"D:\AUDIOBOOK_TMP",
     "model_path": r"C:\Irodori-TTS\model.safetensors",
     "speaker_path": r"C:\Irodori-TTS\seiyuu\ueshama.speaker.safetensors",
-    "silence_duration": 1.0,
+    "silence_duration_sentence": 1.0,
+    "silence_duration_paragraph": 1.2,
+    "silence_duration_section": 1.5,
     "clean_temp_after_run": True,
     "uv_project_dir": r"C:\Irodori-TTS",  # not used by this script directly, kept for the GUI launcher
     "auto_tag_generated_files": False,
@@ -38,9 +40,47 @@ def load_settings():
     with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
         loaded = json.load(f)
 
+    # Migrate BEFORE merging in the defaults: migrate_silence_settings()
+    # decides what to do based on which keys the file actually contained,
+    # and DEFAULT_SETTINGS already supplies all three new ones - merging
+    # first would hide the legacy case entirely.
+    loaded = migrate_silence_settings(loaded)
+
     merged = dict(DEFAULT_SETTINGS)
     merged.update(loaded)
     return merged
+
+
+def migrate_silence_settings(settings):
+    """Backwards compatibility for settings.json files written before the
+    per-kind silence durations existed.
+
+    Older versions stored a single "silence_duration" (the 1x base unit)
+    and produced longer gaps by repeating silence.wav 2x/3x in the concat
+    list. The new scheme renders three separate files with independent
+    durations. When only the legacy key is present we carry it straight
+    into the sentence duration and derive paragraph/section as 2x and 3x
+    that value, which reproduces the old output exactly - so upgrading
+    changes nothing audible until the person actually tunes the numbers on
+    the Advanced page."""
+    legacy = settings.pop("silence_duration", None)
+    if legacy is None:
+        return settings
+
+    try:
+        legacy = float(legacy)
+    except (TypeError, ValueError):
+        return settings
+
+    # round(): 0.8 * 3 is 2.4000000000000004 in binary floating point, and
+    # that full value would end up rendered verbatim in the GUI's spinner.
+    if "silence_duration_sentence" not in settings:
+        settings["silence_duration_sentence"] = round(legacy, 3)
+    if "silence_duration_paragraph" not in settings:
+        settings["silence_duration_paragraph"] = round(legacy * 2, 3)
+    if "silence_duration_section" not in settings:
+        settings["silence_duration_section"] = round(legacy * 3, 3)
+    return settings
 
 
 SETTINGS = load_settings()
@@ -50,25 +90,51 @@ OUTPUT_FOLDER = SETTINGS["output_folder"]
 TEMP_DIR = SETTINGS["temp_dir"]
 MODEL_PATH = SETTINGS["model_path"]
 SPEAKER_PATH = SETTINGS["speaker_path"]
-SILENCE_DURATION = float(SETTINGS["silence_duration"])  # base "1x" unit, in seconds
+# Independent gap durations, in seconds - one per silence kind produced by
+# text_pipeline.silence_kind_for(). Each is rendered to its own wav once
+# per run (see get_silence_wavs) and referenced by name in concat_list.txt.
+SILENCE_DURATIONS = {
+    "sentence": float(SETTINGS["silence_duration_sentence"]),
+    "paragraph": float(SETTINGS["silence_duration_paragraph"]),
+    "section": float(SETTINGS["silence_duration_section"]),
+}
 CLEAN_TEMP_AFTER_RUN = bool(SETTINGS["clean_temp_after_run"])
 
-# Silence-unit count per chunk gap is now computed directly by
-# text_pipeline.py (chunk["silence_units"]), combining structural
-# boundaries (chapter_start=5/section=3/paragraph=2/sentence=1) with any
+# Shared, run-scoped folder holding the three rendered silence wavs. They
+# are generated once (on the first chapter, once a real TTS wav exists to
+# probe) and reused by every chapter afterwards.
+SILENCE_DIR = os.path.join(TEMP_DIR, "_silence")
+
+# Cache of {kind: wav path} for the current run, populated by
+# get_silence_wavs() on first use and reused from then on.
+_SILENCE_WAVS = {}
+
+# Which silence goes into each chunk gap is decided entirely by
+# text_pipeline.py (chunk["silence_kind"]), which combines structural
+# boundaries (chapter_start/section/paragraph/sentence) with any
 # forced-break content tags (bracket edges, "──") via the MAX-based rule
-# in text_pipeline.silence_units_for(). See text-cleaning-logic-spec.md
-# section 5. No separate lookup table needed here anymore.
+# in silence_units_for(), then buckets the result into one of
+# "sentence"/"paragraph"/"section" via silence_kind_for_units(). See
+# text-cleaning-logic-spec.md section 5. This module just looks up the
+# matching pre-rendered wav - no lookup table or repetition needed.
 
 # Ensure folders exist
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 
-def clean_temp_dir():
-    """Clears all files in the temporary directory."""
+def clean_temp_dir(include_silence=False):
+    """Clears the temporary directory.
+
+    The shared _silence folder is skipped by default: per-chapter cleanup
+    runs after every chapter, and the three silence wavs in there are
+    rendered once and reused by all remaining chapters. main() calls this
+    once more with include_silence=True at the end of the run, when they
+    are genuinely no longer needed."""
     for filename in os.listdir(TEMP_DIR):
         file_path = os.path.join(TEMP_DIR, filename)
+        if not include_silence and os.path.abspath(file_path) == os.path.abspath(SILENCE_DIR):
+            continue
         try:
             if os.path.isfile(file_path) or os.path.islink(file_path):
                 os.unlink(file_path)
@@ -117,40 +183,115 @@ def write_working_files(working_data, chunks, work_dir):
     return input_paths
 
 
-def probe_sample_rate(wav_path, default=48000):
-    """Reads the actual sample rate of a generated TTS wav via ffprobe, so
-    silence.wav can be generated to match it exactly. A mismatch here (the
-    ffmpeg concat demuxer expects every segment to share the same sample
-    rate/channels/format) is what caused the 2026-08 "weird sound" bug -
-    silence.wav was hardcoded to 24kHz while Irodori-TTS actually outputs
-    48kHz, so the concat demuxer misread the timing across the join and
-    produced pitch/speed-distorted audio. Falls back to `default` if
-    ffprobe fails or the wav can't be read for any reason."""
+def probe_audio_format(wav_path):
+    """Reads the actual audio format of a generated TTS wav via ffprobe, so
+    the silence wavs can be generated to match it exactly.
+
+    A mismatch here (the ffmpeg concat demuxer expects every segment to
+    share the same sample rate, channel count and sample format) is what
+    caused the 2026-08 "weird sound" bug - silence.wav was hardcoded to
+    24kHz while Irodori-TTS actually outputs 48kHz, so the concat demuxer
+    misread the timing across the join and produced pitch/speed-distorted
+    audio.
+
+    Returns a dict with "sample_rate", "channels", "sample_fmt" and
+    "codec_name". Any field ffprobe can't supply falls back to the
+    conservative defaults below."""
+    fmt = {
+        "sample_rate": 48000,
+        "channels": 1,
+        "sample_fmt": "s16",
+        "codec_name": "pcm_s16le",
+    }
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
-             "-show_entries", "stream=sample_rate",
-             "-of", "default=noprint_wrappers=1:nokey=1", wav_path],
+             "-show_entries", "stream=sample_rate,channels,sample_fmt,codec_name",
+             "-of", "default=noprint_wrappers=1", wav_path],
             capture_output=True, text=True,
         )
-        return int(result.stdout.strip())
+        for line in result.stdout.splitlines():
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if not value or value == "N/A":
+                continue
+            if key in ("sample_rate", "channels"):
+                fmt[key] = int(value)
+            elif key in ("sample_fmt", "codec_name"):
+                fmt[key] = value
     except (ValueError, OSError):
-        return default
+        pass
+    return fmt
 
 
-def get_silence_wav(work_dir, sample_rate):
-    """Generates (once) a single base silence.wav of SILENCE_DURATION
-    seconds, at the given sample_rate - this MUST match the sample rate of
-    the actual generated TTS wavs (see probe_sample_rate()) or the ffmpeg
-    concat demuxer will distort the stitched audio. Longer gaps (2x/3x/5x)
-    are produced by repeating this same file multiple times in the ffmpeg
-    concat list, rather than rendering separate longer silence files."""
-    silence_wav_path = os.path.join(work_dir, "silence.wav")
-    subprocess.run([
-        "ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=mono",
-        "-t", str(SILENCE_DURATION), silence_wav_path
-    ], capture_output=True)
-    return silence_wav_path
+def channel_layout_for(channels):
+    """ffmpeg's anullsrc wants a layout name, not a raw channel count."""
+    return {1: "mono", 2: "stereo"}.get(channels, f"{channels}c")
+
+
+def get_silence_wavs(audio_format):
+    """Renders the three named silence wavs - silence_sentence.wav,
+    silence_paragraph.wav and silence_section.wav - into SILENCE_DIR, one
+    per entry in SILENCE_DURATIONS.
+
+    They are written ONCE per run and reused by every chapter: the result
+    is cached in _SILENCE_WAVS, so the second and later chapters reuse the
+    same files rather than re-rendering identical audio. Each file is
+    encoded to match the TTS output's sample rate, channel count and
+    sample format exactly (see probe_audio_format) - the concat demuxer
+    does no resampling, so any drift here corrupts the stitched audio.
+
+    Returns {kind: absolute wav path}."""
+    if _SILENCE_WAVS:
+        return _SILENCE_WAVS
+
+    os.makedirs(SILENCE_DIR, exist_ok=True)
+
+    sample_rate = audio_format["sample_rate"]
+    channels = audio_format["channels"]
+    layout = channel_layout_for(channels)
+    codec = audio_format["codec_name"]
+    sample_fmt = audio_format["sample_fmt"]
+
+    for kind, duration in SILENCE_DURATIONS.items():
+        path = os.path.abspath(os.path.join(SILENCE_DIR, f"silence_{kind}.wav"))
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi",
+            "-i", f"anullsrc=r={sample_rate}:cl={layout}",
+            "-t", str(duration),
+            "-ar", str(sample_rate),
+            "-ac", str(channels),
+            "-acodec", codec,
+            "-sample_fmt", sample_fmt,
+            path,
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        if not os.path.exists(path):
+            # Some pcm codec/sample_fmt pairs ffprobe reports back aren't
+            # accepted verbatim on the encode side; retry letting ffmpeg
+            # pick the codec itself, still pinned to the probed rate and
+            # channel count (which are the two that actually break concat).
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-f", "lavfi",
+                "-i", f"anullsrc=r={sample_rate}:cl={layout}",
+                "-t", str(duration),
+                "-ar", str(sample_rate),
+                "-ac", str(channels),
+                path,
+            ], capture_output=True)
+        if not os.path.exists(path):
+            raise RuntimeError(
+                f"Failed to render {path}. ffmpeg said: "
+                f"{result.stderr.decode('utf-8', 'replace').strip()}")
+
+        _SILENCE_WAVS[kind] = path
+        print(f"  silence_{kind}.wav  ({duration}s)")
+
+    return _SILENCE_WAVS
 
 
 def process_chapter(chapter_path):
@@ -181,8 +322,8 @@ def process_chapter(chapter_path):
     input_paths = write_working_files(working_data, chunks, work_dir)
 
     # Step 4: Generate audio for each input chunk
-    audio_files = []            # list of wav paths, in order
-    silence_units_before_wav = []  # silence-unit count preceding each wav
+    audio_files = []          # list of wav paths, in order
+    silence_kind_before_wav = []  # which silence wav precedes each entry
 
     for i, chunk in enumerate(chunks, start=1):
         key = (chunk["section"], chunk["paragraph"], chunk["chunk"])
@@ -201,33 +342,44 @@ def process_chapter(chapter_path):
         print(f" Generating chunk {i}/{len(chunks)} "
               f"(sec {chunk['section']:03d} par {chunk['paragraph']:03d}, "
               f"{len(chunk['text'])} chars, "
-              f"{chunk['silence_units']}x silence before "
+              f"silence_{chunk['silence_kind']} before "
               f"[{','.join(chunk['boundary_tags'])}])...")
         subprocess.run(cmd, capture_output=True)
 
         if os.path.exists(wav_filename):
             audio_files.append(wav_filename)
-            silence_units_before_wav.append(chunk["silence_units"])
+            silence_kind_before_wav.append(chunk["silence_kind"])
 
-    # Step 5: Combine parts into final MP3, inserting silence sized by
-    # chunk["silence_units"] before each chunk (1x sentence, 2x paragraph
-    # or chapter start, 3x section, plus content tags for bracket edges/
-    # "──" - see text-cleaning-logic-spec.md section 5).
+    # Step 5: Combine parts into final MP3, inserting exactly one silence
+    # file before each chunk - silence_sentence.wav, silence_paragraph.wav
+    # or silence_section.wav, chosen by chunk["silence_kind"]. Each has its
+    # own duration from the GUI's Advanced page, so long gaps are a single
+    # correctly-sized file rather than the same 1x file repeated 2x/3x as
+    # in earlier versions.
     if not audio_files:
         print(f"Error: No audio parts generated for {chapter_name[0]}")
         return
 
     output_mp3 = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.mp3")
-    tts_sample_rate = probe_sample_rate(audio_files[0])
-    print(f"Detected TTS output sample rate: {tts_sample_rate}Hz - generating matching silence.wav...")
-    silence_wav_path = get_silence_wav(work_dir, tts_sample_rate)
+
+    # The silence wavs are rendered once for the whole run, from the first
+    # chapter's first TTS wav; later chapters hit the _SILENCE_WAVS cache
+    # and skip both the probe and the render.
+    if _SILENCE_WAVS:
+        silence_wavs = _SILENCE_WAVS
+    else:
+        audio_format = probe_audio_format(audio_files[0])
+        print(f"Detected TTS output: {audio_format['sample_rate']}Hz, "
+              f"{audio_format['channels']}ch, {audio_format['sample_fmt']} "
+              f"({audio_format['codec_name']}) - rendering matching silence "
+              f"files into {SILENCE_DIR}...")
+        silence_wavs = get_silence_wavs(audio_format)
 
     concat_list_path = os.path.join(work_dir, "concat_list.txt")
     with open(concat_list_path, "w", encoding="utf-8") as f:
         for idx, audio_file in enumerate(audio_files):
-            units_count = silence_units_before_wav[idx]
-            for _ in range(units_count):
-                f.write(f"file '{os.path.abspath(silence_wav_path)}'\n")
+            kind = silence_kind_before_wav[idx]
+            f.write(f"file '{silence_wavs[kind]}'\n")
             f.write(f"file '{os.path.abspath(audio_file)}'\n")
 
     ffmpeg_cmd = [
@@ -268,6 +420,11 @@ def main():
         process_chapter(chapter_file)
 
     print("\nAll chapters completed successfully!")
+
+    # The shared silence wavs were kept alive across chapters by
+    # clean_temp_dir()'s skip; now that the run is over they can go too.
+    if CLEAN_TEMP_AFTER_RUN and os.path.isdir(SILENCE_DIR):
+        shutil.rmtree(SILENCE_DIR, ignore_errors=True)
 
     # Auto-tag step: runs the mp3_metadata.py tagger from the GUI project's
     # OWN lightweight uv venv (via `--project`), not this heavy Irodori-TTS

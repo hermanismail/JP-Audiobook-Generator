@@ -631,7 +631,7 @@ if __name__ == "__main__":
         def _do():
             win.append_log(
                 f" Generating chunk {chunk_i}/{total_chunks} (sec {sec:03d} par {par:03d}, "
-                f"{chars} chars, {silence}x silence before [{tags}])...", tag="text")
+                f"{chars} chars, silence_{silence} before [{tags}])...", tag="text")
             win.set_chapter_progress(
                 chapter_idx, total_chapters, f"Processing: {name}",
                 percent=chunk_i / total_chunks * 100)
@@ -651,7 +651,8 @@ if __name__ == "__main__":
     def chapter_done_event(chapter_idx, total_chapters, name):
         def _do():
             win.append_log(
-                "Detected TTS output sample rate: 48000Hz - generating matching silence.wav...",
+                "Detected TTS output: 48000Hz, 1ch, s16 (pcm_s16le) - rendering "
+                "matching silence files into F:\\AUDIOBOOK_TMP\\_silence...",
                 tag="text")
             win.append_log(f"Stitching {name} into final MP3...", tag="text")
             win.append_log(f"Done! Saved to: F:\\AUDIOBOOK_OUTPUT\\{name}.mp3", tag="success")
@@ -673,14 +674,14 @@ if __name__ == "__main__":
     demo_events = [(0.3, chapter_start_event(1, 2, "chapter_055", CH1_CHUNKS, 2, 6))]
     for i in range(1, CH1_CHUNKS + 1):
         demo_events.append((0.5, chunk_event(
-            1, 2, "chapter_055", i, CH1_CHUNKS, 2, (i - 1) // 2 + 1, 30 + i * 4, 2,
-            "paragraph,bracket_open")))
+            1, 2, "chapter_055", i, CH1_CHUNKS, 2, (i - 1) // 2 + 1, 30 + i * 4,
+            "paragraph", "paragraph,bracket_open")))
     demo_events.append((0.4, chapter_done_event(1, 2, "chapter_055")))
 
     demo_events.append((0.5, chapter_start_event(2, 2, "chapter_056", CH2_CHUNKS, 2, 3)))
     for i in range(1, CH2_CHUNKS + 1):
         demo_events.append((0.5, chunk_event(
-            2, 2, "chapter_056", i, CH2_CHUNKS, 1, i, 20 + i * 5, 1, "sentence")))
+            2, 2, "chapter_056", i, CH2_CHUNKS, 1, i, 20 + i * 5, "sentence", "sentence")))
     demo_events.append((0.4, chapter_done_event(2, 2, "chapter_056")))
     demo_events.append((0.5, all_done_event()))
 
