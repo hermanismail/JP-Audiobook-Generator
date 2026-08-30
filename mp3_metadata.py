@@ -14,12 +14,15 @@ the rest of this project's setup.
 Invocation:
     - From the GUI (gui_settings.py), via the "Apply Tags to Output MP3s"
       button - calls apply_metadata() directly, in-process.
-    - Automatically at the end of the generation pipeline, when "Auto-tag
+    - Automatically after each chapter finishes rendering, when "Auto-tag
       generated files" is ON: run_audiobook.py (running in the *Irodori-TTS*
       venv) shells out to `uv run --project <this folder> python
-      mp3_metadata.py`, which re-reads settings.json itself and runs the
-      same apply_metadata() logic - keeping mutagen out of the Irodori-TTS
-      venv entirely. See the __main__ block at the bottom.
+      mp3_metadata.py --chapter <base_name>`, which re-reads settings.json
+      itself and runs the same apply_metadata() logic against just that one
+      chapter - keeping mutagen out of the Irodori-TTS venv entirely, and
+      making each chapter's MP3 fully tagged (and usable on a phone) the
+      moment it lands in the output folder, without waiting for the rest of
+      the book. See the __main__ block at the bottom.
 
 Chapter <-> MP3 matching mirrors run_audiobook.py exactly: chapter text
 files are looked up as `chapter_*.txt` under input_folder, sorted
@@ -109,11 +112,15 @@ def find_chapter_base_names(input_folder):
     return [os.path.splitext(os.path.basename(f))[0] for f in chapter_files]
 
 
-def apply_metadata(settings, metadata):
+def apply_metadata(settings, metadata, base_names=None):
     """
     settings: the loaded settings.json dict (needs input_folder, output_folder)
     metadata: dict with keys author_name, book_title, genre,
               auto_number_chapters, cover_art_path
+    base_names: chapter base names to tag (e.g. ["chapter_003"]). Defaults to
+        every chapter_*.txt under input_folder - pass a subset to tag just
+        one freshly-rendered chapter instead of rescanning the whole book
+        (see run_audiobook.py's per-chapter auto-tag call).
 
     Returns a MetadataApplyResult. Never raises for per-file problems -
     those are collected in result.errors so one bad file doesn't stop the
@@ -132,7 +139,10 @@ def apply_metadata(settings, metadata):
 
     result = MetadataApplyResult()
 
-    for base_name in find_chapter_base_names(input_folder):
+    if base_names is None:
+        base_names = find_chapter_base_names(input_folder)
+
+    for base_name in base_names:
         mp3_path = os.path.join(output_folder, f"{base_name}.mp3")
 
         if not os.path.exists(mp3_path):
@@ -173,15 +183,26 @@ def apply_metadata(settings, metadata):
 if __name__ == "__main__":
     # CLI entrypoint used by run_audiobook.py's auto-tag step (see module
     # docstring). Reads settings.json itself so no arguments are needed -
-    # run_audiobook.py just calls `uv run --project <here> python
-    # mp3_metadata.py` after generation finishes.
+    # run_audiobook.py calls `uv run --project <here> python
+    # mp3_metadata.py [--chapter <base_name>]` right after each chapter's
+    # MP3 is stitched, passing --chapter so only that chapter gets tagged
+    # instead of rescanning/re-tagging the whole book every time.
+    import argparse
+
+    _parser = argparse.ArgumentParser()
+    _parser.add_argument("--chapter", default=None,
+                          help="Chapter base name (e.g. chapter_003) to tag "
+                               "instead of every chapter in input_folder.")
+    _args = _parser.parse_args()
+
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     _settings_path = os.path.join(_script_dir, "settings.json")
 
     with open(_settings_path, "r", encoding="utf-8") as _f:
         _settings = json.load(_f)
 
-    _result = apply_metadata(_settings, _settings)
+    _base_names = [_args.chapter] if _args.chapter else None
+    _result = apply_metadata(_settings, _settings, base_names=_base_names)
 
     print(f"Tagged {_result.tagged_count} MP3 file(s).")
     if _result.missing:

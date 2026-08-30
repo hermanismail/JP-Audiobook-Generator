@@ -752,10 +752,11 @@ class SettingsApp(ctk.CTk):
             extra_command()
 
     def _on_auto_tag_changed(self):
-        """Auto-tag generated files ON -> tagging happens automatically at
-        the end of run_audiobook.py, so the manual Apply Tags button is
-        greyed out and disabled (avoids double-tagging / confusion about
-        which metadata actually landed). OFF -> button is enabled again."""
+        """Auto-tag generated files ON -> tagging happens automatically
+        after each chapter inside run_audiobook.py, so the manual Apply
+        Tags button is greyed out and disabled (avoids double-tagging /
+        confusion about which metadata actually landed). OFF -> button is
+        enabled again."""
         if self.auto_tag_var.get():
             self.apply_tags_button.configure(
                 state="disabled", fg_color="#D3D3D3", hover_color="#D3D3D3",
@@ -1037,7 +1038,7 @@ class SettingsApp(ctk.CTk):
         """Called once run_audiobook.py's stdout has closed. Waits on the
         actual exit code rather than assuming success just because the
         process stopped printing - auto-tagging (mp3_metadata.py) runs
-        after the "all chapters completed" line and could itself fail."""
+        after every chapter and could itself fail on any of those calls."""
         returncode = self._run_process.wait()
         if self._run_window is None or not self._run_window.winfo_exists():
             return

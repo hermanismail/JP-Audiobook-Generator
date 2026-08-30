@@ -165,10 +165,10 @@ def write_working_files(working_data, chunks, work_dir):
 
     # sec001par001sen001.txt
     for (sec_idx, par_idx), units in working_data["sentences"].items():
-        for sen_idx, unit in enumerate(units, start=1):
+        for sen_idx, unit_text in enumerate(units, start=1):
             fname = f"sec{sec_idx:03d}par{par_idx:03d}sen{sen_idx:03d}.txt"
             with open(os.path.join(work_dir, fname), "w", encoding="utf-8") as f:
-                f.write(unit["text"])
+                f.write(unit_text)
 
     # sec001par001input001.txt  <- what actually gets sent to TTS
     input_paths = {}
@@ -382,8 +382,10 @@ def process_chapter(chapter_path):
     # Step 4: Generate audio for each input chunk
     audio_files = []          # list of wav paths, in order
     silence_kind_before_wav = []  # which silence wav precedes each entry
-    sync_chunk_texts = []     # chunk["text"], parallel to audio_files - only
-                               # used to build sync.json (see build_sync_data)
+    sync_chunk_texts = []     # chunk["display_text"] (original wording,
+                               # not the TTS-normalized text), parallel to
+                               # audio_files - only used to build sync.json
+                               # (see build_sync_data)
 
     for i, chunk in enumerate(chunks, start=1):
         key = (chunk["section"], chunk["paragraph"], chunk["chunk"])
@@ -409,7 +411,7 @@ def process_chapter(chapter_path):
         if os.path.exists(wav_filename):
             audio_files.append(wav_filename)
             silence_kind_before_wav.append(chunk["silence_kind"])
-            sync_chunk_texts.append(chunk["text"])
+            sync_chunk_texts.append(chunk["display_text"])
 
     # Step 5: Combine parts into final MP3, inserting exactly one silence
     # file before each chunk - silence_sentence.wav, silence_paragraph.wav
@@ -469,7 +471,34 @@ def process_chapter(chapter_path):
         json.dump(sync_data, f, ensure_ascii=False, indent=2)
     print(f"Sync data saved to: {sync_path}")
 
-    # Step 6: Cleanup temporary files for this chapter (unless disabled in
+    # Step 6: Auto-tag step - runs the mp3_metadata.py tagger from the GUI
+    # project's OWN lightweight uv venv (via `--project`), not this heavy
+    # Irodori-TTS venv, so mutagen never needs to be installed here. Runs
+    # right away, per chapter, so the file is fully usable (correct
+    # metadata/album art for Spotify/phone) the moment it lands in the
+    # output folder - no need to wait for the rest of the book to finish
+    # before copying chapters over. Only runs when "Auto-tag generated
+    # files" is turned on in the Metadata settings tab - otherwise the
+    # person applies tags manually afterwards via the GUI's "Apply Tags to
+    # Output MP3s" button.
+    if SETTINGS.get("auto_tag_generated_files", False):
+        print(f"Auto-tagging {chapter_name[0]}.mp3...")
+        try:
+            tag_result = subprocess.run(
+                ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python",
+                 os.path.join(SCRIPT_DIR, "mp3_metadata.py"),
+                 "--chapter", chapter_name[0]],
+                cwd=SCRIPT_DIR, capture_output=True, text=True,
+            )
+            if tag_result.stdout:
+                print(tag_result.stdout.strip())
+            if tag_result.returncode != 0:
+                print(f"Auto-tagging failed (exit code {tag_result.returncode}):")
+                print(tag_result.stderr.strip())
+        except Exception as e:
+            print(f"Auto-tagging failed to start: {e}")
+
+    # Step 7: Cleanup temporary files for this chapter (unless disabled in
     # settings.json)
     if CLEAN_TEMP_AFTER_RUN:
         print(f"Cleaning up temporary files in {TEMP_DIR}...")
@@ -497,28 +526,6 @@ def main():
     # clean_temp_dir()'s skip; now that the run is over they can go too.
     if CLEAN_TEMP_AFTER_RUN and os.path.isdir(SILENCE_DIR):
         shutil.rmtree(SILENCE_DIR, ignore_errors=True)
-
-    # Auto-tag step: runs the mp3_metadata.py tagger from the GUI project's
-    # OWN lightweight uv venv (via `--project`), not this heavy Irodori-TTS
-    # venv, so mutagen never needs to be installed here. Only runs when
-    # "Auto-tag generated files" is turned on in the Metadata settings tab -
-    # otherwise the person applies tags manually afterwards via the GUI's
-    # "Apply Tags to Output MP3s" button.
-    if SETTINGS.get("auto_tag_generated_files", False):
-        print("\nAuto-tag generated files is ON - tagging output MP3s...")
-        try:
-            tag_result = subprocess.run(
-                ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python",
-                 os.path.join(SCRIPT_DIR, "mp3_metadata.py")],
-                cwd=SCRIPT_DIR, capture_output=True, text=True,
-            )
-            if tag_result.stdout:
-                print(tag_result.stdout.strip())
-            if tag_result.returncode != 0:
-                print(f"Auto-tagging failed (exit code {tag_result.returncode}):")
-                print(tag_result.stderr.strip())
-        except Exception as e:
-            print(f"Auto-tagging failed to start: {e}")
 
 
 if __name__ == "__main__":

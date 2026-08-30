@@ -1,52 +1,77 @@
 """
 text_pipeline.py
 -----------------
-Rewritten text cleaning / chunking flow for JP Audiobook Generator, per
-text-cleaning-logic-spec.md (2026-08, revised 2026-08 v2). Runs inside the
+Text cleaning / chunking flow for JP Audiobook Generator. Runs inside the
 Irodori-TTS uv venv (same as run_audiobook.py, which imports this module) -
 stdlib only, no third-party dependencies, so it never needs anything
 installed beyond what Irodori-TTS's venv already has.
 
-Pipeline stages implemented here (see the spec doc for full rationale):
+v3 (2026-08) rewrite - motivation: v2 isolated "「」"/"（）" spans and
+"──" as forced break points, always starting a new TTS chunk (and a
+sentence/paragraph-level silence) at those edges. In practice this produced
+way too many short chunks with silence between them, especially for short
+lines of dialogue - the narration kept getting interrupted mid-flow. v3
+removes forced breaks entirely: brackets and "──" are just ordinary
+characters now, sentences merge across them exactly like any other
+sentence boundary, and a paragraph is free to become one long compact
+chunk as long as it fits the soft/hard char limits. See build_chunks()'s
+docstring and prepare_tts_text() for what replaced the old mechanism.
+
+Pipeline stages implemented here:
   1. split_sections()    - split raw chapter text on blank lines (2+ CRLF)
-  2. split_paragraphs()  - split a section on single CRLF
-  3. split_sentences()   - split a paragraph into sentence units. "「」"
-                            and "（）" no longer isolate their whole span
-                            (that priority rule was removed in v2 - it
-                            produced unusably long dialogue chunks). Instead
-                            each bracket edge, and each "──" occurrence, is
-                            a *forced break point*: text is always cut
-                            there, and the resulting gap carries a
-                            "gap_tags" list (e.g. ["bracket_open"],
-                            ["dash"]) describing why. Everything else about
-                            sentence splitting (。/？/…… terminators) is
-                            unchanged and applies normally on both sides of
-                            a forced break.
-  4. merge_units()       - merge sentence units into ~100-char (130 hard
-                            limit) TTS input chunks, same soft/hard-limit +
-                            "、" fallback-split logic as before. A unit
-                            carrying gap_tags always starts a new chunk
-                            (never merges backward across a forced break);
-                            units without gap_tags merge normally.
-  5. build_chunks()      - runs the full pipeline end-to-end and returns
+  2. split_paragraphs()  - a paragraph is now exactly one section's text
+                            (2+ CRLF is the paragraph boundary - see
+                            build_chunks() docstring for why the old
+                            single-CRLF paragraph tier was dropped),
+                            merged into one line and stripped of inline
+                            whitespace (spaces/tabs/IDSP) ready for
+                            sentence splitting.
+  3. split_sentences()   - split a paragraph into sentence strings on
+                            。/？/…… terminators. No more forced breaks at
+                            bracket edges or "──" - see prepare_tts_text().
+  4. merge_units()       - merge sentence strings into ~100-char (130 hard
+                            limit) TTS input chunks: keep adding sentences
+                            to a chunk while it fits, otherwise flush and
+                            start a new one; if a single sentence alone
+                            blows the hard limit, fall back to splitting it
+                            on a "、" inside it. This is what lets several
+                            short sentences collapse into one compact
+                            chunk instead of each getting its own gap.
+  5. prepare_tts_text()  - per-chunk text transform applied ONLY to the
+                            text actually sent to the TTS engine (the
+                            reader-facing sync.json text keeps the
+                            original, untransformed wording):
+                              - "─"/"──" (any run) -> single "、" - a
+                                mid-sentence pause marker the TTS model
+                                doesn't understand, but a comma reads
+                                naturally in its place.
+                              - a run of 2+ terminator/comma marks
+                                (。？……、) - e.g. one left stacked up by the
+                                dash substitution above, or already
+                                present like "……、" - collapses to just the
+                                last mark in that run.
+                              - a "、" immediately before "「" is dropped -
+                                back-to-back "、「" reads as two pause cues
+                                in a row and confuses the model.
+  6. build_chunks()      - runs the full pipeline end-to-end and returns
                             an ordered, flat list of chunk dicts, each
                             annotated with:
                               - section/paragraph/chunk indices (for
                                 working-file naming)
-                              - "boundary_tags": the combined list of tags
-                                describing the gap *before* this chunk -
-                                one structural tag ("chapter_start" /
-                                "section" / "paragraph" / "sentence") plus
-                                any content tags ("bracket_open" /
-                                "bracket_close" / "dash") from forced
-                                breaks at that same gap
+                              - "text": the TTS-ready text (post
+                                prepare_tts_text())
+                              - "display_text": the original wording for
+                                that chunk (spacing/newlines still
+                                cleaned up, but dashes/punctuation
+                                untouched) - this is what goes into
+                                sync.json for the reader app
+                              - "boundary_tags": the tag describing the
+                                gap *before* this chunk - "chapter_start" /
+                                "section" / "paragraph" / "sentence"
                               - "silence_units": the resolved integer
-                                silence-unit count for that gap, per the
-                                combination rule in silence_units_for()
-                                below - this is exactly what
+                                silence-unit count for that gap - what
                                 run_audiobook.py uses to size the silence
-                                inserted before each chunk (including x2
-                                before the very first chunk of a chapter)
+                                inserted before each chunk
                               - "silence_kind": that count bucketed into
                                 "sentence"/"paragraph"/"section", naming
                                 which pre-rendered silence wav goes into
@@ -54,21 +79,16 @@ Pipeline stages implemented here (see the spec doc for full rationale):
 
 Working-file naming convention (written by run_audiobook.py, not this
 module - this module only computes text + structure):
-    sec001.txt
-    sec001par001.txt
-    sec001par001sen001.txt
+    sec001.txt                 <- raw section text, untouched (for inspection)
+    sec001par001.txt           <- cleaned/merged paragraph text
+    sec001par001sen001.txt     <- one sentence unit
     sec001par001input001.txt   <- what actually gets sent to TTS
 """
 
 import re
 
 IDSP = "\u3000"  # ideographic space (full-width space)
-WHITESPACE_RE = re.compile(r"[ \t" + IDSP + r"\r\n]")
-
-DASH = "──"  # mid-sentence pause marker the TTS model ignores - forces a
-             # cut + 2x silence gap, and is stripped from the TTS text
-OPEN_BRACKETS = "「（"
-CLOSE_BRACKETS = "」）"
+INLINE_WHITESPACE_RE = re.compile(r"[ \t" + IDSP + r"]")
 
 TERMINATOR_RE = re.compile(r"(。|？|……)")
 COMMA = "、"
@@ -76,49 +96,31 @@ COMMA = "、"
 SOFT_LIMIT = 100
 HARD_LIMIT = 130
 
-# --- Silence combination rule -------------------------------------------
-# Structural tags are mutually exclusive (only the single highest-scoped
-# one applies to a given gap - same as before). Content tags come from
-# forced breaks (bracket edges / dash) and are additive with each other,
-# but not with the structural baseline. The final unit count for a gap is
-# MAX(structural weight, sum of content weights) - see
-# text-cleaning-logic-spec.md section 5 for the worked examples this is
-# based on (e.g. "」" immediately followed by "「" = 2x, not 3x; a
-# paragraph that opens with "「" stays at 2x, not 3x; a "──" cut mid
-# paragraph = 2x).
+# --- Silence rule ---------------------------------------------------------
+# Every gap now carries exactly one structural tag (the old bracket/dash
+# "forced break" content tags are gone - see module docstring). "paragraph"
+# is currently unreachable (see split_paragraphs()/build_chunks() - a
+# section always yields exactly one paragraph now) and is kept only so the
+# old single-CRLF paragraph tier can be reinstated without redoing this
+# table, in case listening tests call for it.
 STRUCTURAL_WEIGHTS = {"chapter_start": 2, "section": 3, "paragraph": 2, "sentence": 1}
-CONTENT_WEIGHTS = {"bracket_open": 1, "bracket_close": 1, "dash": 2}
 
 
 def silence_units_for(gap_tags):
-    """Resolve a gap's tag list (one structural tag + zero or more content
-    tags) into the final integer silence-unit count for that gap."""
-    structural = STRUCTURAL_WEIGHTS["sentence"]  # default baseline: 1
-    content_sum = 0
-    for tag in gap_tags:
-        if tag in STRUCTURAL_WEIGHTS:
-            structural = max(structural, STRUCTURAL_WEIGHTS[tag])
-        elif tag in CONTENT_WEIGHTS:
-            content_sum += CONTENT_WEIGHTS[tag]
-    return max(structural, content_sum)
+    """Resolve a gap's tag list into the final integer silence-unit count
+    for that gap."""
+    return max(STRUCTURAL_WEIGHTS.get(tag, STRUCTURAL_WEIGHTS["sentence"]) for tag in gap_tags)
 
 
 # --- Silence kinds -------------------------------------------------------
-# As of 2026-08 run_audiobook.py no longer renders long gaps by repeating a
-# single 1x silence.wav (the old "x2 / x3" trick). Instead it renders three
-# distinct silence files up front - silence_sentence.wav,
-# silence_paragraph.wav and silence_section.wav - each with its own
-# user-configurable duration set on the GUI's Advanced page, and the
-# concat list references the right one by name exactly once per gap.
-#
-# The unit-count rules above are unchanged; this just buckets the resolved
-# count into one of the three named kinds:
+# run_audiobook.py renders three distinct silence files up front -
+# silence_sentence.wav, silence_paragraph.wav and silence_section.wav -
+# each with its own user-configurable duration set on the GUI's Advanced
+# page, and the concat list references the right one by name exactly once
+# per gap. This buckets the resolved unit count into one of those names:
 #     1  -> "sentence"
 #     2  -> "paragraph"
 #     3+ -> "section"
-# So a "」" immediately followed by "「" (2x) uses the paragraph silence,
-# and a "──" cut (2x on its own, more when it lands on a bracket edge)
-# uses paragraph or section silence accordingly.
 SILENCE_KINDS = ("sentence", "paragraph", "section")
 
 
@@ -137,8 +139,11 @@ def silence_kind_for(gap_tags):
 
 
 def strip_whitespace(text):
-    """Remove all spaces, tabs, IDSP (U+3000), and any leftover CRLF."""
-    return WHITESPACE_RE.sub("", text)
+    """Remove all spaces, tabs, IDSP (U+3000), and any leftover CRLF. Kept
+    as a final safety net on chunk text - split_paragraphs() already
+    removes all of this earlier in the pipeline, so by the time text
+    reaches here it's normally a no-op."""
+    return re.sub(r"[ \t" + IDSP + r"\r\n]", "", text)
 
 
 def split_sections(raw_text):
@@ -152,16 +157,27 @@ def split_sections(raw_text):
 
 
 def split_paragraphs(section_text):
-    """Paragraph = a single-newline-separated chunk within a section."""
-    paragraphs = re.split(r"\n", section_text)
-    return [p for p in paragraphs if p.strip()]
+    """A paragraph is now exactly one section's text (2+ CRLF is the
+    paragraph boundary - the old single-CRLF paragraph tier is gone).
+    Single CRLFs inside the section are just the author's line-wraps, not
+    real paragraph breaks - joining them back together lets sentences on
+    either side merge into the same TTS chunk instead of always being cut
+    apart. Inline whitespace (half-width space, tab, IDSP - e.g. the
+    space in "衝突？　衝突って") is stripped here too, for both the TTS and
+    the reader-facing text.
+
+    Returns a single-element list (or [] if the section is blank) so the
+    section/paragraph working-file structure and indices are unchanged."""
+    cleaned = INLINE_WHITESPACE_RE.sub("", section_text.replace("\n", ""))
+    return [cleaned] if cleaned.strip() else []
 
 
-def _split_narration(text):
-    """Split plain text (no forced-break characters in it) into sentence
-    strings on 。/？/…… terminators, keeping the terminator attached. Falls
-    back to treating any un-terminated trailing text as its own sentence."""
-    parts = TERMINATOR_RE.split(text)
+def split_sentences(paragraph_text):
+    """Split a cleaned paragraph into sentence strings on 。/？/……
+    terminators, keeping the terminator attached. Falls back to treating
+    any un-terminated trailing text as its own sentence. No forced breaks
+    at bracket edges or "──" any more - see prepare_tts_text()."""
+    parts = TERMINATOR_RE.split(paragraph_text)
     sentences = []
     buf = ""
     for part in parts:
@@ -176,155 +192,31 @@ def _split_narration(text):
     return sentences
 
 
-def _tokenize_forced_segments(paragraph_text):
-    """Split paragraph text into segments at forced-break trigger points:
-    "──" (dash), and the four bracket-edge characters 「（」）. Returns an
-    ordered list of {"text": str, "gap_tags": [str, ...]} where gap_tags
-    describes the forced-break tag(s) for the gap immediately BEFORE this
-    segment ([] for the very first segment - that gap is a plain
-    paragraph-internal one, resolved by the paragraph/section boundary
-    logic in build_chunks instead).
-
-    Bracket placement: the opening bracket char stays attached to the
-    segment that STARTS with it (gap goes before it); the closing bracket
-    char stays attached to the segment that ENDS with it (gap goes after
-    it). "──" itself is dropped entirely from both segments it separates.
-
-    Consecutive trigger points with no text between them (e.g. "」「" with
-    nothing in between) collapse into a single combined gap carrying both
-    tags, rather than producing an empty in-between segment - this is what
-    gives "」" immediately followed by "「" its 2x total (bracket_close +
-    bracket_open) instead of losing one of the two tags."""
-    n = len(paragraph_text)
-    raw_segments = []  # [{"text": str, "gap_tags": [str,...]}, ...]
-    pending_tags = []
-    buf_start = 0
-    i = 0
-    while i < n:
-        if paragraph_text[i:i + 2] == DASH:
-            raw_segments.append({"text": paragraph_text[buf_start:i], "gap_tags": pending_tags})
-            pending_tags = ["dash"]
-            i += 2
-            buf_start = i
-            continue
-
-        ch = paragraph_text[i]
-        if ch in OPEN_BRACKETS:
-            raw_segments.append({"text": paragraph_text[buf_start:i], "gap_tags": pending_tags})
-            pending_tags = ["bracket_open"]
-            buf_start = i  # bracket char stays in the NEW segment
-            i += 1
-            continue
-        if ch in CLOSE_BRACKETS:
-            raw_segments.append({"text": paragraph_text[buf_start:i + 1], "gap_tags": pending_tags})
-            pending_tags = ["bracket_close"]
-            buf_start = i + 1  # bracket char stays in the segment that just closed
-            i += 1
-            continue
-        i += 1
-
-    raw_segments.append({"text": paragraph_text[buf_start:], "gap_tags": pending_tags})
-
-    # Collapse zero-length segments (back-to-back trigger points), folding
-    # their gap_tags forward onto the next non-empty segment.
-    segments = []
-    accumulated_tags = []
-    for seg in raw_segments:
-        if seg["text"] == "":
-            accumulated_tags.extend(seg["gap_tags"])
-            continue
-        segments.append({"text": seg["text"], "gap_tags": accumulated_tags + seg["gap_tags"]})
-        accumulated_tags = []
-    # A trailing empty segment at the very end of the paragraph (e.g. it
-    # ends right on a closing bracket) has nowhere to attach its tags -
-    # nothing follows, so there's no gap left to insert silence into.
-    return segments
-
-
-def split_sentences(paragraph_text):
-    """Split a paragraph into an ordered list of sentence units:
-    {"text": str, "gap_tags": [str, ...]}. gap_tags is non-empty only for
-    the first sentence unit immediately after a forced break (bracket edge
-    or "──"); ordinary terminator-based sentence splits within the same
-    segment carry gap_tags=[] (a plain default "sentence"-level gap)."""
-    units = []
-    for seg in _tokenize_forced_segments(paragraph_text):
-        seg_sentences = _split_narration(seg["text"])
-        if not seg_sentences:
-            continue
-        for idx, sentence_text in enumerate(seg_sentences):
-            units.append({"text": sentence_text, "gap_tags": seg["gap_tags"] if idx == 0 else []})
-    return units
-
-
-PUNCT_ONLY_RE = re.compile(r"[。？……、]+")
-
-
 def merge_units(units, soft_limit=SOFT_LIMIT, hard_limit=HARD_LIMIT):
-    """Stage 2 merge logic. Takes the sentence units for a single paragraph
-    (in order, as produced by split_sentences) and returns a list of
-    {"text": str, "gap_tags": [str,...]} chunks ready to become TTS input
-    files. gap_tags on the OUTPUT chunk describes the gap immediately
-    BEFORE that chunk.
-
-    Rules (see spec doc section 3/5 for the full explanation):
-      0. A unit carrying gap_tags (i.e. immediately after a forced break -
-         bracket edge or "──") always starts a brand-new chunk; whatever
-         was buffered before it is flushed first. The new chunk carries
-         those gap_tags forward to whenever it eventually flushes. A unit
-         that's nothing but leftover terminator punctuation AND carries no
-         gap_tags of its own is folded onto the immediately preceding
-         chunk instead of becoming its own 1-character chunk.
-      1-3. Otherwise keep adding sentences to the running buffer while the
-         total stays <= 100 chars; once adding a sentence pushes the total
-         into 100-130, close the chunk there.
+    """Merges sentence strings (in order, as produced by split_sentences)
+    into TTS-input-sized chunks:
+      1-3. Keep adding sentences to the running buffer while the total
+         stays <= 100 chars; once adding a sentence pushes the total into
+         100-130, close the chunk there.
       4. If adding a sentence pushes the total past the 130 hard limit,
          look for a 、 inside *that* sentence to split on - preferring a
          split point that keeps the chunk <= 100 chars, falling back to
          any split point <= 130 chars. The remainder after the 、 starts
-         the next chunk's buffer (with no gap_tags of its own - this is
-         just a plain char-limit split, not a forced break). If no usable
-         、 exists, let the chunk exceed 130 rather than cut the sentence
-         off mid-way (confirmed fallback - TTS just renders it slightly
-         faster, never unfinished).
-    """
+         the next chunk's buffer. If no usable 、 exists, let the chunk
+         exceed 130 rather than cut the sentence off mid-way (confirmed
+         fallback - TTS just renders it slightly faster, never
+         unfinished).
+    Returns a list of chunk text strings."""
     chunks = []
     buffer_text = ""
-    buffer_gap_tags = []
 
     def flush():
-        nonlocal buffer_text, buffer_gap_tags
+        nonlocal buffer_text
         if buffer_text.strip():
-            chunks.append({"text": buffer_text, "gap_tags": buffer_gap_tags})
+            chunks.append(buffer_text)
         buffer_text = ""
-        buffer_gap_tags = []
 
-    for unit in units:
-        text = unit["text"]
-        gap_tags = unit["gap_tags"]
-
-        if gap_tags:
-            # Forced break before this unit - close out whatever's
-            # buffered first. buffer_gap_tags now holds these gap_tags,
-            # pending whatever chunk ends up carrying them forward (either
-            # this unit itself, or - if it turns out to be a pure
-            # leftover terminator - whatever comes after it, per the fold
-            # case just below).
-            flush()
-            buffer_gap_tags = gap_tags
-
-        if buffer_text == "" and chunks and PUNCT_ONLY_RE.fullmatch(text):
-            # Trailing terminator-only text (e.g. the lone "。" left over
-            # right after a bracket span that itself ended the sentence) -
-            # fold its character(s) onto the previous chunk instead of
-            # becoming a pointless 1-character chunk of its own.
-            # buffer_gap_tags (possibly just set above) stays pending and
-            # gets forwarded onto whichever chunk starts next, so the
-            # silence guarantee isn't lost - it just moves past this
-            # meaningless leftover punctuation.
-            chunks[-1]["text"] += text
-            continue
-
+    for text in units:
         candidate = buffer_text + text
 
         if len(candidate) <= soft_limit:
@@ -365,6 +257,65 @@ def merge_units(units, soft_limit=SOFT_LIMIT, hard_limit=HARD_LIMIT):
     return chunks
 
 
+# --- TTS-only text normalization ------------------------------------------
+DASH_RUN_RE = re.compile("─+")
+PUNCT_TOKEN_RE = re.compile(r"。|？|……|、")
+COMMA_BEFORE_OPEN_BRACKET_RE = re.compile("、(?=「)")
+PUNCT_ONLY_RE = re.compile(r"[。？……、]+")
+
+
+def _append_punct_only(base_text, addition):
+    """Appends a punctuation-only fragment onto base_text (see the fold-in
+    of a standalone leftover-punctuation paragraph in build_chunks),
+    skipping it if base_text already ends with that exact fragment - e.g.
+    a lone "。" folded onto text already ending in "。" would otherwise
+    leave a stray "。。" behind. Deliberately just an exact-suffix check
+    (not the TTS-only redundant-punctuation collapse) so a genuinely
+    different mark, like an ellipsis followed by this fold's "。", is kept
+    intact rather than collapsed away - this also runs on the reader-facing
+    display text, which should stay as close to the original wording as
+    possible."""
+    if addition and base_text.endswith(addition):
+        return base_text
+    return base_text + addition
+
+
+def _collapse_redundant_punctuation(text):
+    """Collapses a back-to-back run of 2+ terminator/comma tokens
+    (。？……、) into just the LAST token in that run - e.g. "……、" -> "、".
+    A lone "……" is a single atomic token (it doesn't match twice) and is
+    left untouched."""
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        m = PUNCT_TOKEN_RE.match(text, i)
+        if not m:
+            out.append(text[i])
+            i += 1
+            continue
+        last = m.group(0)
+        i = m.end()
+        while True:
+            m2 = PUNCT_TOKEN_RE.match(text, i)
+            if not m2:
+                break
+            last = m2.group(0)
+            i = m2.end()
+        out.append(last)
+    return "".join(out)
+
+
+def prepare_tts_text(text):
+    """Derives the text actually sent to the TTS engine from a chunk's
+    display text. See module docstring stage 5 for the rationale behind
+    each step. The reader-facing sync.json text is NOT run through this -
+    it keeps the original wording as-is."""
+    text = DASH_RUN_RE.sub(COMMA, text)
+    text = _collapse_redundant_punctuation(text)
+    text = COMMA_BEFORE_OPEN_BRACKET_RE.sub("", text)
+    return text
+
+
 def build_chunks(raw_text):
     """Run the full pipeline on one chapter's raw text. Returns a flat,
     ordered list of dicts:
@@ -372,13 +323,15 @@ def build_chunks(raw_text):
           "section": int, "paragraph": int, "chunk": int,   # 1-indexed,
                                                               # chunk resets
                                                               # per paragraph
-          "text": str,               # final, whitespace-stripped TTS input
-          "boundary_tags": [str,...],# combined tags for the gap *before*
-                                      # this chunk - one structural tag
-                                      # ("chapter_start"/"section"/
-                                      # "paragraph"/"sentence") plus any
-                                      # content tags ("bracket_open"/
-                                      # "bracket_close"/"dash")
+          "text": str,               # final TTS input (prepare_tts_text()
+                                      # applied - dashes/redundant
+                                      # punctuation normalized)
+          "display_text": str,       # original wording for this chunk,
+                                      # inline whitespace stripped but
+                                      # otherwise untouched - for sync.json
+          "boundary_tags": [str],    # the tag for the gap *before* this
+                                      # chunk: "chapter_start"/"section"/
+                                      # "paragraph"/"sentence"
           "silence_units": int,      # resolved silence-unit count for that
                                       # gap (see silence_units_for()) -
                                       # always >= 1, including x2 for the
@@ -395,8 +348,17 @@ def build_chunks(raw_text):
         {
           "sections": [str, ...],                # sec001.txt content, etc.
           "paragraphs": {sec_idx: [str, ...]},    # sec001par001.txt, etc.
-          "sentences": {(sec_idx, par_idx): [{"text":, "gap_tags":}, ...]},
+          "sentences": {(sec_idx, par_idx): [str, ...]},
         }
+
+    Note on why a section always yields exactly one paragraph now: a
+    paragraph's boundary (2+ CRLF) is the same rule that already defines a
+    section, so splitting a section into paragraphs is a no-op by
+    construction (see split_paragraphs()) - the old "section" tier is kept
+    around anyway (both in code and in STRUCTURAL_WEIGHTS) since it's the
+    conservative option while this chunking approach is still being
+    listened to; if it holds up, the redundant paragraph tier can be
+    dropped for good.
     """
     sections = split_sections(raw_text)
     paragraphs_by_section = {}
@@ -416,9 +378,30 @@ def build_chunks(raw_text):
 
             merged = merge_units(units)
 
-            for chunk_idx, merged_chunk in enumerate(merged, start=1):
-                clean_text = strip_whitespace(merged_chunk["text"])
-                if not clean_text:
+            for chunk_idx, display_text in enumerate(merged, start=1):
+                if not display_text.strip():
+                    continue
+
+                tts_text = prepare_tts_text(display_text)
+                if not tts_text.strip():
+                    continue
+
+                if chunks and PUNCT_ONLY_RE.fullmatch(display_text):
+                    # A whole paragraph/section that's nothing but leftover
+                    # terminator punctuation (e.g. a lone "。" used as its
+                    # own one-line rhetorical beat) isn't real content on
+                    # its own - fold it onto the immediately preceding
+                    # chunk instead of giving it a pointless chunk (and a
+                    # full section/paragraph-level silence) of its own.
+                    # Left alone, this also shows up as a stray doubled
+                    # "。。" once the reader app runs it into its neighbor.
+                    # prev_section/prev_paragraph are deliberately NOT
+                    # updated here, so whatever real content comes next
+                    # still gets the structural boundary (and silence) it
+                    # actually deserves.
+                    chunks[-1]["text"] = _append_punct_only(chunks[-1]["text"], tts_text)
+                    chunks[-1]["display_text"] = _append_punct_only(
+                        chunks[-1]["display_text"], display_text)
                     continue
 
                 if prev_section is None:
@@ -430,13 +413,14 @@ def build_chunks(raw_text):
                 else:
                     structural_tag = "sentence"
 
-                boundary_tags = [structural_tag] + merged_chunk["gap_tags"]
+                boundary_tags = [structural_tag]
 
                 chunks.append({
                     "section": sec_idx,
                     "paragraph": par_idx,
                     "chunk": chunk_idx,
-                    "text": clean_text,
+                    "text": tts_text,
+                    "display_text": display_text,
                     "boundary_tags": boundary_tags,
                     "silence_units": silence_units_for(boundary_tags),
                     "silence_kind": silence_kind_for(boundary_tags),
