@@ -25,6 +25,7 @@ DEFAULT_SETTINGS = {
     "clean_temp_after_run": True,
     "uv_project_dir": r"C:\Irodori-TTS",  # not used by this script directly, kept for the GUI launcher
     "auto_tag_generated_files": False,
+    "max_chunk_length": 100,
 }
 
 
@@ -98,6 +99,12 @@ SILENCE_DURATIONS = {
     "paragraph": float(SETTINGS["silence_duration_paragraph"]),
     "section": float(SETTINGS["silence_duration_section"]),
 }
+# Soft limit on TTS chunk length (characters), user-configurable on the
+# GUI's Advanced page. The hard limit (text_pipeline.merge_units() only
+# crosses it to avoid cutting a sentence off mid-way - see its docstring)
+# is always exactly 30 characters above it, not separately configurable.
+MAX_CHUNK_LENGTH = int(SETTINGS["max_chunk_length"])
+MAX_CHUNK_LENGTH_HARD = MAX_CHUNK_LENGTH + 30
 CLEAN_TEMP_AFTER_RUN = bool(SETTINGS["clean_temp_after_run"])
 
 # Shared, run-scoped folder holding the three rendered silence wavs. They
@@ -364,7 +371,8 @@ def process_chapter(chapter_path):
     # merged TTS input chunks, with 「」/（） edges and "──" as forced
     # break points rather than whole-span isolation). See text_pipeline.py
     # / text-cleaning-logic-spec.md.
-    chunks, working_data = text_pipeline.build_chunks(raw_text)
+    chunks, working_data = text_pipeline.build_chunks(
+        raw_text, soft_limit=MAX_CHUNK_LENGTH, hard_limit=MAX_CHUNK_LENGTH_HARD)
 
     if not chunks:
         print(f"Error: No text chunks produced for {chapter_name[0]} - is the file empty?")

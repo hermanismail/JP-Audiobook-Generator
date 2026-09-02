@@ -316,9 +316,12 @@ def prepare_tts_text(text):
     return text
 
 
-def build_chunks(raw_text):
-    """Run the full pipeline on one chapter's raw text. Returns a flat,
-    ordered list of dicts:
+def build_chunks(raw_text, soft_limit=SOFT_LIMIT, hard_limit=HARD_LIMIT):
+    """Run the full pipeline on one chapter's raw text. soft_limit/
+    hard_limit are forwarded straight to merge_units() - see run_audiobook.py,
+    which derives them from the GUI's "Max Chunk Length" advanced setting
+    (hard_limit = soft_limit + 30) instead of always using this module's
+    100/130 defaults. Returns a flat, ordered list of dicts:
         {
           "section": int, "paragraph": int, "chunk": int,   # 1-indexed,
                                                               # chunk resets
@@ -376,7 +379,7 @@ def build_chunks(raw_text):
             units = split_sentences(para_text)
             sentences_by_paragraph[(sec_idx, par_idx)] = units
 
-            merged = merge_units(units)
+            merged = merge_units(units, soft_limit=soft_limit, hard_limit=hard_limit)
 
             for chunk_idx, display_text in enumerate(merged, start=1):
                 if not display_text.strip():

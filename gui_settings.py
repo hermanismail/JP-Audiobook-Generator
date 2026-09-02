@@ -21,7 +21,7 @@ Layout notes (2026-08 tab restructure):
 
     - General page  = path/model settings (previously the only page).
     - Advanced page = Sentence/Paragraph/Section Silence Duration
-      + Keep Temp Files.
+      + Max Chunk Length + Keep Temp Files.
     - Metadata page = Author / Book Title / Genre / auto chapter
       numbering / cover art, all persisted to settings.json. "Apply Tags
       to Output MP3s" (mp3_metadata.py, using mutagen) writes the actual
@@ -82,6 +82,7 @@ DEFAULT_SETTINGS = {
     "auto_number_chapters": True,
     "cover_art_path": "",
     "auto_tag_generated_files": False,
+    "max_chunk_length": 100,
 }
 
 # ---------------------------------------------------------------------------
@@ -109,7 +110,8 @@ ICON_UV_BG = "#2BC0BA"
 
 # (emoji, pastel_bg, icon_color) for the lower "preference" cards
 ICON_SILENCE = ("\U0001F550", "#EDEBFC", "#6C5DD3")   # 🕐 clock
-ICON_KEEP_TEMP = ("\u2714", "#E6F8ED", "#2FB668")      # ✔ check
+ICON_KEEP_TEMP = ("\u2714", "#E6F8ED", "#2FB668")      # check
+ICON_CHUNK_LENGTH = ("\U0001F4CF", "#FFF1E0", "#E08A2C")  # ruler
 
 # (emoji, pastel_bg, icon_color) for the metadata cards
 ICON_AUTHOR = ("\U0001F464", "#EDEBFC", "#6C5DD3")     # 👤 person
@@ -220,11 +222,12 @@ class NumberSpinner(ctk.CTkFrame):
     """A small numeric entry with up/down stepper buttons (mimics the
     mockup's silence-duration spinner; ttk/CTk have no native spinbox)."""
 
-    def __init__(self, parent, textvariable, step=0.5, minval=0.0, **kwargs):
+    def __init__(self, parent, textvariable, step=0.5, minval=0.0, integer=False, **kwargs):
         super().__init__(parent, fg_color="transparent", **kwargs)
         self.var = textvariable
         self.step = step
         self.minval = minval
+        self.integer = integer
 
         self.entry = ctk.CTkEntry(
             self, textvariable=self.var, width=70, height=36, corner_radius=8,
@@ -259,8 +262,9 @@ class NumberSpinner(ctk.CTkFrame):
     def _decrement(self):
         self.var.set(self._fmt(round(max(self.minval, self._current() - self.step), 2)))
 
-    @staticmethod
-    def _fmt(value):
+    def _fmt(self, value):
+        if self.integer:
+            return str(int(value))
         # Keep whole numbers looking like "1.0" rather than "1" for clarity.
         return f"{value:g}" if value != int(value) else f"{value:.1f}"
 
@@ -302,6 +306,8 @@ class SettingsApp(ctk.CTk):
             "silence_duration_section": ctk.StringVar(
                 value=str(self.settings["silence_duration_section"])),
             "uv_project_dir": ctk.StringVar(value=self.settings["uv_project_dir"]),
+            "max_chunk_length": ctk.StringVar(
+                value=str(self.settings["max_chunk_length"])),
         }
 
         initial_keep = not bool(self.settings.get("clean_temp_after_run", True))
@@ -526,6 +532,7 @@ class SettingsApp(ctk.CTk):
             prefs_card, "silence_duration_section",
             "Section Silence (seconds)",
             "Gap between sections (text separated by a blank line)")
+        self._add_chunk_length_row(prefs_card)
         self._add_toggle_row(prefs_card)
 
     # ---------- Metadata page ----------
@@ -662,6 +669,26 @@ class SettingsApp(ctk.CTk):
         text_frame.pack(side="left", fill="x", expand=True)
 
         NumberSpinner(row, self.vars[var_key], step=0.5, minval=0.0).pack(side="right")
+
+    def _add_chunk_length_row(self, parent):
+        """Soft cap (characters) on how much text text_pipeline.merge_units()
+        packs into one TTS chunk before starting a new one - see
+        run_audiobook.py's MAX_CHUNK_LENGTH. The hard limit it only crosses
+        to avoid cutting a sentence off mid-way is always this + 30
+        characters, not separately configurable."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_CHUNK_LENGTH
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+        text_frame = self._title_block(
+            row, "Max Chunk Length (characters)",
+            "Sentences are merged into one TTS chunk up to this length "
+            "(hard limit: this + 30 characters)")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+        NumberSpinner(
+            row, self.vars["max_chunk_length"], step=10, minval=20,
+            integer=True).pack(side="right")
 
     def _add_toggle_row(self, parent):
         row = self._row_shell(parent)
@@ -820,7 +847,7 @@ class SettingsApp(ctk.CTk):
                     "speaker_path", "uv_project_dir"):
             self.vars[key].set(DEFAULT_SETTINGS[key])
         for key in ("silence_duration_sentence", "silence_duration_paragraph",
-                    "silence_duration_section"):
+                    "silence_duration_section", "max_chunk_length"):
             self.vars[key].set(str(DEFAULT_SETTINGS[key]))
         keep_temp = not DEFAULT_SETTINGS["clean_temp_after_run"]
         self.keep_temp_var.set(1 if keep_temp else 0)
@@ -859,6 +886,16 @@ class SettingsApp(ctk.CTk):
                 return None
             silences[key] = value
 
+        try:
+            max_chunk_length = int(float(self.vars["max_chunk_length"].get()))
+            if max_chunk_length < 20:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "Invalid Value",
+                "Max Chunk Length must be a whole number of at least 20 characters.")
+            return None
+
         data = {
             "input_folder": self.vars["input_folder"].get().strip(),
             "output_folder": self.vars["output_folder"].get().strip(),
@@ -876,6 +913,7 @@ class SettingsApp(ctk.CTk):
             "auto_number_chapters": bool(self.auto_number_var.get()),
             "cover_art_path": self.metadata_vars["cover_art_path"].get().strip(),
             "auto_tag_generated_files": bool(self.auto_tag_var.get()),
+            "max_chunk_length": max_chunk_length,
         }
 
         for key in ("input_folder", "output_folder", "temp_dir", "model_path", "speaker_path",
