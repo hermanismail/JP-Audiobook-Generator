@@ -40,19 +40,29 @@ Pipeline stages implemented here:
   5. prepare_tts_text()  - per-chunk text transform applied ONLY to the
                             text actually sent to the TTS engine (the
                             reader-facing sync.json text keeps the
-                            original, untransformed wording):
+                            original wording, brackets included, as-is):
                               - "─"/"──" (any run) -> single "、" - a
                                 mid-sentence pause marker the TTS model
                                 doesn't understand, but a comma reads
                                 naturally in its place.
+                              - every "「"/"」" is removed (2026-09 v4 -
+                                Irodori-TTS turned out not to reliably
+                                pause around a kept bracket even with a
+                                "、" placed next to it). A bracket next to
+                                an existing terminator/comma, or at the
+                                very edge of the chunk, is just dropped;
+                                anywhere else it becomes a single "、" -
+                                see _convert_brackets().
                               - a run of 2+ terminator/comma marks
                                 (。？……、) - e.g. one left stacked up by the
-                                dash substitution above, or already
-                                present like "……、" - collapses to just the
-                                last mark in that run.
-                              - a "、" immediately before "「" is dropped -
-                                back-to-back "、「" reads as two pause cues
-                                in a row and confuses the model.
+                                dash/bracket substitutions above, or
+                                already present like "……、" - collapses to
+                                just the last mark in that run. This is
+                                also what reduces a chain like "」「" (now
+                                two adjacent "、"s) down to one, and a
+                                chain like "？」「" down to a single "、"
+                                too (the "？" and the new "、" end up
+                                adjacent once the "」" between them drops).
   6. build_chunks()      - runs the full pipeline end-to-end and returns
                             an ordered, flat list of chunk dicts, each
                             annotated with:
@@ -260,8 +270,10 @@ def merge_units(units, soft_limit=SOFT_LIMIT, hard_limit=HARD_LIMIT):
 # --- TTS-only text normalization ------------------------------------------
 DASH_RUN_RE = re.compile("─+")
 PUNCT_TOKEN_RE = re.compile(r"。|？|……|、")
-COMMA_BEFORE_OPEN_BRACKET_RE = re.compile("、(?=「)")
 PUNCT_ONLY_RE = re.compile(r"[。？……、]+")
+BRACKETS = "「」"
+TERMINATOR_OR_COMMA_CHARS = "。？…、"  # single-char membership check - each
+                                        # "…" in "……" matches individually
 
 
 def _append_punct_only(base_text, addition):
@@ -305,14 +317,47 @@ def _collapse_redundant_punctuation(text):
     return "".join(out)
 
 
+def _convert_brackets(text):
+    """Removes every "「"/"」" for TTS (2026-09 v4 - Irodori-TTS turned out
+    not to insert a natural pause reliably around a kept bracket, even with
+    a "、" placed next to it - see prepare_tts_text()'s docstring). A
+    bracket touching an existing terminator/comma (。？……、) - on EITHER
+    side - already has a pause cue right there and contributes nothing
+    extra, so it's just dropped; same for a bracket sitting at the very
+    edge of the chunk (nothing on that side to pause against - the real
+    inter-chunk silence is handled separately, by run_audiobook.py's
+    silence wavs). Anywhere else a bracket is replaced by a single "、",
+    standing in for the pause the bracket used to visually mark. This
+    naturally collapses a run like "」「" into two adjacent "、"s, which
+    _collapse_redundant_punctuation() (run right after this) then reduces
+    to just one - and the same goes for a chain like "？」「", where the
+    dropped "」" leaves "？" and the new "、" adjacent, so that collapse
+    reduces the whole run to a single "、" too."""
+    n = len(text)
+    out = []
+    for i, ch in enumerate(text):
+        if ch not in BRACKETS:
+            out.append(ch)
+            continue
+        prev_ch = text[i - 1] if i > 0 else None
+        next_ch = text[i + 1] if i + 1 < n else None
+        if prev_ch is None or next_ch is None:
+            continue
+        if prev_ch in TERMINATOR_OR_COMMA_CHARS or next_ch in TERMINATOR_OR_COMMA_CHARS:
+            continue
+        out.append(COMMA)
+    return "".join(out)
+
+
 def prepare_tts_text(text):
     """Derives the text actually sent to the TTS engine from a chunk's
-    display text. See module docstring stage 5 for the rationale behind
-    each step. The reader-facing sync.json text is NOT run through this -
-    it keeps the original wording as-is."""
+    display text. See module docstring stage 5 and _convert_brackets() for
+    the rationale behind each step. The reader-facing sync.json text is NOT
+    run through this - it keeps the original wording, brackets included,
+    as-is."""
     text = DASH_RUN_RE.sub(COMMA, text)
+    text = _convert_brackets(text)
     text = _collapse_redundant_punctuation(text)
-    text = COMMA_BEFORE_OPEN_BRACKET_RE.sub("", text)
     return text
 
 
