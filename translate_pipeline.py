@@ -80,8 +80,142 @@ def translate_identity(japanese_texts, **_kwargs):
     return list(japanese_texts)
 
 
+# --- VNTL-Llama3-8B-v2, served locally by llama.cpp's llama-server ---------
+#
+# VNTL is a completion model, not an instruction-following one: you do not
+# ask it to translate, you write the beginning of a Japanese/English
+# transcript and let it finish the English side. That has three consequences
+# that shape everything below.
+#
+# 1. It cannot take a batch of indexed lines and hand back indexed lines, so
+#    it is driven one chunk at a time. That is not a compromise - it makes
+#    misalignment impossible, because the model never sees an index and the
+#    pairing comes from this loop rather than from parsing a response.
+# 2. Its prompt uses the LLaMA 3 token scheme but with custom header roles -
+#    Metadata, Japanese, English - rather than system/user/assistant. No
+#    chat-completions API can express that; it would apply its own template
+#    and corrupt the prompt. Hence /completion with a raw string.
+# 3. Its metadata block IS the glossary and its alternating history IS the
+#    rolling context window. Both are native to the format rather than
+#    bolted on.
+
+LLAMA_SERVER_URL = "http://127.0.0.1:8080"
+
+# How many previous chunk pairs to carry as context. The spec's guidance is
+# 10-20; each pair is roughly 100 JA chars plus its English, so 12 sits
+# comfortably inside an 8k context alongside the glossary.
+VNTL_CONTEXT_PAIRS = 12
+
+# Generous, because a long chunk can produce a long sentence, but bounded so
+# a runaway generation cannot stall a 314-chunk chapter indefinitely.
+VNTL_MAX_TOKENS = 400
+VNTL_TIMEOUT_SECONDS = 180
+
+_BOT = "<|begin_of_text|>"
+_SH, _EH, _EOT = "<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>"
+
+
+def _section(role, body):
+    return f"{_SH}{role}{_EH}\n\n{body}{_EOT}"
+
+
+def load_glossary(output_folder):
+    """Book-level glossary, hand-editable, living beside the chapters.
+
+    Persisted precisely so chapter 15 does not rename a character
+    introduced in chapter 2 - and so a human can correct a reading the
+    model keeps getting wrong, once, in one place. Absent file is fine and
+    means an empty metadata block."""
+    path = os.path.join(output_folder, "glossary.json")
+    if not os.path.exists(path):
+        return {"characters": [], "notes": []}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.setdefault("characters", [])
+    data.setdefault("notes", [])
+    return data
+
+
+def build_metadata_block(glossary):
+    """Renders the glossary into VNTL's native metadata section.
+
+    Gender is a trained-in slot rather than decoration: Japanese drops
+    pronouns constantly, and without it the model guesses "he" for a
+    character it has been told nothing about."""
+    lines = []
+    for ch in glossary.get("characters", []):
+        parts = [f"[character] Name: {ch.get('en') or ch.get('name', '')}"]
+        if ch.get("name") and ch.get("en"):
+            parts[0] = f"[character] Name: {ch['en']} ({ch['name']})"
+        if ch.get("gender"):
+            parts.append(f"Gender: {ch['gender']}")
+        if ch.get("aliases"):
+            parts.append(f"Aliases: {ch['aliases']}")
+        lines.append(" | ".join(parts))
+    lines.extend(glossary.get("notes", []))
+    return "\n".join(lines)
+
+
+def build_vntl_prompt(japanese, history, glossary):
+    """One prompt: metadata, then the previous pairs as completed
+    Japanese/English sections, then the current Japanese line with an empty
+    English header for the model to continue from."""
+    parts = [_BOT, _section("Metadata", build_metadata_block(glossary))]
+    for prev_ja, prev_en in history:
+        parts.append(_section("Japanese", prev_ja))
+        parts.append(_section("English", prev_en))
+    parts.append(_section("Japanese", japanese))
+    # Deliberately unterminated - this is where generation begins.
+    parts.append(f"{_SH}English{_EH}\n\n")
+    return "".join(parts)
+
+
+def _llama_completion(prompt, url=LLAMA_SERVER_URL):
+    """Raw completion against llama-server. Temperature 0 and no repetition
+    penalty are the model author's explicit recommendation - a repetition
+    penalty is actively harmful for translation, since it punishes the
+    legitimately recurring tokens (character names, particles) and pushes
+    the model into renaming or omitting them."""
+    import urllib.request
+
+    payload = json.dumps({
+        "prompt": prompt,
+        "temperature": 0.0,
+        "repeat_penalty": 1.0,
+        "n_predict": VNTL_MAX_TOKENS,
+        "stop": [_EOT, _SH],
+        "cache_prompt": True,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"{url}/completion", data=payload,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=VNTL_TIMEOUT_SECONDS) as resp:
+        return json.loads(resp.read().decode("utf-8"))["content"].strip()
+
+
+def translate_vntl(japanese_texts, *, settings=None, base_name=None,
+                   progress=True, **_kwargs):
+    glossary = load_glossary(settings["output_folder"]) if settings else {"characters": [], "notes": []}
+    history = []
+    english = []
+
+    for i, japanese in enumerate(japanese_texts, start=1):
+        prompt = build_vntl_prompt(japanese, history, glossary)
+        line = _llama_completion(prompt)
+        english.append(line)
+        history.append((japanese, line))
+        if len(history) > VNTL_CONTEXT_PAIRS:
+            history = history[-VNTL_CONTEXT_PAIRS:]
+        if progress and (i % 10 == 0 or i == len(japanese_texts)):
+            print(f"    {base_name or ''} {i}/{len(japanese_texts)} chunk(s) translated")
+
+    return english
+
+
 BACKENDS = {
     "identity": translate_identity,
+    "vntl": translate_vntl,
 }
 
 
@@ -243,7 +377,8 @@ def read_translation(path):
 # ---------------------------------------------------------------------------
 
 def generate_subtitles(settings, base_names=None, backend="identity",
-                       srt_only=False, model_name=None, verbose=True):
+                       srt_only=False, model_name=None, verbose=True,
+                       limit=None):
     """Translates the named chapters (or every rendered one) and writes a
     .translation.json plus a .srt for each, into output_folder alongside
     the MP3 and sync.json.
@@ -290,7 +425,17 @@ def generate_subtitles(settings, base_names=None, backend="identity",
                 continue
 
             japanese = [c["text"] for c in chunks]
-            english = translate(japanese, base_name=base_name, settings=settings)
+            if limit is not None and limit < len(japanese):
+                # Sampling run: translate the first N chunks and leave the
+                # rest blank rather than truncating the chapter. Every chunk
+                # keeps its index and timing, so the .srt still lines up with
+                # the audio - it just goes quiet past the sample. Being able
+                # to hear 20 chunks without waiting for 314 is what makes
+                # prompt and glossary iteration practical.
+                english = translate(japanese[:limit], base_name=base_name,
+                                    settings=settings) + [""] * (len(japanese) - limit)
+            else:
+                english = translate(japanese, base_name=base_name, settings=settings)
 
             doc = build_translation_doc(base_name, sync_data, english, backend,
                                         model_name=model_name)
@@ -325,6 +470,10 @@ if __name__ == "__main__":
                          choices=sorted(BACKENDS),
                          help="Translation backend (default: identity, which "
                               "passes the Japanese through unchanged).")
+    _parser.add_argument("--limit", type=int, default=None,
+                         help="Translate only the first N chunks of each "
+                              "chapter, leaving the rest blank. For sampling "
+                              "quality without waiting for a whole chapter.")
     _parser.add_argument("--srt-only", action="store_true",
                          help="Re-emit each .srt from its existing "
                               ".translation.json without translating again.")
@@ -339,7 +488,8 @@ if __name__ == "__main__":
     print(f"Backend: {_args.backend}" + ("  (--srt-only)" if _args.srt_only else ""))
 
     _result = generate_subtitles(_settings, base_names=_bases,
-                                 backend=_args.backend, srt_only=_args.srt_only)
+                                 backend=_args.backend, srt_only=_args.srt_only,
+                                 limit=_args.limit)
 
     print(f"Wrote subtitles for {_result.total} chapter(s).")
     if _result.missing:
