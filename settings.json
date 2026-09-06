@@ -1,12 +1,11 @@
 {
-  "input_folder": "F:\\AUDIOBOOK_CHAPTER\\yojo-senki",
-  "output_folder": "F:\\AUDIOBOOK_OUTPUT\\yojo-senki",
+  "input_folder": "F:\\AUDIOBOOK_CHAPTER\\test\\test-20260906",
+  "output_folder": "F:\\AUDIOBOOK_OUTPUT\\test\\mikku-20260906\\015",
   "temp_dir": "E:\\tmp-audiobook",
-  "model_path": "C:\\Irodori-TTS\\model.safetensors",
-  "speaker_path": "C:\\Irodori-TTS\\seiyuu\\yaoi2\\checkpoint_final.speaker.safetensors",
+  "speaker_path": "C:\\Irodori-TTS\\seiyuu\\mikku\\02\\checkpoint_final.speaker.safetensors",
   "silence_duration_sentence": 1.0,
-  "silence_duration_paragraph": 1.0,
-  "silence_duration_section": 1.5,
+  "silence_duration_paragraph": 1.1,
+  "silence_duration_section": 1.2,
   "clean_temp_after_run": true,
   "uv_project_dir": "C:\\Irodori-TTS",
   "author_name": "\u30ab\u30eb\u30ed\u30fb\u30bc\u30f3",
@@ -14,5 +13,12 @@
   "genre": "Audiobook",
   "auto_number_chapters": true,
   "cover_art_path": "F:\\AUDIOBOOK_OUTPUT\\yojo-senki\\yojosenki_001.png",
-  "auto_tag_generated_files": true
+  "auto_tag_generated_files": false,
+  "max_chunk_length": 40,
+  "duration_scale": 1.1,
+  "no_trim_tail": false,
+  "seed_enabled": false,
+  "seed_value": 20260906,
+  "mp3_mono": false,
+  "mp3_bitrate": "96k"
 }

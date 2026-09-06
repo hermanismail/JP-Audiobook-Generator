@@ -17,7 +17,6 @@ DEFAULT_SETTINGS = {
     "input_folder": r"E:\AUDIOBOOK\chapter",
     "output_folder": r"E:\AUDIOBOOK\output",
     "temp_dir": r"D:\AUDIOBOOK_TMP",
-    "model_path": r"C:\Irodori-TTS\model.safetensors",
     "speaker_path": r"C:\Irodori-TTS\seiyuu\ueshama.speaker.safetensors",
     "silence_duration_sentence": 1.0,
     "silence_duration_paragraph": 1.2,
@@ -26,6 +25,17 @@ DEFAULT_SETTINGS = {
     "uv_project_dir": r"C:\Irodori-TTS",  # not used by this script directly, kept for the GUI launcher
     "auto_tag_generated_files": False,
     "max_chunk_length": 100,
+    # Per-speaker TTS tuning, set on the GUI's Advanced page. These vary
+    # enough between trained speakers that fixing them here produced
+    # inconsistent results across voices. Keep in step with
+    # gui_settings.DEFAULT_SETTINGS.
+    "duration_scale": 1.2,
+    "no_trim_tail": True,
+    "seed_enabled": False,
+    "seed_value": 20260906,
+    # Output encoding.
+    "mp3_mono": True,
+    "mp3_bitrate": "96k",
 }
 
 
@@ -89,7 +99,13 @@ SETTINGS = load_settings()
 INPUT_FOLDER = SETTINGS["input_folder"]
 OUTPUT_FOLDER = SETTINGS["output_folder"]
 TEMP_DIR = SETTINGS["temp_dir"]
-MODEL_PATH = SETTINGS["model_path"]
+# The model is no longer a setting - it was dropped from the GUI once the
+# pipeline moved to the published Hugging Face checkpoint, which needs no
+# per-book or per-speaker choice. Change this one line to point somewhere
+# else; checkpoint_args() below accepts either form, so a local
+# ".safetensors" path still works, as does a "repo/subfolder" id such as
+# Aratako/Irodori-TTS-v4.1-Small-Quantized/int8-weight-only.
+MODEL_REF = "Aratako/Irodori-TTS-v4.1-Small"
 SPEAKER_PATH = SETTINGS["speaker_path"]
 # Independent gap durations, in seconds - one per silence kind produced by
 # text_pipeline.silence_kind_for(). Each is rendered to its own wav once
@@ -106,6 +122,46 @@ SILENCE_DURATIONS = {
 MAX_CHUNK_LENGTH = int(SETTINGS["max_chunk_length"])
 MAX_CHUNK_LENGTH_HARD = MAX_CHUNK_LENGTH + 30
 CLEAN_TEMP_AFTER_RUN = bool(SETTINGS["clean_temp_after_run"])
+
+
+def checkpoint_args(model_ref):
+    """Builds the checkpoint argument pair for infer.py.
+
+    infer.py takes the model EITHER as a local file (--checkpoint) OR as a
+    Hugging Face repo id (--hf-checkpoint), and those two live in a
+    mutually exclusive, required argparse group. Passing both makes it exit
+    with code 2 before generating anything, so exactly one has to be
+    chosen here.
+
+    Which one is decided from the value itself, so the GUI's single "Model
+    Path" field can hold either form:
+        C:\\Irodori-TTS\\model.safetensors  ->  --checkpoint
+        Aratako/Irodori-TTS-v4.1-Small     ->  --hf-checkpoint
+
+    A repo id is "org/name", so the giveaways for a local path are a drive
+    letter or leading slash, a backslash, or a weights file extension.
+    Anything else is treated as a repo id."""
+    ref = (model_ref or "").strip()
+    looks_local = (
+        os.path.isabs(ref)
+        or "\\" in ref
+        or ref.lower().endswith((".safetensors", ".pt"))
+    )
+    return ["--checkpoint" if looks_local else "--hf-checkpoint", ref]
+
+
+CHECKPOINT_ARGS = checkpoint_args(MODEL_REF)
+
+# infer.py tuning, all set per preset on the GUI's Advanced page.
+DURATION_SCALE = float(SETTINGS["duration_scale"])
+NO_TRIM_TAIL = bool(SETTINGS["no_trim_tail"])
+SEED_ENABLED = bool(SETTINGS["seed_enabled"])
+SEED_VALUE = int(SETTINGS["seed_value"])
+
+# ffmpeg output encoding. Mono because that is what Irodori-TTS renders;
+# stereo would duplicate the same signal into both channels.
+MP3_CHANNELS = "1" if bool(SETTINGS["mp3_mono"]) else "2"
+MP3_BITRATE = str(SETTINGS["mp3_bitrate"])
 
 # Shared, run-scoped folder holding the three rendered silence wavs. They
 # are generated once (on the first chapter, once a real TTS wav exists to
@@ -403,23 +459,40 @@ def process_chapter(chapter_path):
 
         cmd = [
             "uv", "run", "--no-sync", "python", "infer.py",
-            "--checkpoint", MODEL_PATH,
+            *CHECKPOINT_ARGS,
             "--ref-embed", SPEAKER_PATH,
             "--text", chunk["text"],
-            "--output-wav", wav_filename
+            "--output-wav", wav_filename,
+            "--duration-scale", str(DURATION_SCALE),
         ]
+        if NO_TRIM_TAIL:
+            cmd.append("--no-trim-tail")
+        if SEED_ENABLED:
+            cmd += ["--seed", str(SEED_VALUE)]
 
         print(f" Generating chunk {i}/{len(chunks)} "
               f"(sec {chunk['section']:03d} par {chunk['paragraph']:03d}, "
               f"{len(chunk['text'])} chars, "
               f"silence_{chunk['silence_kind']} before "
               f"[{','.join(chunk['boundary_tags'])}])...")
-        subprocess.run(cmd, capture_output=True)
+        result = subprocess.run(cmd, capture_output=True)
 
         if os.path.exists(wav_filename):
             audio_files.append(wav_filename)
             silence_kind_before_wav.append(chunk["silence_kind"])
             sync_chunk_texts.append(chunk["display_text"])
+        else:
+            # Previously this branch just skipped the chunk in silence,
+            # which made any systematic infer.py failure (a bad checkpoint
+            # argument, a missing speaker file, an out-of-memory GPU) look
+            # like "nothing happened" with nothing to debug from. Print what
+            # infer.py actually said - the tail, since a traceback's last
+            # lines are the informative part.
+            stderr = result.stderr.decode("utf-8", "replace").strip()
+            print(f"  ! chunk {i} produced no audio (infer.py exit code "
+                  f"{result.returncode}):")
+            print("    " + (stderr[-600:].replace("\n", "\n    ")
+                            if stderr else "(no error output)"))
 
     # Step 5: Combine parts into final MP3, inserting exactly one silence
     # file before each chunk - silence_sentence.wav, silence_paragraph.wav
@@ -459,8 +532,8 @@ def process_chapter(chapter_path):
         "-safe", "0",
         "-i", concat_list_path,
         "-acodec", "libmp3lame",
-        "-ac", "2",
-        "-b:a", "320k",
+        "-ac", MP3_CHANNELS,
+        "-b:a", MP3_BITRATE,
         output_mp3
     ]
 
@@ -516,6 +589,17 @@ def process_chapter(chapter_path):
 
 
 def main():
+    # Fail fast on a local checkpoint that isn't there, rather than letting
+    # every chunk in the book fail the same way one at a time.
+    if CHECKPOINT_ARGS[0] == "--checkpoint" and not os.path.isfile(CHECKPOINT_ARGS[1]):
+        print(f"Error: Model Path is a local file that doesn't exist:\n  {CHECKPOINT_ARGS[1]}")
+        print("Point it at an existing .safetensors file, or at a Hugging Face "
+              "repo id such as Aratako/Irodori-TTS-v4.1-Small.")
+        return
+
+    source = "local file" if CHECKPOINT_ARGS[0] == "--checkpoint" else "Hugging Face repo"
+    print(f"Model: {CHECKPOINT_ARGS[1]}  ({source})")
+
     # Find all chapter_*.txt files in E:\AUDIOBOOK\chapter
     chapter_files = sorted(glob.glob(os.path.join(INPUT_FOLDER, "chapter_*.txt")))
 

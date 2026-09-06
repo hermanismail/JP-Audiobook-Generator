@@ -69,7 +69,6 @@ DEFAULT_SETTINGS = {
     "input_folder": r"E:\AUDIOBOOK\chapter",
     "output_folder": r"E:\AUDIOBOOK\output",
     "temp_dir": r"D:\AUDIOBOOK_TMP",
-    "model_path": r"C:\Irodori-TTS\model.safetensors",
     "speaker_path": r"C:\Irodori-TTS\seiyuu\ueshama.speaker.safetensors",
     "silence_duration_sentence": 1.0,
     "silence_duration_paragraph": 1.2,
@@ -83,6 +82,17 @@ DEFAULT_SETTINGS = {
     "cover_art_path": "",
     "auto_tag_generated_files": False,
     "max_chunk_length": 100,
+    # Per-speaker TTS tuning. These vary enough between trained speakers
+    # that fixing them in code produced inconsistent results, so they are
+    # settings rather than constants - see run_audiobook.py's matching
+    # defaults dict, which must be kept in step with this one.
+    "duration_scale": 1.2,
+    "no_trim_tail": True,
+    "seed_enabled": False,
+    "seed_value": 20260906,
+    # Output encoding.
+    "mp3_mono": True,
+    "mp3_bitrate": "96k",
 }
 
 # ---------------------------------------------------------------------------
@@ -112,6 +122,11 @@ ICON_UV_BG = "#2BC0BA"
 ICON_SILENCE = ("\U0001F550", "#EDEBFC", "#6C5DD3")   # 🕐 clock
 ICON_KEEP_TEMP = ("\u2714", "#E6F8ED", "#2FB668")      # check
 ICON_CHUNK_LENGTH = ("\U0001F4CF", "#FFF1E0", "#E08A2C")  # ruler
+ICON_DURATION_SCALE = ("⏳", "#EDEBFC", "#6C5DD3")    # ⏳ hourglass (pacing)
+ICON_TRIM_TAIL = ("✂", "#FCEAEA", "#D85A5A")         # ✂ scissors
+ICON_SEED = ("\U0001F331", "#E6F8ED", "#2FB668")          # 🌱 seedling
+ICON_CHANNELS = ("\U0001F3A7", "#E6F1FB", "#3378C9")      # 🎧 headphones
+ICON_BITRATE = ("\U0001F4CA", "#FFF1E0", "#E08A2C")       # 📊 bar chart
 
 # (emoji, pastel_bg, icon_color) for the metadata cards
 ICON_AUTHOR = ("\U0001F464", "#EDEBFC", "#6C5DD3")     # 👤 person
@@ -297,7 +312,6 @@ class SettingsApp(ctk.CTk):
             "input_folder": ctk.StringVar(value=self.settings["input_folder"]),
             "output_folder": ctk.StringVar(value=self.settings["output_folder"]),
             "temp_dir": ctk.StringVar(value=self.settings["temp_dir"]),
-            "model_path": ctk.StringVar(value=self.settings["model_path"]),
             "speaker_path": ctk.StringVar(value=self.settings["speaker_path"]),
             "silence_duration_sentence": ctk.StringVar(
                 value=str(self.settings["silence_duration_sentence"])),
@@ -308,10 +322,22 @@ class SettingsApp(ctk.CTk):
             "uv_project_dir": ctk.StringVar(value=self.settings["uv_project_dir"]),
             "max_chunk_length": ctk.StringVar(
                 value=str(self.settings["max_chunk_length"])),
+            "duration_scale": ctk.StringVar(
+                value=str(self.settings["duration_scale"])),
+            "seed_value": ctk.StringVar(
+                value=str(self.settings["seed_value"])),
+            "mp3_bitrate": ctk.StringVar(
+                value=str(self.settings["mp3_bitrate"])),
         }
 
         initial_keep = not bool(self.settings.get("clean_temp_after_run", True))
         self.keep_temp_var = ctk.IntVar(value=1 if initial_keep else 0)
+        self.no_trim_tail_var = ctk.IntVar(
+            value=1 if self.settings.get("no_trim_tail", True) else 0)
+        self.seed_enabled_var = ctk.IntVar(
+            value=1 if self.settings.get("seed_enabled", False) else 0)
+        self.mp3_mono_var = ctk.IntVar(
+            value=1 if self.settings.get("mp3_mono", True) else 0)
 
         self.metadata_vars = {
             "author_name": ctk.StringVar(value=self.settings.get("author_name", "")),
@@ -416,11 +442,20 @@ class SettingsApp(ctk.CTk):
             command=self.on_save_and_run,
         ).pack(side="right", padx=(0, 10))
 
+        # Packed right-to-left, so Export is placed before Import to leave
+        # Import sitting to its left.
         ctk.CTkButton(
-            btn_row, text="Save Settings", width=130, height=38, corner_radius=8,
+            btn_row, text="Export Settings", width=130, height=38, corner_radius=8,
             fg_color="transparent", hover_color="#F1F0FC", border_width=1,
             border_color=COLOR_ACCENT, text_color=COLOR_ACCENT,
-            command=self.on_save,
+            command=self.on_export_settings,
+        ).pack(side="right", padx=(0, 10))
+
+        ctk.CTkButton(
+            btn_row, text="Import Settings", width=130, height=38, corner_radius=8,
+            fg_color="transparent", hover_color="#F1F0FC", border_width=1,
+            border_color=COLOR_ACCENT, text_color=COLOR_ACCENT,
+            command=self.on_import_settings,
         ).pack(side="right", padx=(0, 10))
 
         self._show_page("general")
@@ -502,9 +537,6 @@ class SettingsApp(ctk.CTk):
                             "Folder to save generated MP3 files", "output_folder", "folder")
         self._add_path_row(paths_card, *ICON_TEMP, "Temp Folder",
                             "Folder for temporary files", "temp_dir", "folder")
-        self._add_path_row(paths_card, *ICON_MODEL, "Model Path",
-                            "Path to the model (.safetensors)", "model_path", "file",
-                            filetypes=[("SafeTensors", "*.safetensors"), ("All files", "*.*")])
         self._add_path_row(paths_card, *ICON_SPEAKER, "Speaker Path",
                             "Path to the speaker (.safetensors)", "speaker_path", "file",
                             filetypes=[("SafeTensors", "*.safetensors"), ("All files", "*.*")])
@@ -534,6 +566,30 @@ class SettingsApp(ctk.CTk):
             "Gap between sections (text separated by a blank line)")
         self._add_chunk_length_row(prefs_card)
         self._add_toggle_row(prefs_card)
+
+        # TTS tuning. Every speaker embedding responds differently to these,
+        # so they are per-preset rather than fixed in run_audiobook.py -
+        # export a preset per speaker/book and import it before a run.
+        ctk.CTkLabel(parent, text="TTS Tuning", text_color=COLOR_TITLE,
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     anchor="w").pack(fill="x", pady=(20, 8))
+        tts_card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16,
+                                border_width=1, border_color=COLOR_CARD_BORDER)
+        tts_card.pack(fill="x")
+
+        self._add_duration_scale_row(tts_card)
+        self._add_no_trim_tail_row(tts_card)
+        self._add_seed_row(tts_card)
+
+        ctk.CTkLabel(parent, text="Output Encoding", text_color=COLOR_TITLE,
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     anchor="w").pack(fill="x", pady=(20, 8))
+        mp3_card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16,
+                                border_width=1, border_color=COLOR_CARD_BORDER)
+        mp3_card.pack(fill="x")
+
+        self._add_channels_row(mp3_card)
+        self._add_bitrate_row(mp3_card)
 
     # ---------- Metadata page ----------
     def _build_metadata_page(self, parent):
@@ -713,6 +769,162 @@ class SettingsApp(ctk.CTk):
     def _on_toggle_changed(self):
         self.toggle.configure(text=self._toggle_text(bool(self.keep_temp_var.get())))
 
+    # ---------- Advanced page: TTS tuning rows ----------
+    def _add_duration_scale_row(self, parent):
+        """infer.py --duration-scale. Multiplies the duration v4-Small
+        predicts for each chunk: above 1.0 slows delivery, below speeds it
+        up. Every speaker embedding lands differently, which is why this is
+        a per-preset value rather than a constant."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_DURATION_SCALE
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+        text_frame = self._title_block(
+            row, "Duration Scale",
+            "Scales the predicted length of every chunk "
+            "(above 1.0 = slower delivery, below = faster)")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+        NumberSpinner(row, self.vars["duration_scale"], step=0.1,
+                      minval=0.1).pack(side="right")
+
+    def _add_no_trim_tail_row(self, parent):
+        """infer.py --no-trim-tail. ON passes the flag, keeping the trailing
+        region infer.py's tail heuristic would otherwise cut. The heuristic
+        was written for v2's fixed 30-second outputs; on short chunks it can
+        clip the last syllable, but leaving it off adds a little dead air."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_TRIM_TAIL
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+        text_frame = self._title_block(
+            row, "Disable tail trimming (--no-trim-tail)",
+            "ON keeps the end of every chunk intact; OFF lets infer.py trim "
+            "trailing near-silence")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+        self.no_trim_tail_switch = ctk.CTkSwitch(
+            row, text=self._no_trim_tail_text(bool(self.no_trim_tail_var.get())),
+            variable=self.no_trim_tail_var, onvalue=1, offvalue=0,
+            progress_color=COLOR_TOGGLE_ON, button_color="white",
+            switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
+            font=ctk.CTkFont(size=12), command=self._on_no_trim_tail_changed)
+        self.no_trim_tail_switch.pack(side="right")
+
+    def _no_trim_tail_text(self, enabled):
+        return "ON (flag passed)" if enabled else "OFF (infer.py trims)"
+
+    def _on_no_trim_tail_changed(self):
+        self.no_trim_tail_switch.configure(
+            text=self._no_trim_tail_text(bool(self.no_trim_tail_var.get())))
+
+    def _add_seed_row(self, parent):
+        """infer.py --seed. OFF (the default) lets infer.py draw a fresh
+        random seed per chunk. ON pins one seed for the whole run, which
+        makes a run reproducible but has been observed to destabilise some
+        speakers - one unlucky draw then affects every chunk instead of
+        averaging out. The value box only appears while the switch is ON."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_SEED
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+
+        # The switch and its value box share one container that is packed
+        # BEFORE the title block. Tk hands out space in packing order, so a
+        # title block packed first with expand=True eats the whole row and
+        # leaves a right-packed control with nothing to draw into - which is
+        # exactly what happened here when this row's subtitle got long
+        # enough. _add_path_row uses the same ordering for the same reason.
+        # Grouping both controls also keeps the entry's show/hide independent
+        # of the row's packing order.
+        controls = ctk.CTkFrame(row, fg_color="transparent")
+        controls.pack(side="right")
+
+        self.seed_switch = ctk.CTkSwitch(
+            controls, text=self._seed_text(bool(self.seed_enabled_var.get())),
+            variable=self.seed_enabled_var, onvalue=1, offvalue=0,
+            progress_color=COLOR_TOGGLE_ON, button_color="white",
+            switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
+            font=ctk.CTkFont(size=12), command=self._on_seed_toggled)
+        self.seed_switch.pack(side="right")
+
+        # Packed/unpacked by _on_seed_toggled, so it only takes up space
+        # while the switch is ON. Sits to the left of the switch.
+        self.seed_entry = ctk.CTkEntry(
+            controls, textvariable=self.vars["seed_value"], width=110, height=36,
+            corner_radius=8, border_width=1, border_color=COLOR_ENTRY_BORDER,
+            text_color=COLOR_ENTRY_TEXT, fg_color="white")
+
+        text_frame = self._title_block(
+            row, "Fixed sampling seed",
+            "OFF uses a random seed per chunk; ON pins one for the whole run")
+        text_frame.pack(side="left", fill="x", expand=True)
+        self._on_seed_toggled()
+
+    def _seed_text(self, enabled):
+        return "ON (fixed)" if enabled else "OFF (random)"
+
+    def _on_seed_toggled(self):
+        enabled = bool(self.seed_enabled_var.get())
+        self.seed_switch.configure(text=self._seed_text(enabled))
+        if enabled:
+            # Re-fill an emptied box with the default rather than leaving the
+            # user to guess what a valid seed looks like.
+            if not self.vars["seed_value"].get().strip():
+                self.vars["seed_value"].set(str(DEFAULT_SETTINGS["seed_value"]))
+            self.seed_entry.pack(side="right", padx=(0, 12))
+        else:
+            self.seed_entry.pack_forget()
+
+    # ---------- Advanced page: output encoding rows ----------
+    def _add_channels_row(self, parent):
+        """ffmpeg -ac. Irodori-TTS renders mono, so stereo duplicates the
+        same signal into both channels and halves the bits available to the
+        content - mono is the default for that reason."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_CHANNELS
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+        text_frame = self._title_block(
+            row, "Output channels",
+            "Mono matches what the TTS actually renders. Stereo duplicates it "
+            "into both channels")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+        self.mp3_mono_switch = ctk.CTkSwitch(
+            row, text=self._mono_text(bool(self.mp3_mono_var.get())),
+            variable=self.mp3_mono_var, onvalue=1, offvalue=0,
+            progress_color=COLOR_TOGGLE_ON, button_color="white",
+            switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
+            font=ctk.CTkFont(size=12), command=self._on_mono_changed)
+        self.mp3_mono_switch.pack(side="right")
+
+    def _mono_text(self, mono):
+        return "MONO" if mono else "STEREO"
+
+    def _on_mono_changed(self):
+        self.mp3_mono_switch.configure(
+            text=self._mono_text(bool(self.mp3_mono_var.get())))
+
+    def _add_bitrate_row(self, parent):
+        """ffmpeg -b:a. Constant bitrate on purpose: build_sync_data() writes
+        per-chunk offsets that a player seeks to, and VBR seeking leans on a
+        100-entry table that is far coarser than one chunk."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_BITRATE
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+        text_frame = self._title_block(
+            row, "MP3 Bitrate",
+            "Constant bitrate for the stitched chapter, e.g. 96k. "
+            "Speech needs far less than music")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+        ctk.CTkEntry(
+            row, textvariable=self.vars["mp3_bitrate"], width=110, height=36,
+            corner_radius=8, border_width=1, border_color=COLOR_ENTRY_BORDER,
+            text_color=COLOR_ENTRY_TEXT, fg_color="white").pack(side="right")
+
     # ---------- Metadata page row helpers (UI-only) ----------
     def _add_text_row(self, parent, glyph, pastel_bg, icon_color, title, subtitle,
                        string_var, placeholder=""):
@@ -841,34 +1053,13 @@ class SettingsApp(ctk.CTk):
         if not messagebox.askyesno(
                 "Reset to Defaults",
                 "Reset all fields to their default values? This does not save "
-                "until you click 'Save Settings' or 'Save & Run'."):
+                "until you click 'Export Settings' or 'Save & Run'."):
             return
-        for key in ("input_folder", "output_folder", "temp_dir", "model_path",
-                    "speaker_path", "uv_project_dir"):
-            self.vars[key].set(DEFAULT_SETTINGS[key])
-        for key in ("silence_duration_sentence", "silence_duration_paragraph",
-                    "silence_duration_section", "max_chunk_length"):
-            self.vars[key].set(str(DEFAULT_SETTINGS[key]))
-        keep_temp = not DEFAULT_SETTINGS["clean_temp_after_run"]
-        self.keep_temp_var.set(1 if keep_temp else 0)
-        self._on_toggle_changed()
-
-        for key in ("author_name", "book_title", "genre", "cover_art_path"):
-            self.metadata_vars[key].set(DEFAULT_SETTINGS[key])
-        self.auto_number_var.set(1 if DEFAULT_SETTINGS["auto_number_chapters"] else 0)
-        self.auto_tag_var.set(1 if DEFAULT_SETTINGS["auto_tag_generated_files"] else 0)
+        # _apply_settings_to_fields() fills every field from DEFAULT_SETTINGS
+        # and re-syncs all the switch labels, so resetting is just an import
+        # of the defaults.
+        self._apply_settings_to_fields(dict(DEFAULT_SETTINGS))
         self.metadata_status_label.configure(text="")
-        # Refresh both switches' on/off label text and the Apply button's
-        # enabled state so the UI matches the values we just reset to.
-        for switch, var, on_text, off_text in (
-            (self.auto_number_switch, self.auto_number_var,
-             "(Sets the track number based on chapter filename)", "(set track number manually)"),
-            (self.auto_tag_switch, self.auto_tag_var,
-             "(Tag the output mp3 files automatically upon generation)",
-             "(Tag the output mp3 files manually)"),
-        ):
-            switch.configure(text=on_text if var.get() else off_text)
-        self._on_auto_tag_changed()
 
     def _collect_and_validate(self):
         silences = {}
@@ -896,11 +1087,43 @@ class SettingsApp(ctk.CTk):
                 "Max Chunk Length must be a whole number of at least 20 characters.")
             return None
 
+        try:
+            duration_scale = float(self.vars["duration_scale"].get())
+            if duration_scale <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "Invalid Value",
+                "Duration Scale must be a positive number (e.g. 1.2).")
+            return None
+
+        # Only validated when the switch is ON - an unused seed box should
+        # never be able to block a save.
+        seed_value = DEFAULT_SETTINGS["seed_value"]
+        if self.seed_enabled_var.get():
+            try:
+                seed_value = int(float(self.vars["seed_value"].get()))
+                if seed_value < 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Value",
+                    "Sampling seed must be a non-negative whole number "
+                    "(e.g. 20260906), or turn the seed switch off.")
+                return None
+
+        mp3_bitrate = self._normalize_bitrate(self.vars["mp3_bitrate"].get())
+        if mp3_bitrate is None:
+            messagebox.showerror(
+                "Invalid Value",
+                "MP3 Bitrate must be between 32k and 320k, written as "
+                "'96k' or '96'.")
+            return None
+
         data = {
             "input_folder": self.vars["input_folder"].get().strip(),
             "output_folder": self.vars["output_folder"].get().strip(),
             "temp_dir": self.vars["temp_dir"].get().strip(),
-            "model_path": self.vars["model_path"].get().strip(),
             "speaker_path": self.vars["speaker_path"].get().strip(),
             "silence_duration_sentence": silences["silence_duration_sentence"],
             "silence_duration_paragraph": silences["silence_duration_paragraph"],
@@ -914,9 +1137,15 @@ class SettingsApp(ctk.CTk):
             "cover_art_path": self.metadata_vars["cover_art_path"].get().strip(),
             "auto_tag_generated_files": bool(self.auto_tag_var.get()),
             "max_chunk_length": max_chunk_length,
+            "duration_scale": duration_scale,
+            "no_trim_tail": bool(self.no_trim_tail_var.get()),
+            "seed_enabled": bool(self.seed_enabled_var.get()),
+            "seed_value": seed_value,
+            "mp3_mono": bool(self.mp3_mono_var.get()),
+            "mp3_bitrate": mp3_bitrate,
         }
 
-        for key in ("input_folder", "output_folder", "temp_dir", "model_path", "speaker_path",
+        for key in ("input_folder", "output_folder", "temp_dir", "speaker_path",
                     "uv_project_dir"):
             if not data[key]:
                 messagebox.showerror("Missing Value", f"'{key}' cannot be empty.")
@@ -924,12 +1153,140 @@ class SettingsApp(ctk.CTk):
 
         return data
 
-    def on_save(self):
+    @staticmethod
+    def _normalize_bitrate(raw):
+        """Accepts '96k', '96K' or '96' and returns a canonical '96k'.
+        Returns None if it isn't a usable CBR value, which the caller turns
+        into an error dialog."""
+        text = (raw or "").strip().lower().rstrip("k").strip()
+        try:
+            kbps = int(float(text))
+        except ValueError:
+            return None
+        if not 32 <= kbps <= 320:
+            return None
+        return f"{kbps}k"
+
+    def _apply_settings_to_fields(self, data):
+        """Pushes a settings dict into every widget variable. Used by Import
+        Settings; missing keys fall back to DEFAULT_SETTINGS so an older or
+        hand-trimmed preset still loads cleanly."""
+        merged = dict(DEFAULT_SETTINGS)
+        merged.update(data)
+
+        for key in ("input_folder", "output_folder", "temp_dir",
+                    "speaker_path", "uv_project_dir"):
+            self.vars[key].set(merged[key])
+        for key in ("silence_duration_sentence", "silence_duration_paragraph",
+                    "silence_duration_section", "max_chunk_length",
+                    "duration_scale", "seed_value", "mp3_bitrate"):
+            self.vars[key].set(str(merged[key]))
+
+        self.keep_temp_var.set(0 if merged["clean_temp_after_run"] else 1)
+        self.no_trim_tail_var.set(1 if merged["no_trim_tail"] else 0)
+        self.seed_enabled_var.set(1 if merged["seed_enabled"] else 0)
+        self.mp3_mono_var.set(1 if merged["mp3_mono"] else 0)
+
+        for key in ("author_name", "book_title", "genre", "cover_art_path"):
+            self.metadata_vars[key].set(merged[key])
+        self.auto_number_var.set(1 if merged["auto_number_chapters"] else 0)
+        self.auto_tag_var.set(1 if merged["auto_tag_generated_files"] else 0)
+
+        self._refresh_switch_labels()
+
+    def _refresh_switch_labels(self):
+        """Every switch carries its own state in its label text, so anything
+        that changes a switch variable programmatically has to re-sync them."""
+        self._on_toggle_changed()
+        self._on_no_trim_tail_changed()
+        self._on_seed_toggled()
+        self._on_mono_changed()
+        for switch, var, on_text, off_text in (
+            (self.auto_number_switch, self.auto_number_var,
+             "(Sets the track number based on chapter filename)", "(set track number manually)"),
+            (self.auto_tag_switch, self.auto_tag_var,
+             "(Tag the output mp3 files automatically upon generation)",
+             "(Tag the output mp3 files manually)"),
+        ):
+            switch.configure(text=on_text if var.get() else off_text)
+        self._on_auto_tag_changed()
+
+    def on_export_settings(self):
+        """Writes the current form to a preset file of the user's choosing.
+        Deliberately does NOT touch settings.json - presets are per book or
+        per speaker, and settings.json is written by Save & Run, which is
+        what the pipeline actually reads."""
         data = self._collect_and_validate()
         if data is None:
             return
-        save_settings(data)
-        messagebox.showinfo("Saved", "Settings saved to settings.json")
+
+        suggested = "settings"
+        book = data.get("book_title", "").strip()
+        if book:
+            # Keep it filesystem-safe; book titles here are often Japanese.
+            suggested = "".join(c for c in book if c not in '\\/:*?"<>|').strip() or "settings"
+
+        path = filedialog.asksaveasfilename(
+            title="Export Settings", defaultextension=".json",
+            initialfile=f"{suggested}.json",
+            filetypes=[("Settings preset", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except OSError as e:
+            messagebox.showerror("Export Failed", f"Could not write:\n{path}\n\n{e}")
+            return
+
+        messagebox.showinfo(
+            "Exported",
+            f"Settings exported to:\n{path}\n\nThis does not change "
+            "settings.json - use Save & Run to apply these values to a run.")
+
+    def on_import_settings(self):
+        """Loads a preset file into the form. Nothing is written anywhere
+        until the user then clicks Export Settings or Save & Run."""
+        path = filedialog.askopenfilename(
+            title="Import Settings",
+            filetypes=[("Settings preset", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            messagebox.showerror("Import Failed", f"Could not read:\n{path}\n\n{e}")
+            return
+
+        if not isinstance(data, dict):
+            messagebox.showerror(
+                "Import Failed",
+                f"{path}\n\nThis file is valid JSON but is not a settings preset.")
+            return
+
+        # A preset written before the per-kind silence durations existed
+        # still carries the single legacy key - run it through the same
+        # migration settings.json goes through so old presets keep working.
+        data = migrate_silence_settings(data)
+
+        known = set(DEFAULT_SETTINGS) & set(data)
+        if not known:
+            messagebox.showerror(
+                "Import Failed",
+                f"{path}\n\nNo recognised settings found in this file.")
+            return
+
+        self._apply_settings_to_fields(data)
+        self.metadata_status_label.configure(text="")
+        missing = len(DEFAULT_SETTINGS) - len(known)
+        note = f"\n\n{missing} setting(s) not in the file were left at defaults." if missing else ""
+        messagebox.showinfo(
+            "Imported",
+            f"Loaded {len(known)} setting(s) from:\n{path}{note}\n\n"
+            "Nothing is saved yet - use Save & Run to apply them.")
 
     def on_save_and_run(self):
         if self._run_window is not None and self._run_window.winfo_exists():
