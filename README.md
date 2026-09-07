@@ -23,9 +23,13 @@ The Automated Japanese Audiobook Generator is a Python automation pipeline desig
 ## 2. Core Functional Features
 
 - **Text Pre-processing:** The pipeline parses raw Japanese text into a structured hierarchy of sections, paragraphs, and sentences. Dialogue (`「」`) and parenthetical asides (`（）`) are no longer isolated as whole, unsplittable spans - instead each bracket edge is a guaranteed silence point, while the content between/around them is chunked by the same character-count rules as ordinary narration. A mid-sentence `──` is also a forced silence point. See [Section 6](#6-detailed-text-cleaning-logic) for the full logic.
-- **Sentence-Level Chunking:** To respect model token limits and prevent prosodic degradation, the script merges sentences into ~100-character chunks (130-character hard limit) using `。`, `？`, `……`, and the forced break points above (`「`, `（`, `」`, `）`, `──`) as boundaries. This keeps intonation natural across long-form content (including long dialogue) while minimizing the number of TTS calls.
+- **Sentence-Level Chunking:** To respect model token limits and prevent prosodic degradation, the script merges sentences into chunks at a configurable soft limit (100 characters by default, with a hard limit 30 above it) using `。`, `？`, `……`, and the forced break points above (`「`, `（`, `」`, `）`, `──`) as boundaries. This keeps intonation natural across long-form content (including long dialogue) while minimizing the number of TTS calls.
 - **AI Speech Synthesis:** The system integrates the Irodori-TTS engine, which utilizes a Flow Matching architecture for better voice quality. Local GPU inference is managed via the `uv` package manager to ensure environment stability.
 - **Automated Audio Stitching:** Using FFmpeg's concat demuxer, the script merges individual chunk waveforms into a final chapter file, inserting tiered silence gaps to simulate natural human pacing. Each gap is one of three separately configurable durations - sentence, paragraph/chapter start, or section - chosen by boundary type, with dialogue/aside edges and `──` pauses promoted to a longer gap where appropriate.
+- **Per-Speaker Tuning:** Duration scale, tail trimming and the sampling seed are settings rather than constants, because trained speakers respond differently enough to them that one fixed recipe produced inconsistent results across voices. Output channel count and MP3 bitrate are configurable alongside them. See [Section 7.3](#73-advanced-settings).
+- **Chunk Timing Data:** Every chapter is written with a `<chapter>.sync.json` recording each chunk's start/end offset in the finished MP3. It falls out of the same concat ordering used to stitch the audio, so no separate alignment pass is needed, and it is what makes read-along playback and subtitles possible. See [Section 8](#8-what-lands-in-the-output-folder).
+- **English Subtitle Generation:** An optional pass translates the finished `sync.json` chunk by chunk and emits a sidecar `.srt`. Because it runs *after* the audio exists, chunk boundaries are already fixed by the rendered MP3 and the subtitle cannot desync. Translation runs locally against a VNTL model with no API cost. See [Section 9](#9-translation-subtitles).
+- **Reproducible Runs:** Every run drops a timestamped copy of the settings it used into the output folder, so the recipe behind a book is still recoverable months later. Presets can be exported and imported per book or per speaker.
 
 ## 3. System Prerequisites
 
@@ -37,7 +41,22 @@ The Automated Japanese Audiobook Generator is a Python automation pipeline desig
 | GPU | NVIDIA GeForce RTX 4060 (8GB VRAM minimum) |
 | Tools | FFmpeg (full-shared build — required for `libtorchcodec` DLL support), `uv` (modern Python package manager) |
 | Engine | Irodori-TTS (cloned repository) |
-| Model Weights | `model.safetensors` (v4-Small recommended) and a trained `.speaker.safetensors` (Semantic-DACVAE codec) |
+| Model Weights | Downloaded automatically from Hugging Face — see below. You supply only a trained `.speaker.safetensors` (Semantic-DACVAE codec) |
+| Optional (subtitles) | `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp/releases) (CUDA build matching your driver) and a VNTL GGUF model — see [Section 9](#9-translation-subtitles) |
+
+**Model weights**
+
+The pipeline uses the published checkpoint `Aratako/Irodori-TTS-v4.1-Small`,
+passed to `infer.py` as `--hf-checkpoint`, so there is no local
+`model.safetensors` to manage and no Model Path field in the GUI. It is
+fetched into the Hugging Face cache on first use and reused from then on.
+
+To pin a different checkpoint — a local file, or a quantized variant such as
+`Aratako/Irodori-TTS-v4.1-Small-Quantized/int8-weight-only` — change
+`MODEL_REF` at the top of `run_audiobook.py`. `checkpoint_args()` decides
+between `--checkpoint` and `--hf-checkpoint` from the shape of the value, so
+either form works. The two are mutually exclusive in `infer.py`, which is why
+this is resolved in one place rather than left to the caller.
 
 **Speaker setup**
 
@@ -113,7 +132,9 @@ All spaces, CRLFs, and IDSP are stripped from the content of every working file 
 
 ### 6.3 Stage 2 — Merge sentences into TTS input chunks
 
-Goal: instead of one audio generation call per sentence, combine sentences so each TTS input lands close to **100 characters**, never exceeding a **130-character hard limit** where avoidable.
+Goal: instead of one audio generation call per sentence, combine sentences so each TTS input lands close to the soft limit, never exceeding the hard limit where avoidable.
+
+> The worked examples below use the defaults — a **100-character** soft limit and a **130-character** hard limit. Both follow **Max Chunk Length** on the [Advanced page](#73-advanced-settings): the hard limit is always the soft limit **+ 30**, and is not separately configurable. Lowering the soft limit gives finer control over where silence lands, at the cost of more TTS calls.
 
 Per paragraph, walk its sentence units in order and maintain a running buffer:
 
@@ -222,8 +243,9 @@ Paths and basic preferences for the audiobook generation process.
 | --- | --- |
 | **Input Folder** | Folder containing the input chapters — `chapter_001.txt`, `chapter_002.txt`, etc. This is the `chapter_*.txt` naming that [JP-ePub-Text-Extractor](https://github.com/hermanismail/JP-ePub-Text-Extractor) writes to its output folder, so that tool's output can be pointed at directly as this one's input. |
 | **Output Folder** | Where the generated MP3 files are saved, one per chapter. |
-| **Temp Folder** | Where intermediate working files (split sections/paragraphs/sentences, per-chunk `.wav` files, the run log) are written during a generation run, one subfolder per chapter, plus a shared `_silence` subfolder holding the three silence `.wav` files for the run. See **Keep temp files after run** (Advanced) for whether these are cleaned up afterward. |
-| **Model Path** | Path to the Irodori-TTS `model.safetensors` weights file (see [Section 3](#3-system-prerequisites)). |
+| **Regenerate existing chapters** | **OFF** by default: any chapter that already has an MP3 in the Output Folder is skipped, and the run says which ones and why. This replaces shuffling `.txt` files in and out of the Input Folder by hand to avoid clobbering finished work — easy to get wrong, and expensive when you do, since a chapter is hours of GPU time. Turn **ON** to rebuild and overwrite them, e.g. after finding a better recipe. It also governs subtitles on the automatic path — see [Section 9.4](#94-how-the-two-halves-stay-in-step). |
+| **Temp Folder** | Where intermediate working files (split sections/paragraphs/sentences, per-chunk `.wav` files, the run log) are written during a generation run, one subfolder per chapter, plus a shared `_silence` subfolder holding the three silence `.wav` files for the run. |
+| **Keep temp files after run** | **ON** by default, leaving the split text and per-chunk `.wav` working files in the Temp Folder after a run (useful for inspecting a chapter). Turn **OFF** to have them cleared once generation completes. |
 | **Speaker Path** | Path to your trained `.speaker.safetensors` file, produced by the speaker inversion step (see **Speaker setup** in [Section 3](#3-system-prerequisites)). |
 | **uv Project Folder** | The base folder of your Irodori-TTS `uv` project — i.e. the folder you'd normally run `uv run ...` from. Generation is launched as a subprocess inside this folder, so it needs to match wherever Irodori-TTS was cloned and synced. |
 
@@ -249,18 +271,52 @@ Tag chapters so Spotify (or any player that reads ID3/MP4 tags) groups them as o
 
 Fine-tune generation behavior.
 
-<img src="GUI-Advanced.png" alt="Settings GUI Advanced" width="600">
+<img src="GUI-Advanced.png" alt="Settings GUI Advanced - top" width="600">
+
+<img src="GUI-Advanced-2.png" alt="Settings GUI Advanced - scrolled" width="600">
+
+The page scrolls; the two shots above are the top and bottom of it.
 
 | Field / control | What it does |
 | --- | --- |
 | **Sentence Silence (seconds)** | Length of the gap inserted between sentences inside a paragraph — the shortest of the three. Defaults to 1.0 seconds; must be a positive number. |
 | **Paragraph Silence (seconds)** | Length of the gap inserted between paragraphs, and as the lead-in before the very first line of a chapter. Defaults to 1.2 seconds; must be a positive number. |
 | **Section Silence (seconds)** | Length of the gap inserted between sections (text separated by a blank line) — the longest of the three. Defaults to 1.5 seconds; must be a positive number. |
-| **Keep temp files after run** | **ON** by default, meaning the split section/paragraph/sentence files and per-chunk `.wav` files in the Temp Folder are left on disk after a run finishes (useful for inspecting/debugging a chapter). Turn **OFF** to have them deleted automatically once generation completes. |
+| **Max Chunk Length (characters)** | Soft cap on how much text is packed into one TTS chunk before starting a new one. The hard limit that the merger only crosses to avoid cutting a sentence off mid-way is always this **+ 30** characters, and is not separately configurable. Lower values give finer control over where silence lands, at the cost of more TTS calls. |
 
 The three durations are fully independent — there is no longer a single "base unit" that the longer gaps are multiples of. Each one is rendered to its own silence `.wav` before stitching, and [Section 6.5](#65-stage-4--concatenation--silence-insertion) explains which of the three lands at any given gap. Setting all three to the same number gives uniform pacing throughout; widening only **Section Silence** gives a clearer beat between scene breaks without slowing down ordinary narration.
 
 > **Upgrading from an earlier version:** older `settings.json` files stored one `silence_duration` value. On first load it is migrated automatically into `silence_duration_sentence` (the old value), `silence_duration_paragraph` (2× it) and `silence_duration_section` (3× it), which reproduces the previous output exactly. Nothing changes audibly until you actually edit the numbers here.
+
+**TTS Tuning**
+
+These are passed straight through to Irodori-TTS's `infer.py`. They are settings rather than constants because trained speakers respond to them differently enough that fixing them in code produced inconsistent results across voices — expect to tune them per speaker and export the result as a preset.
+
+| Field / control | What it does |
+| --- | --- |
+| **Duration Scale** | `--duration-scale`. Multiplies the length v4-Small predicts for each chunk: above 1.0 slows the delivery, below speeds it up. Defaults to 1.2. |
+| **Disable tail trimming** | `--no-trim-tail`. **ON** keeps the end of every chunk intact. Irodori's tail heuristic was written for v2's fixed 30-second outputs; on short chunks a false positive costs the final syllable. **OFF** hands trimming back to `infer.py`, at the cost of a little dead air per chunk. |
+| **Fixed sampling seed** | `--seed`. **OFF** by default, letting `infer.py` draw a fresh seed per chunk. **ON** pins one seed for the whole run and reveals a value box. Reproducible, but be careful: pinning one seed means every chunk starts from the same noise, so a draw that suits some text badly then hurts every chunk it touches — in testing this made chapters noticeably *less* stable, not more. |
+
+**Output Encoding**
+
+| Field / control | What it does |
+| --- | --- |
+| **Output channels** | Mono by default, because mono is what Irodori-TTS actually renders. Stereo duplicates the same signal into both channels, which buys no stereo image and halves the bits available to the content — measured at an identical 320k, mono scored ~2.8 dB better. |
+| **MP3 Bitrate** | Constant bitrate for the stitched chapter, `96k` by default (accepts `96` or `96k`, 32–320). At 96k mono a full-length novel is roughly 30% of the size the old 320k stereo setting produced, with no audible loss on speech. CBR is deliberate: `sync.json` offsets are seeked to by the player, and VBR seeking leans on a 100-entry table far coarser than one chunk. |
+
+**Translation Subtitles**
+
+Covered in full in [Section 9](#9-translation-subtitles).
+
+| Field / control | What it does |
+| --- | --- |
+| **Auto-generate after run** | **OFF** by default. **ON** runs subtitle generation once at the very end of a whole book — not per chapter, since a translation model and Irodori-TTS would contend for the same 8GB card. Turning this on greys out the manual **Generate Subtitle** button, since translation then happens by itself. |
+| **Translation backend** | `vntl` (local VNTL-Llama3 via llama-server) or `identity`, which passes the Japanese through untranslated. `identity` is the control case for checking the artifact format and player round-trip with no model in the loop. |
+| **llama-server URL** | Where the local model listens. Only used by the `vntl` backend. |
+| **llama-server path** | The `llama-server.exe` to start when nothing is already listening. It is stopped again when translation finishes, so the GPU is only occupied while the job runs. |
+| **Translation model (GGUF)** | The VNTL model `llama-server` loads. |
+| **Generate Subtitle** | Opens the Subtitle Generation Tool ([Section 9.3](#93-the-subtitle-generation-tool)). Greyed out while **Auto-generate after run** is ON. |
 
 ### 7.4 Bottom action bar
 
@@ -268,9 +324,10 @@ Present on every tab.
 
 | Button | What it does |
 | --- | --- |
-| **Reset to Defaults** | After a confirmation prompt, resets every field on all three tabs back to its built-in default value. Nothing is written to `settings.json` until you also click **Save Settings** or **Save & Run**. |
-| **Save Settings** | Validates the current values and writes them to `settings.json`, without starting a run. |
-| **Save & Run** | Validates and saves the same as above, then launches `run_audiobook.py` as a background process and opens the progress window (see below). Counts the `chapter_*.txt` files in the Input Folder up front so the progress window can show "Chapter 1 of N" immediately; refuses to start if none are found. |
+| **Reset to Defaults** | After a confirmation prompt, resets every field on all three tabs back to its built-in default value. Nothing is written to `settings.json` until you also click **Export Settings** or **Save & Run**. |
+| **Import Settings** | Loads a preset `.json` chosen through a file picker into the form. Keys the file doesn't contain are left at their defaults, so an older or hand-trimmed preset still loads, and a legacy single `silence_duration` is migrated the same way `settings.json` is. Nothing is written anywhere until you then Export or Save & Run. |
+| **Export Settings** | Writes the current values to a preset file of your choosing, named after the Book Title by default. This **does not** touch `settings.json` — presets are per book or per speaker, while `settings.json` is the working config the pipeline reads. A [run snapshot](#8-what-lands-in-the-output-folder) is itself a valid preset, so "reproduce that book's settings" is Import → pick the snapshot → Save & Run. |
+| **Save & Run** | Validates, writes `settings.json`, then launches `run_audiobook.py` as a background process and opens the progress window (see below). Counts the chapters it actually intends to build — applying the **Regenerate existing chapters** rule — so the progress window doesn't promise "Chapter 1 of 18" for a run that means to build three. Says so plainly if every chapter is already generated. |
 | **Close** | Closes the settings window. (A run already in progress keeps going in its own progress window.) |
 
 ### 7.5 Progress window
@@ -305,3 +362,135 @@ You have the option to run via a PowerShell terminal, and can change settings ma
 ```powershell
 uv run --no-sync python run_audiobook.py
 ```
+
+## 8. What lands in the output folder
+
+Per chapter:
+
+| File | Written by | What it is |
+| --- | --- | --- |
+| `chapter_001.mp3` | `run_audiobook.py` | The stitched chapter, tagged if auto-tagging is on. |
+| `chapter_001.sync.json` | `run_audiobook.py` | `{version, chunks:[{index, start, end, text}]}` — each chunk's start/end offset in seconds within the finished MP3, plus its **original** wording (not the TTS-normalized text). Produced by walking the same concat ordering used to stitch the audio and summing `ffprobe`'d durations, so the timings are correct by construction with no alignment pass. |
+| `chapter_001.translation.json` | `translate_pipeline.py` | The translation artifact and source of truth: every chunk's index, timing, Japanese and English. Hand-editable. |
+| `chapter_001.srt` | `translate_pipeline.py` | One cue per chunk, UTF-8 with no BOM, `HH:MM:SS,mmm`. Cheaply re-emitted from the `.translation.json` above. |
+
+Per book:
+
+| File | What it is |
+| --- | --- |
+| `glossary.json` | Character names, genders and aliases for translation. Hand-edited; see [Section 9.2](#92-the-glossary). |
+| `<foldername>_YYYYMMDD_HHMM.json` | A snapshot of the settings that run used, written **before** the first chapter so a run that dies halfway still leaves a record of what it was attempting. Named after the output folder to stay ASCII and sortable. Everything outside the `_run` block is a faithful copy of `settings.json`, which means the snapshot can be fed straight back through **Import Settings**. |
+
+The snapshot exists because the number of tunables has grown past what anyone
+reliably remembers. Listening to a book six months later and wanting to know
+which preset produced it is the whole point.
+
+## 9. Translation subtitles
+
+Optional. Generates an English `.srt` per chapter so a player can show a
+translation alongside the Japanese reading text.
+
+### 9.1 Why it runs after the audio
+
+Translation reads the finished `sync.json`, never the raw text. By the time
+that file exists the chunk boundaries are already fixed by the rendered MP3,
+so the subtitle's timing is correct by construction and cannot drift. The
+alternative — translating first and chunking both languages together —
+assumes a 1:1 Japanese↔English segment mapping that Japanese word order makes
+fictional.
+
+The rule that keeps it honest: **a chunk's index is sacred.** Text is only
+ever filled in per existing index; chunks are never merged, split or re-timed.
+That is enforced structurally rather than by checking a model's response — the
+driver zips backend output positionally onto `sync.json`'s own chunk list, and
+a backend returning the wrong count is rejected before anything is written.
+
+### 9.2 The glossary
+
+`glossary.json`, beside the chapters, reloaded at the start of every chapter:
+
+```json
+{
+  "characters": [
+    {"name": "ターニャ・デグレチャフ", "en": "Tanya Degurechaff",
+     "gender": "Female", "aliases": "デグレチャフ少尉"}
+  ],
+  "notes": ["[note] Keep the register literary rather than colloquial."]
+}
+```
+
+`name` must match the text exactly, `en` is the spelling you want used
+consistently, and `gender` fixes pronouns that Japanese leaves implicit —
+without it the model guesses from context and gets it wrong. It travels in
+every prompt regardless of how far into a chapter the model has read, which is
+why names stay consistent where a rolling context window alone would not.
+
+Editing the glossary is the main reason to re-run, so turn on **Regenerate
+existing subtitles** in the tool when you do — otherwise chapters that already
+have an `.srt` are skipped and nothing changes.
+
+### 9.3 The Subtitle Generation Tool
+
+Opened from **Generate Subtitle** on the Advanced page. Two columns: what you
+set before a run on the left, what you watch during one on the right.
+
+<img src="GUI-Subtitle-Tool.png" alt="Subtitle Generation Tool" width="700">
+
+- **Parameters** — output folder, server URL, server path, model — are editable before a run and read-only once it starts. Output Folder being overridable is the point: a different, already-generated book can be subtitled without disturbing the main settings.
+- **Start / Pause / Resume / Exit** is one button whose label follows the state, next to a Ready / In Progress / Completed / Error pill.
+- **Pause** is the reason the window exists. Translation saturates the GPU; pausing hands the desktop back without losing progress, and deliberately leaves `llama-server` loaded so resuming is instant.
+- **Stop Process and Exit** is the emergency stop: it confirms first, cancels the run, waits for `llama-server` to shut down so the VRAM is genuinely released, and only then closes. The window's X button behaves the same way while a run is in flight.
+- Chapters that already have an `.srt` are skipped and logged, since that subtitle may have been corrected by hand. Chapters with no `.sync.json` are warned about and skipped.
+
+`llama-server` is started on demand when nothing is already listening, and
+stopped again afterwards — the 8GB card holds the TTS model or the translation
+model, not both. A server you started yourself is detected, used as-is and
+left running.
+
+### 9.4 How the two halves stay in step
+
+On the automatic path (**Auto-generate after run**), the chapter decision
+drives the subtitle decision: **Regenerate existing chapters** OFF means
+existing `.srt` files are skipped too, ON means both are rebuilt.
+
+This is a correctness matter, not just tidiness. Regenerating a chapter
+rewrites its `sync.json`, and an `.srt` is timed against that file — keeping
+the old subtitle would leave cues pointing at audio that has moved. In the
+other direction, a skipped chapter's audio and subtitle are both still valid,
+so re-translating would spend GPU hours arriving back where it started and
+would silently discard any hand correction on the way.
+
+### 9.5 Model setup
+
+The pipeline is built for [VNTL-Llama3-8B-v2](https://huggingface.co/lmg-anon/vntl-llama3-8b-v2-gguf),
+a fine-tune trained specifically on Japanese→English translation. It runs
+locally with no API cost.
+
+1. Download a Windows CUDA build of `llama-server` from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases), matching your driver's CUDA version. The CUDA runtime DLLs are a **separate** `cudart-*` zip in the same release — without them the binary reports no devices.
+2. Download a VNTL GGUF. `q5_k_m` (~5.7 GB) fits an 8GB card alongside an 8k context.
+3. Point **llama-server path** and **Translation model (GGUF)** at them on the Advanced page.
+
+VNTL is a completion model, not an instruction-following one, so it is driven
+one chunk at a time rather than in indexed batches — which is what makes
+misalignment impossible, since the model never sees an index. Its prompt uses
+custom `Metadata` / `Japanese` / `English` header roles that no
+chat-completions API can express, so the adapter talks to `/completion` with a
+raw string. Temperature 0, no repetition penalty, per the model author: a
+repetition penalty punishes the legitimately recurring tokens translation
+depends on and pushes the model into renaming or omitting them.
+
+> **Fit matters.** VNTL is trained on visual novels. Sampling 20 chunks with
+> `--limit 20` before committing to a book is worth the minute it costs,
+> particularly for literary prose, which is further from its training
+> distribution.
+
+**Running translation from the CLI**
+
+```powershell
+uv run --project . --no-sync python translate_pipeline.py --all --backend vntl
+```
+
+`--chapter <base>` for one chapter, `--limit N` to sample the first N chunks,
+`--regenerate` to overwrite existing `.srt` files, and `--srt-only` to
+re-emit subtitles from existing `.translation.json` files after correcting one
+by hand.

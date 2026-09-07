@@ -638,10 +638,12 @@ class SettingsApp(ctk.CTk):
         self._add_auto_translate_row(tr_card)
         self._add_backend_row(tr_card)
         self._add_endpoint_row(tr_card)
+        # Kept short on purpose: _add_path_row's title block is a fixed
+        # 210x44, so a description longer than about one line is clipped
+        # rather than wrapped. The full behaviour is in the README.
         self._add_path_row(
             tr_card, *ICON_MODEL, "llama-server path",
-            "Started automatically when nothing is listening, and stopped again "
-            "when translation finishes",
+            "Started and stopped automatically",
             "llama_server_exe", "file",
             filetypes=[("Executable", "*.exe"), ("All files", "*.*")])
         self._add_path_row(
