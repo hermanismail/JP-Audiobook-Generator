@@ -45,6 +45,7 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
 from progress_window import ProgressWindow, default_log_path
+from subtitle_window import SubtitleWindow
 from ui_common import (
     COLOR_BG, COLOR_CARD, COLOR_CARD_BORDER, COLOR_TITLE, COLOR_SUBTITLE,
     COLOR_ENTRY_BORDER, COLOR_ENTRY_TEXT, COLOR_ACCENT, COLOR_ACCENT_HOVER,
@@ -360,13 +361,10 @@ class SettingsApp(ctk.CTk):
         self.auto_translate_var = ctk.IntVar(
             value=1 if self.settings.get("auto_translate_after_run", False) else 0)
 
-        # Async state for the "Generate Subtitles Now" button - translation
-        # is minutes-to-hours, so unlike Apply Tags it cannot run in-process
-        # without freezing the window.
-        self._translate_process = None
-        self._translate_queue = None
-        self._translate_log_path = None
-        self._translate_log_file = None
+        # The Subtitle Generation Tool window, if it is open. Kept so a
+        # second click raises the existing one rather than opening a rival
+        # window that would fight over the same GPU.
+        self._subtitle_window = None
 
         self.metadata_vars = {
             "author_name": ctk.StringVar(value=self.settings.get("author_name", "")),
@@ -648,24 +646,12 @@ class SettingsApp(ctk.CTk):
         generate_card.pack(fill="x", pady=(16, 0))
 
         self.translate_button = ctk.CTkButton(
-            generate_card, text="\U0001F310  Generate Subtitles Now", height=40,
+            generate_card, text="\U0001F310  Generate Subtitle", height=40,
             corner_radius=8, fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             text_color="white", font=ctk.CTkFont(size=13, weight="bold"),
             command=self.on_generate_subtitles)
         self.translate_button.pack(side="left")
-
-        self.open_translate_log_button = ctk.CTkButton(
-            generate_card, text="📄  Open Log", width=120, height=40,
-            corner_radius=8, fg_color="#D3D3D3", hover_color="#F5F5F8",
-            border_width=1, border_color=COLOR_ENTRY_BORDER,
-            text_color=COLOR_SUBTITLE, state="disabled",
-            command=self._open_translate_log)
-        self.open_translate_log_button.pack(side="left", padx=(10, 0))
-
-        self.translate_status_label = ctk.CTkLabel(
-            generate_card, text="", text_color=COLOR_SUBTITLE,
-            font=ctk.CTkFont(size=12), anchor="w", justify="left")
-        self.translate_status_label.pack(side="left", padx=(14, 0))
+        self._sync_translate_button()
 
     def _add_auto_translate_row(self, parent):
         """Runs once at the end of a whole run, not per chapter like tagging.
@@ -696,6 +682,21 @@ class SettingsApp(ctk.CTk):
     def _on_auto_translate_changed(self):
         self.auto_translate_switch.configure(
             text=self._auto_translate_text(bool(self.auto_translate_var.get())))
+        self._sync_translate_button()
+
+    def _sync_translate_button(self):
+        """Auto-generate ON means translation already happens at the end of
+        every run, so the manual button is greyed out - the same reasoning as
+        Apply Tags under auto-tagging. Turning it OFF hands the button back."""
+        button = getattr(self, "translate_button", None)
+        if button is None:
+            return      # called while the page is still being built
+        if self.auto_translate_var.get():
+            button.configure(state="disabled", fg_color="#D3D3D3",
+                             hover_color="#D3D3D3", text_color=COLOR_SUBTITLE)
+        else:
+            button.configure(state="normal", fg_color=COLOR_ACCENT,
+                             hover_color=COLOR_ACCENT_HOVER, text_color="white")
 
     def _add_backend_row(self, parent):
         """'identity' hands the Japanese back untranslated - the control case
@@ -1628,181 +1629,29 @@ class SettingsApp(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Couldn't Open Folder", f"{output_folder}\n\n{e}")
 
-    # ---------- Generate Subtitles Now (async) ----------
+    # ---------- Generate Subtitle ----------
     def on_generate_subtitles(self):
-        """Runs translate_pipeline.py --all in a subprocess.
+        """Opens the Subtitle Generation Tool.
 
-        Unlike Apply Tags, this cannot run in-process: translation is
-        minutes per chapter and hours per book, so doing it inline would
-        freeze the window for the entire run. The subprocess streams its
-        per-chunk progress back through a queue into the status label,
-        the same shape as Save & Run's progress wiring.
-
-        translate_pipeline.py is stdlib-only, so it runs under this venv's
-        own interpreter - no `uv run` hop needed, unlike mp3_metadata.py
-        which needs mutagen."""
-        if self._translate_process is not None and self._translate_process.poll() is None:
-            messagebox.showinfo(
-                "Already Running",
-                "Subtitle generation is already in progress. Wait for it to "
-                "finish before starting another.")
+        The heavy lifting - worker thread, pause/resume, llama-server
+        lifecycle, progress and the log - all lives in SubtitleWindow, so
+        this only has to validate settings and hand them over. The window
+        gets a copy: its Output Folder is deliberately overridable, so a
+        different, already-generated book can be subtitled without
+        disturbing what the main settings point at."""
+        if self._subtitle_window is not None and self._subtitle_window.winfo_exists():
+            self._subtitle_window.lift()
+            self._subtitle_window.focus_force()
             return
 
         data = self._collect_and_validate()
         if data is None:
             return
-
-        output_folder = data["output_folder"]
-        if not os.path.isdir(output_folder):
-            messagebox.showerror(
-                "Output Folder Not Found",
-                f"'{output_folder}' does not exist yet. Generate the audiobook "
-                "first - translation runs over the sync.json files that "
-                "generation produces.")
-            return
-
-        syncs = glob.glob(os.path.join(output_folder, "*.sync.json"))
-        if not syncs:
-            messagebox.showerror(
-                "Nothing to Translate",
-                f"No .sync.json files in:\n{output_folder}\n\n"
-                "Subtitles are built from the chunk timings generation writes "
-                "alongside each MP3, so at least one chapter has to exist first.")
-            return
-
-        backend = data["translation_backend"]
-        if backend == "vntl" and not self._llama_server_reachable(data["llama_server_url"]):
-            if not messagebox.askyesno(
-                    "llama-server Not Responding",
-                    f"Nothing is answering at {data['llama_server_url']}.\n\n"
-                    "The vntl backend needs llama-server running with the VNTL "
-                    "model loaded, or every chunk will fail.\n\nStart it anyway?"):
-                return
-
-        # Persist first, so settings.json reflects what was actually run.
         save_settings(data)
 
-        script = os.path.join(SCRIPT_DIR, "translate_pipeline.py")
-        cmd = [sys.executable, script, "--all", "--backend", backend]
+        self._subtitle_window = SubtitleWindow(
+            self, data, backend=data["translation_backend"])
 
-        try:
-            self._translate_process = subprocess.Popen(
-                cmd, cwd=SCRIPT_DIR, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                errors="replace", bufsize=1)
-        except Exception as e:
-            messagebox.showerror("Could Not Start", f"Failed to launch:\n{e}")
-            return
-
-        # Full output goes to a timestamped file under <temp_dir>/logs/,
-        # the same convention run_audiobook's own log uses. The status label
-        # can only ever show one truncated line, which is no use when a
-        # traceback is what you actually need to read.
-        self._translate_log_path = os.path.join(
-            data["temp_dir"], "logs",
-            f"translate_{time.strftime('%Y%m%d_%H%M%S')}.log")
-        try:
-            os.makedirs(os.path.dirname(self._translate_log_path), exist_ok=True)
-            self._translate_log_file = open(
-                self._translate_log_path, "w", encoding="utf-8")
-            header = [
-                f"translate_pipeline.py --all --backend {backend}",
-                f"output_folder: {output_folder}",
-                f"llama_server_url: {data['llama_server_url']}",
-                f"started: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                "-" * 60,
-            ]
-            self._translate_log_file.write("\n".join(header) + "\n")
-            self._translate_log_file.flush()
-        except OSError:
-            self._translate_log_file = None   # logging is best-effort
-
-        self._translate_queue = queue.Queue()
-        self._translate_last_line = ""
-        threading.Thread(
-            target=_read_process_output,
-            args=(self._translate_process, self._translate_queue),
-            daemon=True).start()
-
-        self.translate_button.configure(
-            state="disabled", fg_color="#D3D3D3", hover_color="#D3D3D3",
-            text_color=COLOR_SUBTITLE)
-        self.translate_status_label.configure(
-            text=f"Translating {len(syncs)} chapter(s) with '{backend}'...")
-        self.after(200, self._drain_translate_queue)
-
-    @staticmethod
-    def _llama_server_reachable(url, timeout=2.0):
-        """Cheap pre-flight so a missing server is caught in two seconds
-        rather than after a few hundred failed chunks."""
-        import urllib.request
-        try:
-            with urllib.request.urlopen(f"{url.rstrip('/')}/health", timeout=timeout):
-                return True
-        except Exception:
-            return False
-
-    def _drain_translate_queue(self):
-        finished = False
-        try:
-            while True:
-                line = self._translate_queue.get_nowait()
-                if line is None:      # sentinel: the pipe closed
-                    finished = True
-                    break
-                if self._translate_log_file is not None:
-                    self._translate_log_file.write(line + "\n")
-                    self._translate_log_file.flush()
-                if line.strip():
-                    self._translate_last_line = line.strip()
-                    self.translate_status_label.configure(
-                        text=self._translate_last_line[:140])
-        except queue.Empty:
-            pass
-
-        if finished:
-            self._finish_translate()
-        else:
-            self.after(200, self._drain_translate_queue)
-
-    def _finish_translate(self):
-        process, self._translate_process = self._translate_process, None
-        returncode = process.wait() if process is not None else -1
-
-        self.translate_button.configure(
-            state="normal", fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER, text_color="white")
-
-        if self._translate_log_file is not None:
-            self._translate_log_file.write(
-                "-" * 60 + f"\nexit code: {returncode}\n")
-            self._translate_log_file.close()
-            self._translate_log_file = None
-
-        if self._translate_log_path:
-            self.open_translate_log_button.configure(
-                state="normal", fg_color="white", text_color=COLOR_ENTRY_TEXT)
-
-        if returncode == 0:
-            self.translate_status_label.configure(
-                text=self._translate_last_line or "Subtitles generated.")
-        else:
-            self.translate_status_label.configure(
-                text=f"Failed (exit code {returncode}) - see Open Log for the "
-                     f"full output.")
-
-    def _open_translate_log(self):
-        """Opens the log in whatever the system associates with .log - so the
-        text can actually be read and copied, unlike the status label."""
-        if not self._translate_log_path or not os.path.exists(self._translate_log_path):
-            messagebox.showinfo("No Log Yet",
-                                "Run subtitle generation first - the log is "
-                                "written as it goes.")
-            return
-        try:
-            os.startfile(self._translate_log_path)
-        except Exception:
-            messagebox.showinfo("Log File", self._translate_log_path)
 
     def on_apply_metadata_tags(self):
         data = self._collect_and_validate()

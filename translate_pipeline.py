@@ -47,6 +47,7 @@ import glob
 import contextlib
 import json
 import time
+import threading
 import datetime
 import subprocess
 
@@ -73,13 +74,19 @@ TRANSLATION_FORMAT_VERSION = 1
 # after the mistake.
 
 
-def translate_identity(japanese_texts, **_kwargs):
+def translate_identity(japanese_texts, *, control=None, on_chunk=None,
+                       base_name=None, **_kwargs):
     """Passthrough 'translation' - hands the Japanese straight back.
 
     This is not a placeholder to be deleted. It is how the artifact
     format, the SRT emitter and the player round-trip get validated
     without a model in the loop at all, and it stays useful afterwards as
     the control case when a real backend starts producing something odd."""
+    for i, _ in enumerate(japanese_texts, start=1):
+        if control is not None:
+            control.checkpoint()
+        if on_chunk is not None:
+            on_chunk(base_name, i, len(japanese_texts))
     return list(japanese_texts)
 
 
@@ -198,7 +205,7 @@ def _llama_completion(prompt, url=LLAMA_SERVER_URL):
 
 
 def translate_vntl(japanese_texts, *, settings=None, base_name=None,
-                   progress=True, **_kwargs):
+                   progress=True, control=None, on_chunk=None, **_kwargs):
     import urllib.error
 
     settings = settings or {}
@@ -211,6 +218,8 @@ def translate_vntl(japanese_texts, *, settings=None, base_name=None,
     english = []
 
     for i, japanese in enumerate(japanese_texts, start=1):
+        if control is not None:
+            control.checkpoint()
         prompt = build_vntl_prompt(japanese, history, glossary)
         try:
             line = _llama_completion(prompt, url=url)
@@ -222,6 +231,8 @@ def translate_vntl(japanese_texts, *, settings=None, base_name=None,
         history.append((japanese, line))
         if len(history) > VNTL_CONTEXT_PAIRS:
             history = history[-VNTL_CONTEXT_PAIRS:]
+        if on_chunk is not None:
+            on_chunk(base_name, i, len(japanese_texts))
         if progress and (i % 10 == 0 or i == len(japanese_texts)):
             print(f"    {base_name or ''} {i}/{len(japanese_texts)} chunk(s) translated")
 
@@ -381,6 +392,52 @@ class ManagedLlamaServer:
         return parsed.hostname or "127.0.0.1", parsed.port or 8080
 
 
+class TranslationCancelled(RuntimeError):
+    """Raised out of the chunk loop when the caller asks to stop."""
+
+
+class TranslationControl:
+    """Pause / cancel handle for a translation running in a background
+    thread, checked between chunks.
+
+    Pausing deliberately leaves llama-server up: the point is to hand the
+    desktop back for a while without paying the model-load cost again on
+    resume. Cancelling unwinds through ManagedLlamaServer's context
+    manager, which is what actually frees the VRAM."""
+
+    def __init__(self):
+        self._resume = threading.Event()
+        self._resume.set()                # not paused
+        self._cancelled = threading.Event()
+
+    def pause(self):
+        self._resume.clear()
+
+    def resume(self):
+        self._resume.set()
+
+    def cancel(self):
+        self._cancelled.set()
+        self._resume.set()                # unblock a paused worker so it can exit
+
+    @property
+    def paused(self):
+        return not self._resume.is_set()
+
+    @property
+    def cancelled(self):
+        return self._cancelled.is_set()
+
+    def checkpoint(self):
+        """Blocks while paused; raises if cancelled. Called between chunks,
+        so the longest a stop can take is one chunk (a couple of seconds)."""
+        if self._cancelled.is_set():
+            raise TranslationCancelled("stopped by user")
+        self._resume.wait()
+        if self._cancelled.is_set():
+            raise TranslationCancelled("stopped by user")
+
+
 class BackendUnavailable(RuntimeError):
     """The backend itself cannot be reached, so every remaining chapter would
     fail the same way. Raised instead of a bare connection error so
@@ -395,7 +452,9 @@ class TranslationResult:
         self.written = []       # base names that got a fresh translation
         self.srt_only = []      # base names re-emitted from existing json
         self.missing = []       # base names with no .sync.json
+        self.skipped = []       # base names whose .srt already existed
         self.errors = []        # (base_name, message)
+        self.cancelled = False
 
     @property
     def total(self):
@@ -407,12 +466,22 @@ class TranslationResult:
 # ---------------------------------------------------------------------------
 
 def find_chapter_bases(output_folder):
-    """Every chapter that has been rendered far enough to translate, i.e.
-    has a sync.json next to its MP3. Sorted so chapter_002 follows
-    chapter_001, which matters once rolling context between chapters is
-    added - a later chapter should be able to see what came before it."""
-    pattern = os.path.join(output_folder, "*.sync.json")
-    bases = [os.path.basename(p)[: -len(".sync.json")] for p in glob.glob(pattern)]
+    """Every chapter in the folder, whether or not it can actually be
+    translated yet.
+
+    Deliberately the union of the MP3s and the sync.json files rather than
+    just the latter: a chapter whose sync.json is missing is a chapter with
+    a *problem*, and it should be reported as skipped rather than quietly
+    vanishing from the run because discovery never saw it.
+
+    Sorted so chapter_002 follows chapter_001, which matters once rolling
+    context between chapters is added - a later chapter should be able to
+    see what came before it."""
+    bases = set()
+    for pattern, suffix in ((os.path.join(output_folder, "*.sync.json"), ".sync.json"),
+                            (os.path.join(output_folder, "*.mp3"), ".mp3")):
+        for path in glob.glob(pattern):
+            bases.add(os.path.basename(path)[: -len(suffix)])
     return sorted(bases)
 
 
@@ -547,7 +616,8 @@ def read_translation(path):
 
 def generate_subtitles(settings, base_names=None, backend="identity",
                        srt_only=False, model_name=None, verbose=True,
-                       limit=None):
+                       limit=None, control=None, log=None, on_chunk=None,
+                       on_chapter_done=None, skip_existing=False):
     """Translates the named chapters (or every rendered one) and writes a
     .translation.json plus a .srt for each, into output_folder alongside
     the MP3 and sync.json.
@@ -568,14 +638,20 @@ def generate_subtitles(settings, base_names=None, backend="identity",
     # Only the vntl backend needs a model server, and only when actually
     # translating - a --srt-only re-emission touches no model at all.
     needs_server = backend == "vntl" and not srt_only
-    server_ctx = (ManagedLlamaServer(settings, log=print) if needs_server
+    server_log = (lambda m: log(m.strip(), "processing")) if log else print
+    server_ctx = (ManagedLlamaServer(settings, log=server_log) if needs_server
                   else contextlib.nullcontext())
 
     try:
         with server_ctx:
             _translate_chapters(base_names, output_folder, translate, settings,
                                 backend, model_name, srt_only, limit, verbose,
-                                result)
+                                result, control, log, on_chunk, on_chapter_done,
+                                skip_existing)
+    except TranslationCancelled:
+        result.cancelled = True
+        if log:
+            log("Stopped by user.", "error")
     except BackendUnavailable as e:
         # Raised while bringing the server up, before any chapter was
         # attempted. Recorded like any other failure rather than thrown, so
@@ -587,9 +663,29 @@ def generate_subtitles(settings, base_names=None, backend="identity",
 
 
 def _translate_chapters(base_names, output_folder, translate, settings, backend,
-                        model_name, srt_only, limit, verbose, result):
+                        model_name, srt_only, limit, verbose, result,
+                        control=None, log=None, on_chunk=None,
+                        on_chapter_done=None, skip_existing=False):
+    def say(message, tag="text"):
+        if log:
+            log(message, tag)
+        elif verbose:
+            print(message)
+
     for base_name in base_names:
+        if control is not None:
+            control.checkpoint()
         try:
+            if skip_existing and not srt_only and os.path.exists(
+                    srt_path_for(output_folder, base_name)):
+                # Deliberately additive: an existing subtitle may have been
+                # corrected by hand, and silently regenerating over it would
+                # throw that work away.
+                say(f"{base_name}: .srt already exists - skipping.", "text")
+                result.skipped.append(base_name)
+                if on_chapter_done:
+                    on_chapter_done(base_name, "skipped")
+                continue
             if srt_only:
                 json_path = translation_path_for(output_folder, base_name)
                 if not os.path.exists(json_path):
@@ -605,7 +701,10 @@ def _translate_chapters(base_names, output_folder, translate, settings, backend,
 
             sync_file = sync_path_for(output_folder, base_name)
             if not os.path.exists(sync_file):
+                say(f"{base_name}: no .sync.json found - skipping.", "error")
                 result.missing.append(base_name)
+                if on_chapter_done:
+                    on_chapter_done(base_name, "missing")
                 continue
 
             with open(sync_file, "r", encoding="utf-8") as f:
@@ -625,19 +724,25 @@ def _translate_chapters(base_names, output_folder, translate, settings, backend,
                 # to hear 20 chunks without waiting for 314 is what makes
                 # prompt and glossary iteration practical.
                 english = translate(japanese[:limit], base_name=base_name,
-                                    settings=settings) + [""] * (len(japanese) - limit)
+                                    settings=settings, control=control,
+                                    on_chunk=on_chunk) + [""] * (len(japanese) - limit)
             else:
-                english = translate(japanese, base_name=base_name, settings=settings)
+                english = translate(japanese, base_name=base_name,
+                                    settings=settings, control=control,
+                                    on_chunk=on_chunk)
 
             doc = build_translation_doc(base_name, sync_data, english, backend,
                                         model_name=model_name)
             write_translation(translation_path_for(output_folder, base_name), doc)
             write_srt(srt_path_for(output_folder, base_name), doc)
             result.written.append(base_name)
-            if verbose:
-                print(f"  {base_name}: {len(chunks)} chunk(s) -> "
-                      f"{base_name}.translation.json + {base_name}.srt")
+            say(f"{base_name}: {len(chunks)} chunk(s) -> {base_name}.translation.json "
+                f"+ {base_name}.srt", "success")
+            if on_chapter_done:
+                on_chapter_done(base_name, "written")
 
+        except TranslationCancelled:
+            raise
         except BackendUnavailable as e:
             # No point attempting the remaining chapters - they would all
             # fail identically and bury the real cause under repetition.

@@ -627,6 +627,39 @@ def main():
     if CLEAN_TEMP_AFTER_RUN and os.path.isdir(SILENCE_DIR):
         shutil.rmtree(SILENCE_DIR, ignore_errors=True)
 
+    # Translation runs once here, at the end of the whole book, rather than
+    # per chapter the way tagging does. Two independent reasons: a local
+    # translation model and Irodori-TTS would contend for the same 8GB card
+    # if this ran between chapters, and the book-level glossary is better
+    # applied in one pass over a finished book. The automatic path is just
+    # the standalone path with --all, which is also what makes back-filling
+    # an already-generated book free.
+    #
+    # Runs in the GUI-side venv via `uv run --project`, matching
+    # mp3_metadata.py. Two deliberate choices about its output:
+    #   - not captured, so it inherits this process's stdout and flows
+    #     straight into the GUI progress window's log as it happens;
+    #   - "-u", so Python doesn't block-buffer that pipe. Without it the
+    #     per-chapter progress would sit in an 8KB buffer and arrive in one
+    #     lump hours later, which defeats the point (gui_settings.py passes
+    #     -u when launching this script for exactly the same reason).
+    if SETTINGS.get("auto_translate_after_run", False):
+        backend = SETTINGS.get("translation_backend", "vntl")
+        print(f"\nGenerating translation subtitles (backend: {backend})...")
+        try:
+            translate_result = subprocess.run(
+                ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python", "-u",
+                 os.path.join(SCRIPT_DIR, "translate_pipeline.py"),
+                 "--all", "--backend", backend],
+                cwd=SCRIPT_DIR,
+            )
+            if translate_result.returncode != 0:
+                print(f"Translation failed (exit code {translate_result.returncode}). "
+                      f"The audiobook itself is unaffected - subtitles can be "
+                      f"regenerated later from the Subtitle Generation Tool.")
+        except Exception as e:
+            print(f"Translation failed to start: {e}")
+
 
 if __name__ == "__main__":
     main()
