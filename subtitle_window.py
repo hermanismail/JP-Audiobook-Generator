@@ -101,8 +101,8 @@ class SubtitleWindow(ctk.CTkToplevel):
         super().__init__(master)
         self.title("Subtitle Generation Tool")
         self.configure(fg_color=COLOR_BG)
-        self.geometry("760x900")
-        self.minsize(700, 700)
+        self.geometry("1400x760")
+        self.minsize(1180, 640)
 
         self.settings = dict(settings)
         self.backend = backend
@@ -114,6 +114,8 @@ class SubtitleWindow(ctk.CTkToplevel):
         self.param_browse = {}
         self.param_readonly = {}
 
+        self.regenerate_var = ctk.IntVar(value=0)
+        self._regenerate = False
         self._control = None
         self._worker = None
         self._events = queue.Queue()
@@ -136,17 +138,39 @@ class SubtitleWindow(ctk.CTkToplevel):
 
     # ---------- construction ----------
     def _build_ui(self):
+        """Two columns: setup on the left, live output on the right.
+
+        Stacked vertically this window ran far too tall for a laptop screen -
+        four parameter rows, four stat chips and a log panel is a lot of
+        height. Splitting it puts everything you touch *before* a run in one
+        column and everything you watch *during* one in the other, which also
+        means the log panel gets real vertical room instead of being squeezed
+        at the bottom."""
         root = ctk.CTkFrame(self, fg_color="transparent")
         root.pack(fill="both", expand=True, padx=24, pady=22)
-        root.grid_columnconfigure(0, weight=1)
-        root.grid_rowconfigure(4, weight=1)      # log card takes the slack
+        root.grid_columnconfigure(0, weight=1, uniform="col")
+        root.grid_columnconfigure(1, weight=1, uniform="col")
+        root.grid_rowconfigure(0, weight=1)
 
-        self._build_header(root, 0)
-        self._build_params_card(root, 1)
-        self._build_action_card(root, 2)
-        self._build_stats_row(root, 3)
-        self._build_log_card(root, 4)
-        self._build_footer(root, 5)
+        left = ctk.CTkFrame(root, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)      # params card absorbs slack
+
+        right = ctk.CTkFrame(root, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(1, weight=1)      # log card absorbs slack
+
+        # Left: everything from the header down to the Start button.
+        self._build_header(left, 0)
+        self._build_params_card(left, 1)
+        self._build_action_card(left, 2)
+
+        # Right: everything that only matters once a run is under way.
+        self._build_stats_row(right, 0)
+        self._build_log_card(right, 1)
+        self._build_footer(right, 2)
 
     def _build_header(self, parent, grid_row):
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -193,6 +217,7 @@ class SubtitleWindow(ctk.CTkToplevel):
 
         for i, (key, glyph, bg, title, subtitle, browse, filetypes) in enumerate(PARAM_FIELDS):
             self._param_row(card, i, key, glyph, bg, title, subtitle, browse, filetypes)
+        self._regenerate_row(card, len(PARAM_FIELDS))
 
     def _param_row(self, parent, row, key, glyph, bg, title, subtitle, browse, filetypes):
         line = ctk.CTkFrame(parent, fg_color="transparent")
@@ -207,7 +232,7 @@ class SubtitleWindow(ctk.CTkToplevel):
                      text_color=COLOR_TITLE, anchor="w").grid(row=0, column=1, sticky="w")
         ctk.CTkLabel(line, text=subtitle, font=ctk.CTkFont(size=11),
                      text_color=COLOR_SUBTITLE, anchor="w", justify="left",
-                     wraplength=520).grid(row=1, column=1, sticky="w")
+                     wraplength=430).grid(row=1, column=1, sticky="w")
 
         field = ctk.CTkFrame(line, fg_color="transparent")
         field.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
@@ -235,6 +260,38 @@ class SubtitleWindow(ctk.CTkToplevel):
                 command=lambda k=key, b=browse, f=filetypes: self._browse(k, b, f))
             btn.grid(row=0, column=1, padx=(10, 0))
             self.param_browse[key] = btn
+
+    def _regenerate_row(self, parent, row):
+        """Off by default, so the protective behaviour stays the default and
+        overwriting is a deliberate act.
+
+        The reason it exists: an existing .srt is normally skipped, which is
+        right when it may have been corrected by hand - but it also means
+        editing glossary.json and re-running would skip every chapter and
+        change nothing. Tuning the glossary is the main reason to re-run at
+        all, so it needs a way through that does not involve deleting files
+        by hand."""
+        line = ctk.CTkFrame(parent, fg_color="transparent")
+        line.grid(row=row, column=0, sticky="ew", padx=20, pady=(4, 18))
+        line.grid_columnconfigure(1, weight=1)
+
+        IconBadge(line, "♻", "#E08A2C", size=40, font_size=16,
+                  corner_radius=11).grid(row=0, column=0, rowspan=2, sticky="w",
+                                         padx=(0, 12))
+        ctk.CTkLabel(line, text="Regenerate existing subtitles",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=COLOR_TITLE, anchor="w").grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(line, text="Overwrite chapters that already have an .srt - "
+                               "needed after editing glossary.json",
+                     font=ctk.CTkFont(size=11), text_color=COLOR_SUBTITLE,
+                     anchor="w", justify="left", wraplength=380).grid(
+            row=1, column=1, sticky="w")
+
+        self.regenerate_switch = ctk.CTkSwitch(
+            line, text="", variable=self.regenerate_var, onvalue=1, offvalue=0,
+            progress_color="#E08A2C", button_color="white",
+            switch_width=46, switch_height=24, width=52)
+        self.regenerate_switch.grid(row=0, column=2, rowspan=2, sticky="e", padx=(12, 0))
 
     def _browse(self, key, kind, filetypes):
         current = self.vars[key].get().strip()
@@ -272,7 +329,12 @@ class SubtitleWindow(ctk.CTkToplevel):
                 ("in_progress", "▶", "#4DA6FF", "In Progress")]):
             card = self._chip_card(row, i)
             inner = ctk.CTkFrame(card, fg_color="transparent")
-            inner.pack(expand=True)
+            # Symmetric 16px top/bottom, matching the time chip's explicit
+            # padding so all four boxes are the same height and the icon is
+            # not crowded against the top edge. The log card below has the
+            # only row weight in this column, so the height these chips gain
+            # is taken out of the log automatically - nothing else to adjust.
+            inner.pack(expand=True, pady=16)
             icon_row = ctk.CTkFrame(inner, fg_color="transparent")
             icon_row.pack()
             IconBadge(icon_row, glyph, bg, size=44, font_size=18,
@@ -281,19 +343,22 @@ class SubtitleWindow(ctk.CTkToplevel):
                                  font=ctk.CTkFont(size=24, weight="bold"))
             value.pack(side="left", padx=(9, 0))
             ctk.CTkLabel(inner, text=caption, text_color=COLOR_SUBTITLE,
-                         font=ctk.CTkFont(size=13), wraplength=130,
+                         font=ctk.CTkFont(size=13), wraplength=110,
                          justify="center").pack(pady=(7, 0))
             self.chips[key] = value
 
         time_card = self._chip_card(row, 3)
         time_inner = ctk.CTkFrame(time_card, fg_color="transparent")
-        time_inner.pack(expand=True)
+        # Same structure as the three icon chips - padding on `inner`, not on
+        # the labels - so all four boxes pad identically instead of this one
+        # arriving at a similar number by a different route.
+        time_inner.pack(expand=True, pady=16)
         self.chips["time"] = ctk.CTkLabel(
             time_inner, text="00:00:00", text_color=COLOR_TITLE,
             font=ctk.CTkFont(size=26, weight="bold"))
-        self.chips["time"].pack(pady=(16, 0))
+        self.chips["time"].pack()
         ctk.CTkLabel(time_inner, text="Total Time", text_color=COLOR_SUBTITLE,
-                     font=ctk.CTkFont(size=13)).pack(pady=(7, 16))
+                     font=ctk.CTkFont(size=13)).pack(pady=(7, 0))
 
     @staticmethod
     def _chip_card(parent, column):
@@ -375,6 +440,9 @@ class SubtitleWindow(ctk.CTkToplevel):
         self._set_params_editable(name == "ready")
 
     def _set_params_editable(self, editable):
+        switch = getattr(self, "regenerate_switch", None)
+        if switch is not None:
+            switch.configure(state="normal" if editable else "disabled")
         for key in self.vars:
             entry, readonly = self.param_entries[key], self.param_readonly[key]
             browse = self.param_browse.get(key)
@@ -438,6 +506,10 @@ class SubtitleWindow(ctk.CTkToplevel):
         self.append_log(f"Backend: {self.backend}  |  {len(bases)} chapter(s) found",
                         "processing")
 
+        self._regenerate = bool(self.regenerate_var.get())
+        if self._regenerate:
+            self.append_log("Regenerate is ON - existing .srt files will be "
+                            "overwritten.", "error")
         self._control = translate_pipeline.TranslationControl()
         self._apply_state("running")
         self._start_time = time.time()
@@ -477,7 +549,8 @@ class SubtitleWindow(ctk.CTkToplevel):
             result = translate_pipeline.generate_subtitles(
                 settings, base_names=bases, backend=self.backend,
                 control=self._control, log=log, on_chunk=on_chunk,
-                on_chapter_done=on_chapter_done, skip_existing=True, verbose=False)
+                on_chapter_done=on_chapter_done,
+                skip_existing=not self._regenerate, verbose=False)
             self._events.put(("done", result))
         except Exception as e:                      # never lose a worker crash
             self._events.put(("log", f"Unexpected failure: {e}", "error"))
