@@ -36,6 +36,14 @@ DEFAULT_SETTINGS = {
     # Output encoding.
     "mp3_mono": True,
     "mp3_bitrate": "96k",
+    # Translation subtitles. See translate_pipeline.py.
+    "auto_translate_after_run": False,
+    "translation_backend": "vntl",
+    "llama_server_url": "http://127.0.0.1:8080",
+    # Used to start llama-server on demand when nothing is already listening,
+    # so the GPU is only occupied while translation is actually running.
+    "llama_server_exe": r"C:\llama.cpp\llama-server.exe",
+    "llama_model_path": r"C:\llama.cpp\models\vntl-llama3-8b-v2-hf-q5_k_m.gguf",
 }
 
 

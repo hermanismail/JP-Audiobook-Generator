@@ -1,6 +1,6 @@
 {
   "input_folder": "F:\\AUDIOBOOK_CHAPTER\\test\\test-20260906",
-  "output_folder": "F:\\AUDIOBOOK_OUTPUT\\test\\mikku-20260906\\015",
+  "output_folder": "F:\\AUDIOBOOK-HOST\\sputnik",
   "temp_dir": "E:\\tmp-audiobook",
   "speaker_path": "C:\\Irodori-TTS\\seiyuu\\mikku\\02\\checkpoint_final.speaker.safetensors",
   "silence_duration_sentence": 1.0,
@@ -20,5 +20,10 @@
   "seed_enabled": false,
   "seed_value": 20260906,
   "mp3_mono": false,
-  "mp3_bitrate": "96k"
+  "mp3_bitrate": "96k",
+  "auto_translate_after_run": false,
+  "translation_backend": "vntl",
+  "llama_server_url": "http://127.0.0.1:8080",
+  "llama_server_exe": "C:\\llama.cpp\\llama-server.exe",
+  "llama_model_path": "C:\\llama.cpp\\models\\vntl-llama3-8b-v2-hf-q5_k_m.gguf"
 }

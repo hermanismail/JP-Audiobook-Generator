@@ -44,8 +44,11 @@ mp3_metadata.py does, so no arguments beyond the above are needed.
 import os
 import re
 import glob
+import contextlib
 import json
+import time
 import datetime
+import subprocess
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(SCRIPT_DIR, "settings.json")
@@ -196,13 +199,25 @@ def _llama_completion(prompt, url=LLAMA_SERVER_URL):
 
 def translate_vntl(japanese_texts, *, settings=None, base_name=None,
                    progress=True, **_kwargs):
-    glossary = load_glossary(settings["output_folder"]) if settings else {"characters": [], "notes": []}
+    import urllib.error
+
+    settings = settings or {}
+    # Endpoint is a setting so the server can live on another box (or port)
+    # without editing code - useful once the 8GB card is the bottleneck.
+    url = settings.get("llama_server_url") or LLAMA_SERVER_URL
+    glossary = (load_glossary(settings["output_folder"])
+                if settings.get("output_folder") else {"characters": [], "notes": []})
     history = []
     english = []
 
     for i, japanese in enumerate(japanese_texts, start=1):
         prompt = build_vntl_prompt(japanese, history, glossary)
-        line = _llama_completion(prompt)
+        try:
+            line = _llama_completion(prompt, url=url)
+        except (urllib.error.URLError, ConnectionError, OSError) as e:
+            raise BackendUnavailable(
+                f"cannot reach llama-server at {url} ({e}). Start it with the "
+                f"VNTL model loaded, or switch the backend to 'identity'.") from e
         english.append(line)
         history.append((japanese, line))
         if len(history) > VNTL_CONTEXT_PAIRS:
@@ -217,6 +232,160 @@ BACKENDS = {
     "identity": translate_identity,
     "vntl": translate_vntl,
 }
+
+
+# ---------------------------------------------------------------------------
+# llama-server lifecycle
+# ---------------------------------------------------------------------------
+# The 8GB card holds either the TTS model or the translation model, not both,
+# so llama-server should only be resident while translation is actually
+# running. Managing it here rather than in the GUI means both callers get it:
+# the "Generate Subtitles Now" button and run_audiobook.py's end-of-run pass.
+#
+# The rule that matters: only ever stop a server we started ourselves. If one
+# is already listening - because the person is using it for something else -
+# it gets used as-is and left alone.
+
+# Fallbacks for keys a settings.json written before this feature existed will
+# not contain. run_audiobook.load_settings() merges its own defaults the same
+# way; this module reads settings.json directly (like mp3_metadata.py), so it
+# has to do its own merge or an older file silently yields empty paths.
+SETTING_DEFAULTS = {
+    "llama_server_url": "http://127.0.0.1:8080",
+    "llama_server_exe": r"C:\llama.cpp\llama-server.exe",
+    "llama_model_path": r"C:\llama.cpp\models\vntl-llama3-8b-v2-hf-q5_k_m.gguf",
+    "translation_backend": "vntl",
+}
+
+
+def merge_setting_defaults(settings):
+    merged = dict(SETTING_DEFAULTS)
+    merged.update({k: v for k, v in (settings or {}).items() if v not in (None, "")})
+    return merged
+
+
+LLAMA_SERVER_ARGS = ["-ngl", "99", "-c", "8192"]
+LLAMA_STARTUP_TIMEOUT = 240   # loading ~6GB onto the card is not instant
+LLAMA_HEALTH_POLL = 2.0
+
+
+def llama_server_reachable(url, timeout=2.0):
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/health", timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+class ManagedLlamaServer:
+    """Context manager that guarantees the server is stopped again.
+
+    A `finally`-backed shutdown is the whole point: a crash, a failed
+    chapter or a Ctrl-C midway through a book must not leave 6GB of VRAM
+    locked up, because the next thing the person does is usually start a TTS
+    run."""
+
+    def __init__(self, settings, log=print):
+        settings = merge_setting_defaults(settings)
+        self.url = settings["llama_server_url"]
+        self.exe = settings["llama_server_exe"]
+        self.model = settings["llama_model_path"]
+        self.log = log
+        self.process = None          # only set when WE started it
+        self.server_log_path = None
+
+    def __enter__(self):
+        if llama_server_reachable(self.url):
+            self.log(f"  llama-server already running at {self.url} - using it "
+                     f"(it will be left running).")
+            return self
+
+        if not self.exe or not os.path.isfile(self.exe):
+            raise BackendUnavailable(
+                f"nothing is listening at {self.url} and llama-server was not "
+                f"found at {self.exe!r}. Set 'llama-server path' in Advanced "
+                f"settings, or start the server yourself.")
+        if not self.model or not os.path.isfile(self.model):
+            raise BackendUnavailable(
+                f"llama-server model not found at {self.model!r}. Set 'Model "
+                f"(GGUF) path' in Advanced settings.")
+
+        host, port = self._split_url(self.url)
+        # The server is chatty on startup and its output is what tells you why
+        # a model failed to load, so keep it, but in its own file rather than
+        # drowning the translation progress.
+        self.server_log_path = os.path.join(
+            os.path.dirname(self.model) or ".",
+            f"llama-server_{datetime.datetime.now():%Y%m%d_%H%M%S}.log")
+        cmd = [self.exe, "-m", self.model, *LLAMA_SERVER_ARGS,
+               "--host", host, "--port", str(port)]
+
+        self.log(f"  starting llama-server ({os.path.basename(self.model)})...")
+        try:
+            handle = open(self.server_log_path, "w", encoding="utf-8")
+        except OSError:
+            handle = subprocess.DEVNULL
+        self._server_log_handle = handle
+        self.process = subprocess.Popen(cmd, stdout=handle,
+                                        stderr=subprocess.STDOUT)
+
+        deadline = time.time() + LLAMA_STARTUP_TIMEOUT
+        while time.time() < deadline:
+            if self.process.poll() is not None:
+                self.stop()
+                raise BackendUnavailable(
+                    f"llama-server exited immediately (code "
+                    f"{self.process.returncode}). See {self.server_log_path}")
+            if llama_server_reachable(self.url):
+                self.log(f"  llama-server ready at {self.url}")
+                return self
+            time.sleep(LLAMA_HEALTH_POLL)
+
+        self.stop()
+        raise BackendUnavailable(
+            f"llama-server did not become ready within {LLAMA_STARTUP_TIMEOUT}s. "
+            f"See {self.server_log_path}")
+
+    def __exit__(self, *_exc):
+        self.stop()
+        return False    # never swallow the original exception
+
+    def stop(self):
+        if self.process is None:
+            return      # not ours - leave it alone
+        self.log("  stopping llama-server (freeing VRAM)...")
+        try:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=10)
+        except Exception as e:
+            self.log(f"  warning: could not stop llama-server cleanly: {e}")
+        finally:
+            self.process = None
+            handle = getattr(self, "_server_log_handle", None)
+            if handle not in (None, subprocess.DEVNULL):
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _split_url(url):
+        from urllib.parse import urlparse
+        parsed = urlparse(url if "//" in url else f"http://{url}")
+        return parsed.hostname or "127.0.0.1", parsed.port or 8080
+
+
+class BackendUnavailable(RuntimeError):
+    """The backend itself cannot be reached, so every remaining chapter would
+    fail the same way. Raised instead of a bare connection error so
+    generate_subtitles() can stop rather than grinding through the whole book
+    producing the identical failure once per chapter."""
 
 
 class TranslationResult:
@@ -396,6 +565,29 @@ def generate_subtitles(settings, base_names=None, backend="identity",
     if base_names is None:
         base_names = find_chapter_bases(output_folder)
 
+    # Only the vntl backend needs a model server, and only when actually
+    # translating - a --srt-only re-emission touches no model at all.
+    needs_server = backend == "vntl" and not srt_only
+    server_ctx = (ManagedLlamaServer(settings, log=print) if needs_server
+                  else contextlib.nullcontext())
+
+    try:
+        with server_ctx:
+            _translate_chapters(base_names, output_folder, translate, settings,
+                                backend, model_name, srt_only, limit, verbose,
+                                result)
+    except BackendUnavailable as e:
+        # Raised while bringing the server up, before any chapter was
+        # attempted. Recorded like any other failure rather than thrown, so
+        # the CLI prints a readable message instead of a traceback.
+        result.errors.append(("(llama-server startup)", str(e)))
+        if verbose:
+            print(f"  ! {e}")
+    return result
+
+
+def _translate_chapters(base_names, output_folder, translate, settings, backend,
+                        model_name, srt_only, limit, verbose, result):
     for base_name in base_names:
         try:
             if srt_only:
@@ -446,10 +638,19 @@ def generate_subtitles(settings, base_names=None, backend="identity",
                 print(f"  {base_name}: {len(chunks)} chunk(s) -> "
                       f"{base_name}.translation.json + {base_name}.srt")
 
+        except BackendUnavailable as e:
+            # No point attempting the remaining chapters - they would all
+            # fail identically and bury the real cause under repetition.
+            result.errors.append((base_name, str(e)))
+            if verbose:
+                print(f"  ! {base_name}: {e}")
+                print("  Stopping: the backend is unavailable, so the remaining "
+                      "chapters would fail the same way.")
+            break
         except Exception as e:  # one bad chapter shouldn't abandon the rest
             result.errors.append((base_name, str(e)))
-
-    return result
+            if verbose:
+                print(f"  ! {base_name}: {e}")
 
 
 if __name__ == "__main__":
@@ -480,7 +681,7 @@ if __name__ == "__main__":
     _args = _parser.parse_args()
 
     with open(SETTINGS_PATH, "r", encoding="utf-8") as _f:
-        _settings = json.load(_f)
+        _settings = merge_setting_defaults(json.load(_f))
 
     _bases = [_args.chapter] if _args.chapter else None
 
