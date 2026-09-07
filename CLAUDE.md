@@ -1,211 +1,254 @@
 # CLAUDE.md — JP Audiobook Generator
 
-Context for Claude Code sessions in this repo. Written 2026-09-06 from a
-session in the **player** repo (`F:\JPAudiobookPlayer`) that studied this
-pipeline in order to design a translation-subtitle feature. The
-"Translation feature" section below is a **spec that has not been built
-yet** — everything above it describes code that exists today.
+Context for Claude Code sessions in this repo. Rewritten 2026-09-07, after
+the translation-subtitle feature was built and merged to `main`. An earlier
+version of this file carried that feature as an unbuilt spec — it is built
+now, and where the implementation diverged from the spec is recorded below,
+because the divergences are the interesting part.
+
+Everything in this file describes code that exists today.
 
 ## What this project is
 
-A Windows desktop tool (Python + CustomTkinter) that turns Japanese
-chapter text files into a chaptered audiobook: cleaned/chunked text →
-Irodori-TTS → per-chunk wavs → stitched MP3 + `sync.json` timing data +
-ID3 tags. Its output folder is the input to the separate **player**
-project (`F:\JPAudiobookPlayer` — Android app + Node server/web client;
-that repo has its own detailed CLAUDE.md).
+A Windows desktop tool (Python + CustomTkinter) that turns Japanese chapter
+text files into a chaptered audiobook: cleaned/chunked text → Irodori-TTS →
+per-chunk wavs → stitched MP3 + `sync.json` timing data + ID3 tags, and
+optionally an English `.srt` per chapter. Its output folder is the input to
+the separate **player** project (`F:\JPAudiobookPlayer` — Android app + Node
+server/web client; that repo has its own detailed CLAUDE.md).
 
 **Two-venv architecture**: a lightweight GUI venv for this project, and a
 separate heavy ML venv at `C:\Irodori-TTS` for the TTS engine.
-`run_audiobook.py` runs inside the Irodori venv and is stdlib-only where
-it can be; it shells out to `mp3_metadata.py` with `uv run --project
-<this dir>` so `mutagen` never needs installing in the ML venv. Keep that
-separation — it is deliberate.
+`run_audiobook.py` runs inside the Irodori venv and is stdlib-only where it
+can be; it shells out to `mp3_metadata.py` with `uv run --project <this dir>`
+so `mutagen` never needs installing in the ML venv. Keep that separation — it
+is deliberate.
 
 ## Layout
 
-- `run_audiobook.py` — the pipeline driver. `process_chapter()` is the
-  spine: read raw text → `text_pipeline.build_chunks()` → write working
-  files → one TTS call per chunk → ffmpeg concat with silence wavs →
-  **step 5b** write `sync.json` → **step 6** optional auto-tag.
-  - `build_sync_data()` is the load-bearing piece for anything
-    downstream: it walks the *same* concat ordering used to stitch the
-    MP3, summing `ffprobe`'d durations, so each chunk's `start`/`end` in
-    the final file falls out with no separate alignment pass. Output is
+- `run_audiobook.py` — the pipeline driver. `process_chapter()` is the spine:
+  read raw text → `text_pipeline.build_chunks()` → write working files → one
+  TTS call per chunk → ffmpeg concat with silence wavs → **step 5b** write
+  `sync.json` → **step 6** optional auto-tag. `main()` then optionally runs
+  translation once for the whole book.
+  - `build_sync_data()` is the load-bearing piece for anything downstream: it
+    walks the *same* concat ordering used to stitch the MP3, summing
+    `ffprobe`'d durations, so each chunk's `start`/`end` in the final file
+    falls out with no separate alignment pass. Output is
     `{version, chunks:[{index, start, end, text}]}` written to
-    `<chapter>.sync.json`. It must run **before** the temp-dir cleanup —
-    it needs the per-chunk wavs still on disk.
-  - `get_silence_wavs()` renders three silence wavs once per run, matched
-    to the TTS output's exact sample rate / channels / sample format —
-    the concat demuxer does no resampling, so drift here corrupts audio.
+    `<chapter>.sync.json`. It must run **before** the temp-dir cleanup — it
+    needs the per-chunk wavs still on disk.
+  - `get_silence_wavs()` renders three silence wavs once per run, matched to
+    the TTS output's exact sample rate / channels / sample format — the concat
+    demuxer does no resampling, so drift here corrupts audio.
+  - `MODEL_REF` is a **constant, not a setting**. The pipeline uses the
+    published `Aratako/Irodori-TTS-v4.1-Small` checkpoint, so there is no
+    Model Path field in the GUI. `checkpoint_args()` picks `--checkpoint` vs
+    `--hf-checkpoint` from the shape of the value, because those two are a
+    *mutually exclusive, required* argparse group in `infer.py` and passing
+    both makes it exit 2 before generating anything.
+  - `write_settings_snapshot()` drops `<foldername>_YYYYMMDD_HHMM.json` into
+    the output folder before the first chapter, so a run that dies halfway
+    still leaves a record. Everything outside its `_run` block is a faithful
+    copy of `settings.json`, which makes a snapshot a valid preset for the
+    GUI's Import.
 - `text_pipeline.py` — text cleaning and chunking, stdlib only. Sections
-  (blank-line split) → paragraphs → sentences (。？……) → merged chunks at
-  a soft/hard char limit. Each chunk carries **two** texts:
+  (blank-line split) → paragraphs → sentences (。？……) → merged chunks at a
+  soft/hard char limit. Each chunk carries **two** texts:
   - `text` — TTS-normalized (brackets stripped, ── → 、, punctuation runs
     collapsed). What goes to the TTS engine.
-  - `display_text` — original wording. **This is what lands in
-    `sync.json` and what the reader app displays.** Do not conflate them.
-- `mp3_metadata.py` — ID3 tagging (mutagen). Has a `--chapter <base>` CLI
-  and re-reads `settings.json` itself. **This is the pattern to copy for
-  any new per-chapter post-processing step** (see Translation below).
-- `gui_settings.py` — CustomTkinter settings GUI; `DEFAULT_SETTINGS` near
-  the top mirrors `run_audiobook.py`'s own defaults dict — both must be
-  updated together when adding a setting. Also hosts the standalone
-  "Apply Tags to Output MP3s" button.
-- `progress_window.py`, `ui_common.py` — progress UI and shared widgets.
-  *(Not read in detail during the session that wrote this file.)*
+  - `display_text` — original wording. **This is what lands in `sync.json`
+    and what the reader app displays.** Do not conflate them.
+- `translate_pipeline.py` — subtitle generation. Stdlib only, so it runs
+  unchanged in either venv. See the Translation section below.
+- `mp3_metadata.py` — ID3 tagging (mutagen). Has a `--chapter <base>` CLI and
+  re-reads `settings.json` itself. The pattern `translate_pipeline.py`
+  copies.
+- `gui_settings.py` — CustomTkinter settings GUI. Three pages (General,
+  Metadata, Advanced) plus a bottom bar with Import / Export / Save & Run.
+- `subtitle_window.py` — the Subtitle Generation Tool window. Owns the worker
+  thread, pause/resume, the llama-server lifecycle and its own log.
+- `progress_window.py`, `ui_common.py` — progress UI and shared design tokens.
 
 ## Conventions worth not breaking
 
 - Hand-rolled `json` building; no serialization library.
 - `json.dump(..., ensure_ascii=False)` — the data is Japanese.
-- A new setting means three edits: `DEFAULT_SETTINGS` in
-  `gui_settings.py`, the defaults dict in `run_audiobook.py`, and the
-  save handler that writes `settings.json`.
-- Post-processing tools are separate scripts with their own `--chapter`
-  CLI that re-read `settings.json`, invoked via `uv run --project`, and
-  gated behind a boolean setting for the automatic path. Both the
-  automatic and manual paths call the same code.
+- **A new setting means four edits**: `DEFAULT_SETTINGS` in `gui_settings.py`,
+  the defaults dict in `run_audiobook.py`, `_collect_and_validate()` (which
+  writes `settings.json`), and a widget. Import and Reset need no work —
+  `_apply_settings_to_fields()` merges over `DEFAULT_SETTINGS` generically.
+- **`_collect_and_validate()` rebuilds `settings.json` from a fixed key list.**
+  Any key it does not know about is silently dropped on the next save. This is
+  why the llama paths and TTS tuning values had to be added there and not just
+  to the defaults dicts, and why "just add it to settings.json by hand" does
+  not survive.
+- Post-processing tools are separate scripts with their own `--chapter` CLI
+  that re-read `settings.json`, invoked via `uv run --project`, and gated
+  behind a boolean setting for the automatic path. Both the automatic and
+  manual paths call the same code.
+- Scripts reading `settings.json` directly must merge their own defaults
+  (`translate_pipeline.merge_setting_defaults`). A settings file written
+  before a feature existed otherwise yields empty strings, not defaults.
 
 ---
 
-# Translation feature — SPEC, NOT YET BUILT
+# Translation subtitles — BUILT
 
-Full rationale, cost math, research citations and the alternatives that
-were rejected live in `F:\JPAudiobookPlayer\translation-pipeline-notes-rev2.pdf`.
-This is the buildable summary. **Build on a separate branch; the user
-controls branching and commits.**
+Original rationale, cost math and rejected alternatives live in
+`F:\JPAudiobookPlayer\translation-pipeline-notes-rev2.pdf`. What follows is
+what actually shipped.
 
-## Goal
+## The shape that survived
 
-Generate an English translation subtitle for each chapter, so the player
-can show it alongside the Japanese reading text.
+Translation reads the finished `<chapter>.sync.json`, never the raw text, and
+emits a sidecar `.srt` plus a `.translation.json` artifact. Chunk boundaries
+are already fixed by the rendered MP3 by then, so timing is correct by
+construction. `sync.json` is only ever read; English never goes near its
+`text` field.
 
-## The decision, and why
+```
+read  <base>.sync.json          (never modified)
+  -> translate chunk by chunk
+  -> write <base>.translation.json    source of truth
+  -> write <base>.srt                 cheap re-emission
+```
 
-The player already reads an optional `<chapter_base>.srt` sitting next to
-the audio (`GET /api/books/:id/chapters/:base/subtitle`; missing file =
-404 = no-op). Today those are made by hand outside the pipeline.
+**The index invariant is enforced structurally, not by validation.** The spec
+called for asking the model for indexed batches and rejecting mismatches. That
+is not what happened, because VNTL made it unnecessary: the driver zips
+backend output positionally onto `sync.json`'s own chunk list, and a backend
+returning the wrong count is rejected before anything is written. The model
+never sees an index, so it cannot renumber one. There is no retry loop.
 
-**Approach: translate the finished `sync.json` chunk-by-chunk, emit a
-separate `.srt`.** Do *not* merge English into `sync.json`.
+## Where the implementation diverged from the spec
 
-- Translating *after* audio exists means chunk boundaries are already
-  fixed by the rendered MP3 — the translation can never desync. Timing is
-  correct by construction, not by alignment.
-- Emitting a sidecar `.srt` keeps the change 100% additive: the karaoke
-  engine, the Kotlin JS bridge, and the two separate copies of the player
-  HTML all keep their current data contract.
-- Rejected: translating first and chunking both languages together
-  (assumes a 1:1 JA→EN segment mapping that Japanese word order makes
-  fictional), and anything using Whisper (it is ASR — it would discard
-  the exact timings this pipeline already computes).
-
-**The invariant that makes it all work: the model only ever fills in text
-per existing chunk index. It never merges, splits, or re-times.** Every
-mature open-source subtitle translator converges on this rule.
-
-## Shape
-
-A new `translate_pipeline.py`, mirroring `mp3_metadata.py`:
-
-| | Auto-tagging (exists) | Translation (build this) |
+| Spec said | What shipped | Why |
 |---|---|---|
-| Standalone | GUI "Apply Tags to Output MP3s" → `mp3_metadata.py --chapter <base>` | GUI "Generate Translation Subtitles" → `translate_pipeline.py --chapter <base>` \| `--all` |
-| Automatic | `auto_tag_generated_files` setting; runs **per chapter** inside `process_chapter()` | `auto_translate_after_run` setting; runs **once at the very end of the whole run** |
+| Batch 5–10 chunks as indexed JSON, validate and retry | One chunk at a time, alignment from the loop | VNTL is a completion model with no JSON and no instruction-following. This turned out **safer**, not weaker — misalignment became impossible rather than merely detected. |
+| Glossary as a separate persisted phase | Glossary *is* VNTL's native `Metadata` block | The format has a trained-in slot for name/gender/aliases. Bolting a second mechanism on top would have fought it. |
+| Rolling context window as bespoke machinery | The prompt's own alternating Japanese/English history | Same reason. 12 pairs. |
+| VNTL uses a custom alternating prompt format | v2 uses the **standard LLaMA 3 token scheme** with custom header roles (`Metadata` / `Japanese` / `English`) | The spec described v1. v2 changed it. No chat-completions API can express those roles, so the adapter must use raw `/completion`. |
 
-**The end-of-run placement is deliberate, for two independent reasons:**
-1. VRAM — Irodori-TTS and a local translation model would contend for the
-   same 8GB card if translation ran between chapters.
-2. The book-level glossary is better built in one pass over a finished
-   book than accumulated chapter by chapter.
+## Key files and objects
 
-The automatic path is just the standalone path invoked with `--all`. That
-also makes back-filling already-generated books free, with no TTS re-run.
+- `BACKENDS` — `{"identity": ..., "vntl": ...}`. Adding a backend is one
+  function plus one dict entry. `identity` passes the Japanese through
+  untranslated and is **not** a placeholder: it validates the artifact format,
+  the SRT emitter and the player round-trip with no model in the loop.
+- `TranslationControl` — pause/cancel, checked between chunks. Pausing leaves
+  llama-server loaded so resuming is instant; only cancelling unwinds through
+  the context manager that frees VRAM. **Cancel must also release a paused
+  worker**, or the emergency stop hangs forever on a paused run.
+- `ManagedLlamaServer` — context manager. Starts the server on demand, stops
+  it afterwards. **Only ever stops a server it started**; one already
+  listening is used as-is and left running. `finally`-backed, so a crash or an
+  interrupt still frees the card.
+- `BackendUnavailable` — stops the whole run at the first chapter rather than
+  failing identically once per chapter and burying the cause.
+- `glossary.json` — per book, beside the chapters, reloaded at the start of
+  every chapter. `name` must match the text exactly; `gender` fixes pronouns
+  Japanese leaves implicit.
 
-## Per chapter
+## Tuning that is not negotiable
 
-```
-read chapter_NNN.sync.json
-  → batch its chunks (with rolling context + book glossary)
-  → LLM
-  → validate: same count, same indices, or retry
-  → write chapter_NNN.translation.json   (the artifact / source of truth)
-  → write chapter_NNN.srt                (cheap re-emission for the player)
-```
+- **Temperature 0, no repetition penalty.** The model author's explicit
+  recommendation. A repetition penalty punishes the legitimately recurring
+  tokens translation depends on — character names, particles — and pushes the
+  model into renaming or omitting them.
+- **Skip existing is the default everywhere.** `generate_subtitles` defaults
+  to `skip_existing=True`; overwriting is always explicit (`--regenerate`, or
+  the tool's toggle). An existing `.srt` may have been corrected by hand.
+- **The chapter decision drives the subtitle decision on the automatic path.**
+  `Regenerate existing chapters` OFF means existing `.srt` files are skipped
+  too. This is correctness, not tidiness: regenerating a chapter rewrites its
+  `sync.json`, and an `.srt` is timed against that file.
 
-Rules:
-- **Indices are sacred.** Validate length and index alignment on every
-  response; reject and retry on mismatch. This is what keeps timing right.
-- **Context, not isolation.** Line-by-line translation is the single
-  biggest quality killer; always send neighbouring chunks as read-only
-  context.
-- **Book-level glossary**, persisted to disk, so chapter 15 doesn't
-  rename a character introduced in chapter 2. Hand-editable — that's the
-  point of persisting it.
-- **Never touch `sync.json`.** English does not go near its `text` field.
-- SRT: UTF-8, no BOM, `HH:MM:SS,mmm`.
-- A chunk can be a sentence fragment (the hard char limit may split on
-  「、」), so context matters for translating those sensibly.
+---
 
-## Model — local first
+# Things that bit us, and will again
 
-The user is **not spending on API translation for now**. Machine: RTX
-4060, **8GB VRAM**, 16GB RAM, no local LLM runtime installed yet.
+Recorded because each cost real time to find.
 
-Put the LLM call behind **one adapter function** so local-now /
-API-later is a one-line swap. The seam must be wide enough for two
-genuinely different call shapes:
+**Subprocess output is silently discarded by default.** The TTS call used
+`subprocess.run(cmd, capture_output=True)` and then only checked whether the
+wav appeared. An `infer.py` argparse error therefore looked like "nothing
+happened", with no message anywhere. It now prints stderr and the exit code on
+failure. Any new subprocess call should assume it will fail one day and needs
+to say why.
 
-- **Qwen3 8B/14B (Q4) — the default.** General instruction-following
-  model, strong at Japanese. Can honour the JSON-batch + index contract.
-- **VNTL-Llama3-8B-v2 — a per-book option.** A QLoRA fine-tune of Llama 3
-  Youko trained only on JA→EN visual-novel translation. You do not
-  instruct it; you complete its format: a metadata block (character name,
-  aliases, **gender** — a trained-in slot that addresses Japanese's
-  dropped pronouns) then alternating `[Japanese]`/`[English]` sections.
-  Its metadata block is a native glossary mechanism and its alternating
-  history is a native rolling context window — both match this design.
-  **But it does no JSON and no instruction-following**, so it must be
-  driven one chunk at a time with alignment taken from the loop. Good fit
-  for 幼女戦記; off-distribution for the Murakami titles.
-- **Skip `nllb-jaen-1.3B-lightnovels`** despite the promising name — a
-  seq2seq NMT model with a 128-token cap and no glossary/context ability.
+**`-u` matters for anything whose output you want to watch.** Python
+block-buffers stdout when it is a pipe. Without `-u` the per-chunk progress
+sits in an 8KB buffer and arrives hours later, in one lump. `gui_settings.py`
+passes it when launching `run_audiobook.py`; `run_audiobook.py` passes it when
+launching `translate_pipeline.py`.
 
-Tuning notes:
-- **Never use a repetition penalty for translation** (any model). It
-  penalizes legitimately recurring tokens — character names, particles —
-  and pushes the model into renaming or omitting them. VNTL specifically
-  wants temp 0, no repetition penalty.
-- Local context is ~8-16k usable at 8B/Q4, so the whole chapter does
-  **not** fit. Use a rolling window of ~10-20 previous chunks plus the
-  glossary (~2-3k tokens), not the full chapter.
-- **Batch small (5-10 chunks), not 50.** An 8B drifts on long indexed
-  lists. If it still drifts, go one chunk at a time — this is an offline
-  batch job, so slow is affordable (TTS already takes hours).
-- `llama-server`/Ollama expose an OpenAI-compatible HTTP endpoint, so the
-  adapter is just an HTTP call to localhost.
+**Tk packing order decides who gets space.** `_title_block` packs its frame
+immediately, so a title packed before a right-hand control with
+`expand=True` claims the whole row and the control renders at zero width. This
+made the seed switch invisible. Pack the right-hand control **first** —
+`_add_path_row` has always done this. Symptom: a widget that exists, reports
+`winfo_manager()` truthy, and cannot be seen.
 
-If an API model is ever used instead: `claude-opus-5` (1M context, so the
-whole chapter fits and can be prompt-cached; ~$0.50-1.30/chapter,
-~$4-5 for an 18-chapter book).
+**`_add_path_row`'s title block is a fixed 210x44.** A description longer than
+about one line is clipped, not wrapped, and collides with the entry beside it.
+Long explanations belong in the README.
 
-## Measured reference data (real output folders, 2026-09-06)
+**Do not drive real GUI handlers in tests.** `on_generate_subtitles()` and
+`_collect_and_validate()` write `settings.json` and `output_folder`. Running
+them in a smoke test wrote 18 identity-passthrough `.srt` files into a live
+serving folder, and separately overwrote a chosen backend setting. Test the
+library functions with an explicit throwaway settings dict instead.
 
-| Book | Chapters | Chunks/ch | JA chars |
-|---|---|---|---|
-| after-dark | 18 | 25-117 | 115,224 total |
-| yojo-senki ch2 | — | **314** (largest seen) | 33,785 |
-| sputnik ch15 | — | 164 | 17,447 |
+**Patch scripts must assert.** A `str.replace()` that does not match fails
+silently and the script still prints success. One such failure left the
+end-of-run translation hook out of a commit whose message claimed it shipped.
+Every replacement gets an `assert old in s`.
 
-Chunks average ~110 JA chars; `max_chunk_length` is user-configurable
-(currently 50 in `settings.json`, default 100).
+**Windows will not composite the off-screen part of a window.** `PrintWindow`
+captures of a window taller than the screen come back black below the screen
+edge. Screenshots of the scrollable Advanced page need two captures at a
+screen-safe height.
 
-## Player side — no changes needed
+**A fixed sampling seed made output *worse*.** Pinning one seed for a whole
+run was tried on the theory it would stop chunks drifting against each other;
+it destabilised chapters instead, because one unlucky draw then affects every
+chunk rather than averaging out. The setting exists and defaults to OFF. Do
+not "fix" this again.
 
-Already implemented and working: SRT fetch per chapter, a minimal parser,
-and `splitCueBySentence()` which splits a multi-sentence cue on periods
-and gives each a share of the cue window proportional to its length. So
-emitting **one cue per chunk** displays correctly today. The WebSocket
-carries only the current cue *string*, never the file — subtitle format
-has zero bearing on sync traffic.
+---
+
+# Measured reference data
+
+Real numbers from this machine (RTX 4060, 8GB), 2026-09-06/07.
+
+| Thing | Value |
+|---|---|
+| Translation throughput | **2.40–2.41 s/chunk**, flat with chapter length (measured over 422 chunks across two chapters) |
+| VNTL model | `vntl-llama3-8b-v2-hf-q5_k_m.gguf`, 5.73 GB |
+| VRAM with model loaded, 8k context | ~7.1–7.3 GB of 8188 MiB |
+| llama-server cold start | ~18 s |
+| A 314-chunk chapter | ~13 min |
+| An 18-chapter book (~1040 chunks) | ~42 min |
+| MP3 at 96k mono vs old 320k stereo | ~30% of the size |
+| TTS output | 48 kHz, mono, 16-bit PCM (fixed; not configurable) |
+
+Chunk counts vary with `max_chunk_length`, which is user-configurable — the
+older reference figures of ~110 JA chars per chunk were taken at a higher
+setting than is currently in use.
+
+# Player side — no changes needed
+
+Already implemented and working there: SRT fetch per chapter, a minimal
+parser, and `splitCueBySentence()` which splits a multi-sentence cue on
+periods and gives each a share of the cue window proportional to its length.
+Emitting **one cue per chunk** displays correctly today. The WebSocket carries
+only the current cue *string*, never the file.
+
+# Open threads
+
+- `chapter_001.translation.json` in `F:\AUDIOBOOK_OUTPUT\yojo-senki` is
+  truncated to a few chunks from a `--limit` test. Regenerate if that folder
+  matters; the complete version was copied to `AUDIOBOOK-HOST\yojo-senki`.
+- Progress-window screenshots in the README predate translation logging; they
+  are still accurate for the generation run itself.
