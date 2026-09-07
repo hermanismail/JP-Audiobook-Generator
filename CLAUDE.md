@@ -166,6 +166,79 @@ never sees an index, so it cannot renumber one. There is no retry loop.
 
 ---
 
+# Disk layout — C: is tight, new things go on F:
+
+Recorded 2026-09-07, after the cache migration described below.
+
+**Default rule for anything new: install to F:.** New models, new
+checkpoints, new engines, new heavy venvs, new caches — F: is a 932 GB
+internal SATA SSD (`KINGSTON SUV500S37/960G`, NTFS, fixed, stable letter,
+same storage class as C:, so no meaningful load-time penalty). C: is a
+223 GB SATA SSD that ran down to **20.8 GB free**. Do not add gigabytes to
+C: without a reason that has to be on C:.
+
+## What was actually moved (Phase 0, done)
+
+Only the two caches moved. They were the best value-per-risk on the list:
+bigger than the three project folders combined, and relocatable by
+environment variable with **zero code changes**.
+
+| Cache | Now at | Env var | Reclaimed |
+|---|---|---|---|
+| HuggingFace | `F:\caches\huggingface` | `HF_HOME` | 11.76 GB |
+| uv | `F:\caches\uv` | `UV_CACHE_DIR` | 0.97 GB |
+
+C: went 20.84 → **33.57 GB** free. Both env vars are **user-scoped**, so
+they apply to newly launched processes only.
+
+**Why uv reclaimed 0.97 GB and not its nominal 6.08 GB**: the uv cache
+**hardlinks** into the venvs, so a recursive size measurement counts those
+bytes twice. Deleting the cache frees only the unshared portion; the rest
+is pinned by `C:\Irodori-TTS\.venv` and comes back only when that venv
+goes. Expect the same illusion anywhere else hardlinks are in play — a
+`du`/`Get-ChildItem` total is an upper bound on what a delete will free.
+
+Side effect of the split: uv's cache is now on F: while the venvs are on
+C:, so uv **copies instead of hardlinking** on install. Costs real disk,
+harms nothing. Co-locating a venv with the cache on F: restores linking.
+
+## Still on C: — deliberately, not forgotten
+
+`C:\Irodori-TTS` (8.1 GB), `C:\llama.cpp` (6.0 GB) and this repo (33 MB)
+were assessed and left alone; 33.57 GB was judged enough buffer. The
+settings keys pointing at them are correct as written. If that changes,
+the cheapest next step is llama.cpp: loose exes/dlls/gguf with no embedded
+paths, so it is a file move plus `llama_server_exe` / `llama_model_path`
+in `settings.json` (and the matching defaults in `gui_settings.py`,
+`run_audiobook.py`, `translate_pipeline.py` — a stale default silently
+points at a dead path, because `merge_setting_defaults` fills from it).
+
+## Never copy a venv between drives
+
+Both `.venv` dirs hardcode absolute paths — `pyvenv.cfg`'s `home`,
+`Scripts\activate.bat`, every `Scripts\*.exe` launcher stub, and the
+editable install's `direct_url.json` (`file:///C:/JP-Audiobook-Generator`).
+A copied venv looks fine until something invokes it, then fails obscurely.
+**Delete it and `uv sync --locked` at the destination.** For Irodori that
+rebuild needs network *and* git — `silentcipher` comes from a GitHub URL —
+so it is not an offline operation.
+
+`%APPDATA%\Roaming\uv\python` holds the interpreters both `pyvenv.cfg`
+files point at. Leave it on C:; it is 0.1 GB.
+
+## The HF cache has 14 phantom entries
+
+Five repos list files in the cache metadata whose blobs were never stored
+locally (tokenizers, configs, silentcipher's `.ckpt` set). `snapshot_download`
+with `local_files_only=True` therefore raises `IncompleteSnapshotError`, and
+those 14 `hf_hub_download` calls raise `LocalEntryNotFoundError`. **This
+predates the move** — the same scan against the C: original returned an
+identical 6-resolved / 14-failed split. Not migration damage. Do not "fix"
+it by re-downloading in the belief that the copy was corrupt.
+
+Corollary worth keeping: when validating any copy, run the identical check
+against the original as a control before concluding the copy is broken.
+
 # Things that bit us, and will again
 
 Recorded because each cost real time to find.
