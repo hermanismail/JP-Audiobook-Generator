@@ -84,6 +84,7 @@ DEFAULT_SETTINGS = {
     "cover_art_path": "",
     "auto_tag_generated_files": False,
     "max_chunk_length": 100,
+    "regenerate_existing_chapters": False,
     # Per-speaker TTS tuning. These vary enough between trained speakers
     # that fixing them in code produced inconsistent results, so they are
     # settings rather than constants - see run_audiobook.py's matching
@@ -132,6 +133,7 @@ ICON_UV_BG = "#2BC0BA"
 ICON_SILENCE = ("\U0001F550", "#EDEBFC", "#6C5DD3")   # 🕐 clock
 ICON_KEEP_TEMP = ("\u2714", "#E6F8ED", "#2FB668")      # check
 ICON_CHUNK_LENGTH = ("\U0001F4CF", "#FFF1E0", "#E08A2C")  # ruler
+ICON_REGENERATE = ("♻", "#FFF1E0", "#E08A2C")        # ♻ recycle
 ICON_DURATION_SCALE = ("⏳", "#EDEBFC", "#6C5DD3")    # ⏳ hourglass (pacing)
 ICON_TRIM_TAIL = ("✂", "#FCEAEA", "#D85A5A")         # ✂ scissors
 ICON_SEED = ("\U0001F331", "#E6F8ED", "#2FB668")          # 🌱 seedling
@@ -352,6 +354,8 @@ class SettingsApp(ctk.CTk):
 
         initial_keep = not bool(self.settings.get("clean_temp_after_run", True))
         self.keep_temp_var = ctk.IntVar(value=1 if initial_keep else 0)
+        self.regenerate_chapters_var = ctk.IntVar(
+            value=1 if self.settings.get("regenerate_existing_chapters", False) else 0)
         self.no_trim_tail_var = ctk.IntVar(
             value=1 if self.settings.get("no_trim_tail", True) else 0)
         self.seed_enabled_var = ctk.IntVar(
@@ -562,8 +566,13 @@ class SettingsApp(ctk.CTk):
                             "Folder containing input chapters", "input_folder", "folder")
         self._add_path_row(paths_card, *ICON_OUTPUT, "Output Folder",
                             "Folder to save generated MP3 files", "output_folder", "folder")
+        # Directly beneath the folder each one acts on, so the consequence is
+        # attached to the path it applies to rather than sitting on another
+        # page where you have to remember which folder it meant.
+        self._add_regenerate_chapters_row(paths_card)
         self._add_path_row(paths_card, *ICON_TEMP, "Temp Folder",
                             "Folder for temporary files", "temp_dir", "folder")
+        self._add_toggle_row(paths_card)
         self._add_path_row(paths_card, *ICON_SPEAKER, "Speaker Path",
                             "Path to the speaker (.safetensors)", "speaker_path", "file",
                             filetypes=[("SafeTensors", "*.safetensors"), ("All files", "*.*")])
@@ -592,7 +601,6 @@ class SettingsApp(ctk.CTk):
             "Section Silence (seconds)",
             "Gap between sections (text separated by a blank line)")
         self._add_chunk_length_row(prefs_card)
-        self._add_toggle_row(prefs_card)
 
         # TTS tuning. Every speaker embedding responds differently to these,
         # so they are per-preset rather than fixed in run_audiobook.py -
@@ -891,15 +899,48 @@ class SettingsApp(ctk.CTk):
             row, self.vars["max_chunk_length"], step=10, minval=20,
             integer=True).pack(side="right")
 
+    def _add_regenerate_chapters_row(self, parent):
+        """Sits with Keep temp files rather than on the General page: both are
+        "what should this run do" switches, so the two things you might flip
+        right before pressing Save & Run are together.
+
+        Off is the safe default - a chapter is hours of GPU time, so silently
+        rebuilding one is expensive in a way that silently skipping one is
+        not. Deliberately mirrors the Subtitle tool's own regenerate switch,
+        so both halves of the pipeline behave the same way."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_REGENERATE
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+
+        self.regenerate_chapters_switch = ctk.CTkSwitch(
+            row, text=self._regenerate_chapters_text(
+                bool(self.regenerate_chapters_var.get())),
+            variable=self.regenerate_chapters_var, onvalue=1, offvalue=0,
+            progress_color=COLOR_TOGGLE_ON, button_color="white",
+            switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
+            font=ctk.CTkFont(size=12), command=self._on_regenerate_chapters_changed)
+        self.regenerate_chapters_switch.pack(side="right")
+
+        text_frame = self._title_block(
+            row, "Regenerate existing chapters",
+            "ON rebuilds chapters that already have an MP3 in the folder above, "
+            "overwriting them. OFF skips them")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+    def _regenerate_chapters_text(self, enabled):
+        return "ON (overwrite)" if enabled else "OFF (skip existing)"
+
+    def _on_regenerate_chapters_changed(self):
+        self.regenerate_chapters_switch.configure(
+            text=self._regenerate_chapters_text(
+                bool(self.regenerate_chapters_var.get())))
+
     def _add_toggle_row(self, parent):
         row = self._row_shell(parent)
         glyph, pastel_bg, icon_color = ICON_KEEP_TEMP
         IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
             side="left", padx=(0, 14))
-        text_frame = self._title_block(
-            row, "Keep temp files after run", "Keep temporary files after generation")
-        text_frame.pack(side="left", fill="x", expand=True)
-
         self.toggle = ctk.CTkSwitch(
             row, text=self._toggle_text(bool(self.keep_temp_var.get())),
             variable=self.keep_temp_var, onvalue=1, offvalue=0,
@@ -907,6 +948,12 @@ class SettingsApp(ctk.CTk):
             switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
             font=ctk.CTkFont(size=12), command=self._on_toggle_changed)
         self.toggle.pack(side="right")
+
+        text_frame = self._title_block(
+            row, "Keep temp files after run",
+            "ON leaves the split text and per-chunk .wav working files in the "
+            "folder above. OFF clears them when the run finishes")
+        text_frame.pack(side="left", fill="x", expand=True)
 
     def _toggle_text(self, keep_temp):
         return "ON (temp files kept)" if keep_temp else "OFF (temp files cleared)"
@@ -1282,6 +1329,7 @@ class SettingsApp(ctk.CTk):
             "cover_art_path": self.metadata_vars["cover_art_path"].get().strip(),
             "auto_tag_generated_files": bool(self.auto_tag_var.get()),
             "max_chunk_length": max_chunk_length,
+            "regenerate_existing_chapters": bool(self.regenerate_chapters_var.get()),
             "duration_scale": duration_scale,
             "no_trim_tail": bool(self.no_trim_tail_var.get()),
             "seed_enabled": bool(self.seed_enabled_var.get()),
@@ -1335,6 +1383,8 @@ class SettingsApp(ctk.CTk):
         self.translation_backend_var.set(str(merged["translation_backend"]))
 
         self.keep_temp_var.set(0 if merged["clean_temp_after_run"] else 1)
+        self.regenerate_chapters_var.set(
+            1 if merged["regenerate_existing_chapters"] else 0)
         self.no_trim_tail_var.set(1 if merged["no_trim_tail"] else 0)
         self.seed_enabled_var.set(1 if merged["seed_enabled"] else 0)
         self.mp3_mono_var.set(1 if merged["mp3_mono"] else 0)
@@ -1351,6 +1401,7 @@ class SettingsApp(ctk.CTk):
         """Every switch carries its own state in its label text, so anything
         that changes a switch variable programmatically has to re-sync them."""
         self._on_toggle_changed()
+        self._on_regenerate_chapters_changed()
         self._on_no_trim_tail_changed()
         self._on_seed_toggled()
         self._on_mono_changed()
@@ -1472,12 +1523,31 @@ class SettingsApp(ctk.CTk):
         # can show "Chapter 1 of N" from its very first line rather than
         # waiting to see what the subprocess reports.
         chapter_files = sorted(glob.glob(os.path.join(data["input_folder"], "chapter_*.txt")))
-        total_chapters = len(chapter_files)
-        if total_chapters == 0:
+        if not chapter_files:
             messagebox.showerror(
                 "No Chapters Found",
                 f"No 'chapter_*.txt' files found in:\n{data['input_folder']}\n\n"
                 "Add chapter files there before running.")
+            return
+
+        # Mirror run_audiobook.py's own skip rule when counting, or the
+        # progress window would promise "Chapter 1 of 18" for a run that only
+        # intends to build three of them.
+        if not data["regenerate_existing_chapters"]:
+            chapter_files = [
+                f for f in chapter_files
+                if not os.path.exists(os.path.join(
+                    data["output_folder"],
+                    os.path.splitext(os.path.basename(f))[0] + ".mp3"))]
+
+        total_chapters = len(chapter_files)
+        if total_chapters == 0:
+            messagebox.showinfo(
+                "Nothing to Generate",
+                "Every chapter in the input folder already has an MP3 in the "
+                "output folder, so there is nothing to do.\n\nTurn on "
+                "'Regenerate existing chapters' on the Advanced page to "
+                "rebuild them.")
             return
 
         try:

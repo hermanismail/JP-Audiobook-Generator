@@ -1,5 +1,6 @@
 import os
 import json
+import datetime
 import subprocess
 import glob
 import shutil
@@ -25,6 +26,7 @@ DEFAULT_SETTINGS = {
     "uv_project_dir": r"C:\Irodori-TTS",  # not used by this script directly, kept for the GUI launcher
     "auto_tag_generated_files": False,
     "max_chunk_length": 100,
+    "regenerate_existing_chapters": False,
     # Per-speaker TTS tuning, set on the GUI's Advanced page. These vary
     # enough between trained speakers that fixing them here produced
     # inconsistent results across voices. Keep in step with
@@ -130,6 +132,7 @@ SILENCE_DURATIONS = {
 MAX_CHUNK_LENGTH = int(SETTINGS["max_chunk_length"])
 MAX_CHUNK_LENGTH_HARD = MAX_CHUNK_LENGTH + 30
 CLEAN_TEMP_AFTER_RUN = bool(SETTINGS["clean_temp_after_run"])
+REGENERATE_EXISTING_CHAPTERS = bool(SETTINGS["regenerate_existing_chapters"])
 
 
 def checkpoint_args(model_ref):
@@ -596,6 +599,51 @@ def process_chapter(chapter_path):
         print(f"Skipping temp cleanup (clean_temp_after_run is disabled). Files remain in {TEMP_DIR}")
 
 
+def snapshot_filename(when=None):
+    """`<bookname>_YYYYMMDD_HHMM.json`.
+
+    The book name is the output folder's own name - "wall", "sputnik" - which
+    is already how the library is organised, one folder per book, and keeps
+    the filename ASCII and sortable. The Book Title setting is deliberately
+    not used: it is usually Japanese, which is legal on NTFS but awkward to
+    type, to script against, and to read in a sorted listing."""
+    name = os.path.basename(os.path.normpath(OUTPUT_FOLDER))
+    safe = "".join(c for c in name if c not in '\\/:*?"<>|').strip()
+    stamp = (when or datetime.datetime.now()).strftime("%Y%m%d_%H%M")
+    return f"{safe or 'settings'}_{stamp}.json"
+
+
+def write_settings_snapshot(chapter_count):
+    """Drops a copy of the settings this run is using into the output folder.
+
+    The point is traceability after the fact: with this many tunables, the
+    only reliable way to know why a book six months old sounds the way it
+    does is to have the parameters sitting next to it. Written *before* the
+    first chapter rather than after the last, so a run that crashes halfway
+    still leaves a record of what it was attempting.
+
+    Run metadata lives under "_run" so the rest of the file stays a faithful
+    copy of settings.json - which means a snapshot can be fed straight back
+    through the GUI's Import Settings to rebuild a preset.
+
+    Failure here is logged, never fatal: nobody should lose a night of
+    generation because a bookkeeping file could not be written."""
+    path = os.path.join(OUTPUT_FOLDER, snapshot_filename())
+    snapshot = dict(SETTINGS)
+    snapshot["_run"] = {
+        "generated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "chapters_found": chapter_count,
+        "note": "Automatic snapshot of the settings used for this run. "
+                "Importable via the GUI's Import Settings button.",
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        print(f"Settings snapshot saved to: {path}")
+    except OSError as e:
+        print(f"Could not write the settings snapshot ({e}) - continuing anyway.")
+
+
 def main():
     # Fail fast on a local checkpoint that isn't there, rather than letting
     # every chunk in the book fail the same way one at a time.
@@ -615,9 +663,35 @@ def main():
         print(f"No files found in {INPUT_FOLDER} matching 'chapter_*.txt'")
         return
 
-    print(f"Found {len(chapter_files)} chapters to process.")
-
+    # Chapters whose MP3 already exists are skipped unless the person has
+    # explicitly asked for a rebuild. This replaces the old workflow of
+    # moving .txt files in and out of the input folder by hand to avoid
+    # clobbering work - which is easy to get wrong, and expensive when you
+    # do, since a chapter is hours of GPU time.
+    pending, already_done = [], []
     for chapter_file in chapter_files:
+        base = os.path.splitext(os.path.basename(chapter_file))[0]
+        if (not REGENERATE_EXISTING_CHAPTERS
+                and os.path.exists(os.path.join(OUTPUT_FOLDER, f"{base}.mp3"))):
+            already_done.append(base)
+        else:
+            pending.append(chapter_file)
+
+    if already_done:
+        print(f"Skipping {len(already_done)} chapter(s) that already have an MP3 "
+              f"(turn on 'Regenerate existing chapters' to rebuild them):")
+        for base in already_done:
+            print(f"  - {base}")
+
+    if not pending:
+        print("Nothing to generate - every chapter already has an MP3.")
+        return
+
+    print(f"Found {len(chapter_files)} chapters, {len(pending)} to process.")
+
+    write_settings_snapshot(len(pending))
+
+    for chapter_file in pending:
         process_chapter(chapter_file)
 
     print("\nAll chapters completed successfully!")
@@ -645,14 +719,27 @@ def main():
     #     -u when launching this script for exactly the same reason).
     if SETTINGS.get("auto_translate_after_run", False):
         backend = SETTINGS.get("translation_backend", "vntl")
-        print(f"\nGenerating translation subtitles (backend: {backend})...")
+        # The chapter decision drives the subtitle decision - one answer to
+        # "should existing work be redone", applied to both halves.
+        #
+        # This is not only about consistency. Regenerating a chapter rewrites
+        # its sync.json, and an .srt is timed against that file; keeping the
+        # old subtitle would leave cues pointing at audio that has moved.
+        # Conversely, skipping a chapter means its audio and its subtitle are
+        # both still valid, so re-translating would burn GPU hours to arrive
+        # back where it started - and would silently discard any correction
+        # made to that .srt by hand.
+        cmd = ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python", "-u",
+               os.path.join(SCRIPT_DIR, "translate_pipeline.py"),
+               "--all", "--backend", backend]
+        if REGENERATE_EXISTING_CHAPTERS:
+            cmd.append("--regenerate")
+
+        print(f"\nGenerating translation subtitles (backend: {backend}"
+              + (", regenerating existing" if REGENERATE_EXISTING_CHAPTERS
+                 else ", skipping chapters that already have an .srt") + ")...")
         try:
-            translate_result = subprocess.run(
-                ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python", "-u",
-                 os.path.join(SCRIPT_DIR, "translate_pipeline.py"),
-                 "--all", "--backend", backend],
-                cwd=SCRIPT_DIR,
-            )
+            translate_result = subprocess.run(cmd, cwd=SCRIPT_DIR)
             if translate_result.returncode != 0:
                 print(f"Translation failed (exit code {translate_result.returncode}). "
                       f"The audiobook itself is unaffected - subtitles can be "

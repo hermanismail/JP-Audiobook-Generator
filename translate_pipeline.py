@@ -617,7 +617,7 @@ def read_translation(path):
 def generate_subtitles(settings, base_names=None, backend="identity",
                        srt_only=False, model_name=None, verbose=True,
                        limit=None, control=None, log=None, on_chunk=None,
-                       on_chapter_done=None, skip_existing=False):
+                       on_chapter_done=None, skip_existing=True):
     """Translates the named chapters (or every rendered one) and writes a
     .translation.json plus a .srt for each, into output_folder alongside
     the MP3 and sync.json.
@@ -780,6 +780,10 @@ if __name__ == "__main__":
                          help="Translate only the first N chunks of each "
                               "chapter, leaving the rest blank. For sampling "
                               "quality without waiting for a whole chapter.")
+    _parser.add_argument("--regenerate", action="store_true",
+                         help="Overwrite chapters that already have an .srt. "
+                              "Off by default, so an existing subtitle - which "
+                              "may have been corrected by hand - is left alone.")
     _parser.add_argument("--srt-only", action="store_true",
                          help="Re-emit each .srt from its existing "
                               ".translation.json without translating again.")
@@ -791,11 +795,15 @@ if __name__ == "__main__":
     _bases = [_args.chapter] if _args.chapter else None
 
     print(f"Output folder: {_settings['output_folder']}")
-    print(f"Backend: {_args.backend}" + ("  (--srt-only)" if _args.srt_only else ""))
+    print(f"Backend: {_args.backend}"
+          + ("  (--srt-only)" if _args.srt_only else "")
+          + ("  (--regenerate: existing .srt files will be overwritten)"
+             if _args.regenerate else ""))
 
     _result = generate_subtitles(_settings, base_names=_bases,
                                  backend=_args.backend, srt_only=_args.srt_only,
-                                 limit=_args.limit)
+                                 limit=_args.limit,
+                                 skip_existing=not _args.regenerate)
 
     print(f"Wrote subtitles for {_result.total} chapter(s).")
     if _result.missing:
