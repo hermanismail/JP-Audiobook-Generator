@@ -484,7 +484,7 @@ class SubtitleWindow(ctk.CTkToplevel):
             messagebox.showerror(
                 "Nothing to Translate",
                 f"No .sync.json files in:\n{output_folder}\n\nSubtitles are built "
-                "from the chunk timings generation writes beside each MP3.",
+                "from the chunk timings generation writes beside each chapter's audio.",
                 parent=self)
             return
 

@@ -1,6 +1,6 @@
 # JP-Audiobook-Generator
 
-This script reads a raw `.txt` file and outputs an audiobook in MP3 format.
+This script reads a raw `.txt` file and outputs an audiobook as mono AAC (`.m4a`).
 
 # 🎧 Automated Japanese Audiobook Generator
 
@@ -26,9 +26,9 @@ The Automated Japanese Audiobook Generator is a Python automation pipeline desig
 - **Sentence-Level Chunking:** To respect model token limits and prevent prosodic degradation, the script merges sentences into chunks at a configurable soft limit (100 characters by default, with a hard limit 30 above it) using `。`, `？`, `……`, and the forced break points above (`「`, `（`, `」`, `）`, `──`) as boundaries. This keeps intonation natural across long-form content (including long dialogue) while minimizing the number of TTS calls.
 - **AI Speech Synthesis:** The system integrates the Irodori-TTS engine, which utilizes a Flow Matching architecture for better voice quality. Local GPU inference is managed via the `uv` package manager to ensure environment stability.
 - **Automated Audio Stitching:** Using FFmpeg's concat demuxer, the script merges individual chunk waveforms into a final chapter file, inserting tiered silence gaps to simulate natural human pacing. Each gap is one of three separately configurable durations - sentence, paragraph/chapter start, or section - chosen by boundary type, with dialogue/aside edges and `──` pauses promoted to a longer gap where appropriate.
-- **Per-Speaker Tuning:** Duration scale, tail trimming and the sampling seed are settings rather than constants, because trained speakers respond differently enough to them that one fixed recipe produced inconsistent results across voices. Output channel count and MP3 bitrate are configurable alongside them. See [Section 7.3](#73-advanced-settings).
-- **Chunk Timing Data:** Every chapter is written with a `<chapter>.sync.json` recording each chunk's start/end offset in the finished MP3. It falls out of the same concat ordering used to stitch the audio, so no separate alignment pass is needed, and it is what makes read-along playback and subtitles possible. See [Section 8](#8-what-lands-in-the-output-folder).
-- **English Subtitle Generation:** An optional pass translates the finished `sync.json` chunk by chunk and emits a sidecar `.srt`. Because it runs *after* the audio exists, chunk boundaries are already fixed by the rendered MP3 and the subtitle cannot desync. Translation runs locally against a VNTL model with no API cost. See [Section 9](#9-translation-subtitles).
+- **Per-Speaker Tuning:** Duration scale, tail trimming and the sampling seed are settings rather than constants, because trained speakers respond differently enough to them that one fixed recipe produced inconsistent results across voices. The AAC output bitrate is configurable alongside them. See [Section 7.3](#73-advanced-settings).
+- **Chunk Timing Data:** Every chapter is written with a `<chapter>.sync.json` recording each chunk's start/end offset in the finished `.m4a`. It falls out of the same concat ordering used to stitch the audio, so no separate alignment pass is needed, and it is what makes read-along playback and subtitles possible. See [Section 8](#8-what-lands-in-the-output-folder).
+- **English Subtitle Generation:** An optional pass translates the finished `sync.json` chunk by chunk and emits a sidecar `.srt`. Because it runs *after* the audio exists, chunk boundaries are already fixed by the rendered audio and the subtitle cannot desync. Translation runs locally against a VNTL model with no API cost. See [Section 9](#9-translation-subtitles).
 - **Reproducible Runs:** Every run drops a timestamped copy of the settings it used into the output folder, so the recipe behind a book is still recoverable months later. Presets can be exported and imported per book or per speaker.
 
 ## 3. System Prerequisites
@@ -242,8 +242,8 @@ Paths and basic preferences for the audiobook generation process.
 | Field / control | What it does |
 | --- | --- |
 | **Input Folder** | Folder containing the input chapters — `chapter_001.txt`, `chapter_002.txt`, etc. This is the `chapter_*.txt` naming that [JP-ePub-Text-Extractor](https://github.com/hermanismail/JP-ePub-Text-Extractor) writes to its output folder, so that tool's output can be pointed at directly as this one's input. |
-| **Output Folder** | Where the generated MP3 files are saved, one per chapter. |
-| **Regenerate existing chapters** | **OFF** by default: any chapter that already has an MP3 in the Output Folder is skipped, and the run says which ones and why. This replaces shuffling `.txt` files in and out of the Input Folder by hand to avoid clobbering finished work — easy to get wrong, and expensive when you do, since a chapter is hours of GPU time. Turn **ON** to rebuild and overwrite them, e.g. after finding a better recipe. It also governs subtitles on the automatic path — see [Section 9.4](#94-how-the-two-halves-stay-in-step). |
+| **Output Folder** | Where the generated `.m4a` files are saved, one per chapter. |
+| **Regenerate existing chapters** | **OFF** by default: any chapter that already has audio in the Output Folder — a `.m4a`, or an `.mp3` from before the switch to AAC — is skipped, and the run says which ones and why. This replaces shuffling `.txt` files in and out of the Input Folder by hand to avoid clobbering finished work — easy to get wrong, and expensive when you do, since a chapter is hours of GPU time. Turn **ON** to rebuild and overwrite them, e.g. after finding a better recipe. It also governs subtitles on the automatic path — see [Section 9.4](#94-how-the-two-halves-stay-in-step). |
 | **Temp Folder** | Where intermediate working files (split sections/paragraphs/sentences, per-chunk `.wav` files, the run log) are written during a generation run, one subfolder per chapter, plus a shared `_silence` subfolder holding the three silence `.wav` files for the run. |
 | **Keep temp files after run** | **ON** by default, leaving the split text and per-chunk `.wav` working files in the Temp Folder after a run (useful for inspecting a chapter). Turn **OFF** to have them cleared once generation completes. |
 | **Speaker Path** | Path to your trained `.speaker.safetensors` file, produced by the speaker inversion step (see **Speaker setup** in [Section 3](#3-system-prerequisites)). |
@@ -259,13 +259,13 @@ Tag chapters so Spotify (or any player that reads ID3/MP4 tags) groups them as o
 
 | Field / control | What it does |
 | --- | --- |
-| **Author Name** | Written to the Artist / Album Artist tags on every chapter's MP3. |
+| **Author Name** | Written to the Artist / Album Artist tags on every chapter file. |
 | **Book Title** | Written to the Album tag — identical across all chapters, which is what lets a player group them together. |
 | **Genre** | Written to the Genre tag (defaults to "Audiobook"). |
-| **Auto-number chapters** | **ON** by default. Sets each MP3's Track Number tag from the chapter's file name (`chapter_001.txt` → track 1, etc.), so playback order matches reading order. |
-| **Auto-tag generated files** | **ON** by default. Automatically tags the output MP3s with the above metadata right after generation, as part of **Save & Run** — you don't need a separate step. |
-| **Cover Art** | Path to a `.jpg`/`.jpeg`/`.png` image embedded as artwork in every chapter's MP3. **Browse** picks the file. |
-| **Apply Tags to Output MP3s** | Re-applies the current Author/Title/Genre/Cover Art/track-number settings to whatever MP3s already exist in the Output Folder, without re-running generation. Useful after generating once and then fixing a typo in the title, for example. Requires Author Name and Book Title to be filled in, and the Output Folder to already contain the MP3s from a previous run. |
+| **Auto-number chapters** | **ON** by default. Sets each chapter's Track Number tag from the chapter's file name (`chapter_001.txt` → track 1, etc.), so playback order matches reading order. |
+| **Auto-tag generated files** | **ON** by default. Automatically tags the output files with the above metadata right after generation, as part of **Save & Run** — you don't need a separate step. |
+| **Cover Art** | Path to a `.jpg`/`.jpeg`/`.png` image embedded as artwork in every chapter file. **Browse** picks the file. |
+| **Apply Tags to Output Files** | Re-applies the current Author/Title/Genre/Cover Art/track-number settings to whatever chapter files already exist in the Output Folder, without re-running generation. Useful after generating once and then fixing a typo in the title, for example. Writes MP4 tags to a `.m4a` and ID3v2 to an older `.mp3`, so it still works on books generated before the switch to AAC. Requires Author Name and Book Title to be filled in, and the Output Folder to already contain the files from a previous run. |
 
 ### 7.3 Advanced Settings
 
@@ -302,8 +302,11 @@ These are passed straight through to Irodori-TTS's `infer.py`. They are settings
 
 | Field / control | What it does |
 | --- | --- |
-| **Output channels** | Mono by default, because mono is what Irodori-TTS actually renders. Stereo duplicates the same signal into both channels, which buys no stereo image and halves the bits available to the content — measured at an identical 320k, mono scored ~2.8 dB better. |
-| **MP3 Bitrate** | Constant bitrate for the stitched chapter, `96k` by default (accepts `96` or `96k`, 32–320). At 96k mono a full-length novel is roughly 30% of the size the old 320k stereo setting produced, with no audible loss on speech. CBR is deliberate: `sync.json` offsets are seeked to by the player, and VBR seeking leans on a 100-entry table far coarser than one chunk. |
+| **AAC Bitrate** | Bitrate for the stitched chapter, `64k` by default (accepts `64` or `64k`, 32–128). The chapter is always **mono AAC in an `.m4a`** — ffmpeg's native `aac` encoder with `-movflags +faststart`, so the index sits at the front of the file and a streaming player can start from a Range request. 64k was chosen by ear against 48k, 80k and the Windows MediaFoundation encoder when the player library was re-encoded, and comes out ~4.5× smaller than the 320k stereo MP3 this tool used to write. |
+
+There is no channels switch any more. Irodori-TTS renders mono, and every stereo file this tool produced measured as dual mono (the L−R difference is −91 dB, i.e. digital silence), so stereo only ever split the bitrate across two identical channels.
+
+> **Upgrading from an MP3 version:** older settings files carry `mp3_bitrate` / `mp3_mono`. Those are ignored rather than carried over — a value chosen for stereo MP3 (often 320k) means nothing for AAC — and the next **Save & Run** drops them. Existing `.mp3` chapters still count as finished and are not re-rendered; the player accepts both containers and prefers `.m4a`, and the player repo's `npm run publish -- --reencode` converts an old book in seconds.
 
 **Translation Subtitles**
 
@@ -347,12 +350,12 @@ Opens automatically after **Save & Run**, and reflects the live output of `run_a
 | Status banner (**In Progress** / **Completed** / **Cancelled** / **Failed**) | Overall run status, with a short one-line summary underneath (e.g. "Please wait while chapters are being processed." / "All chapters have been processed successfully."). |
 | Chapter progress bar | "Chapter *N* of *Total*", the chapter currently being processed (e.g. `Processing: chapter_002`), and a percent-complete bar for the TTS chunks within that chapter. |
 | **Total Chapters** | Total number of `chapter_*.txt` files found in the Input Folder for this run. |
-| **Completed** | How many chapters have finished generating and been saved as MP3 so far. |
+| **Completed** | How many chapters have finished generating and been saved as `.m4a` so far. |
 | **In Progress** | Whether a chapter is currently being processed right now (1 while generating, 0 once idle/finished). |
 | **Elapsed Time** / **Total Time** | Wall-clock time since the run started; labeled "Elapsed Time" while running and "Total Time" once the run finishes. |
 | **Process Log** | Scrolling, timestamped log of each step — chapter start, section/paragraph/chunk counts, per-chunk generation progress with its silence-gap tags, chapter completion, temp-file cleanup, and auto-tagging status. Errors and failures are highlighted. **Clear Log** clears this panel only (doesn't affect output files or the underlying log file in the Temp Folder). |
 | **Cancel** (while running) | Stops the run. Kills `run_audiobook.py` and any child processes it spawned (TTS inference, FFmpeg), so nothing keeps running as an orphan process in the background. |
-| **Open Output Folder** (after completion) | Opens the Output Folder in File Explorer so you can listen to the generated MP3s right away. |
+| **Open Output Folder** (after completion) | Opens the Output Folder in File Explorer so you can listen to the generated chapters right away. |
 | **Close** | Closes the progress window. |
 
 **Running from CLI**
@@ -369,8 +372,8 @@ Per chapter:
 
 | File | Written by | What it is |
 | --- | --- | --- |
-| `chapter_001.mp3` | `run_audiobook.py` | The stitched chapter, tagged if auto-tagging is on. |
-| `chapter_001.sync.json` | `run_audiobook.py` | `{version, chunks:[{index, start, end, text}]}` — each chunk's start/end offset in seconds within the finished MP3, plus its **original** wording (not the TTS-normalized text). Produced by walking the same concat ordering used to stitch the audio and summing `ffprobe`'d durations, so the timings are correct by construction with no alignment pass. |
+| `chapter_001.m4a` | `run_audiobook.py` | The stitched chapter: mono AAC, faststart, tagged (title/artist/album/cover as MP4 atoms) if auto-tagging is on. |
+| `chapter_001.sync.json` | `run_audiobook.py` | `{version, chunks:[{index, start, end, text}]}` — each chunk's start/end offset in seconds within the finished `.m4a`, plus its **original** wording (not the TTS-normalized text). Produced by walking the same concat ordering used to stitch the audio and summing `ffprobe`'d durations, so the timings are correct by construction with no alignment pass. |
 | `chapter_001.translation.json` | `translate_pipeline.py` | The translation artifact and source of truth: every chunk's index, timing, Japanese and English. Hand-editable. |
 | `chapter_001.srt` | `translate_pipeline.py` | One cue per chunk, UTF-8 with no BOM, `HH:MM:SS,mmm`. Cheaply re-emitted from the `.translation.json` above. |
 
@@ -393,7 +396,7 @@ translation alongside the Japanese reading text.
 ### 9.1 Why it runs after the audio
 
 Translation reads the finished `sync.json`, never the raw text. By the time
-that file exists the chunk boundaries are already fixed by the rendered MP3,
+that file exists the chunk boundaries are already fixed by the rendered audio,
 so the subtitle's timing is correct by construction and cannot drift. The
 alternative — translating first and chunking both languages together —
 assumes a 1:1 Japanese↔English segment mapping that Japanese word order makes

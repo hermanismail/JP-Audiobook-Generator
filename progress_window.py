@@ -654,8 +654,8 @@ if __name__ == "__main__":
                 "Detected TTS output: 48000Hz, 1ch, s16 (pcm_s16le) - rendering "
                 "matching silence files into F:\\AUDIOBOOK_TMP\\_silence...",
                 tag="text")
-            win.append_log(f"Stitching {name} into final MP3...", tag="text")
-            win.append_log(f"Done! Saved to: F:\\AUDIOBOOK_OUTPUT\\{name}.mp3", tag="success")
+            win.append_log(f"Stitching {name} into final .m4a...", tag="text")
+            win.append_log(f"Done! Saved to: F:\\AUDIOBOOK_OUTPUT\\{name}.m4a", tag="success")
             win.append_log("Cleaning up temporary files in F:\\AUDIOBOOK_TMP...", tag="text")
             win.set_stats(completed=chapter_idx,
                            in_progress=1 if chapter_idx < total_chapters else 0)

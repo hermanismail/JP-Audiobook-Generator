@@ -7,7 +7,7 @@ player can show it alongside the Japanese reading text.
 The approach, and why it is this way round: translation runs over the
 *finished* `<chapter>.sync.json`, never over the raw text. By the time
 sync.json exists the chunk boundaries are already fixed by the rendered
-MP3, so the translation cannot desync - its timing is correct by
+audio, so the translation cannot desync - its timing is correct by
 construction rather than by any alignment pass. English is emitted as a
 separate sidecar and never written back into sync.json, which keeps the
 change additive for everything downstream.
@@ -38,7 +38,7 @@ Invocation:
         uv run --project <this folder> python translate_pipeline.py --all --srt-only
 
 Reads settings.json itself for `output_folder`, the same way
-mp3_metadata.py does, so no arguments beyond the above are needed.
+audio_metadata.py does, so no arguments beyond the above are needed.
 """
 
 import os
@@ -259,7 +259,7 @@ BACKENDS = {
 
 # Fallbacks for keys a settings.json written before this feature existed will
 # not contain. run_audiobook.load_settings() merges its own defaults the same
-# way; this module reads settings.json directly (like mp3_metadata.py), so it
+# way; this module reads settings.json directly (like audio_metadata.py), so it
 # has to do its own merge or an older file silently yields empty paths.
 SETTING_DEFAULTS = {
     "llama_server_url": "http://127.0.0.1:8080",
@@ -469,7 +469,8 @@ def find_chapter_bases(output_folder):
     """Every chapter in the folder, whether or not it can actually be
     translated yet.
 
-    Deliberately the union of the MP3s and the sync.json files rather than
+    Deliberately the union of the chapter audio (.m4a, or .mp3 from books
+    generated before the switch to AAC) and the sync.json files rather than
     just the latter: a chapter whose sync.json is missing is a chapter with
     a *problem*, and it should be reported as skipped rather than quietly
     vanishing from the run because discovery never saw it.
@@ -479,6 +480,7 @@ def find_chapter_bases(output_folder):
     see what came before it."""
     bases = set()
     for pattern, suffix in ((os.path.join(output_folder, "*.sync.json"), ".sync.json"),
+                            (os.path.join(output_folder, "*.m4a"), ".m4a"),
                             (os.path.join(output_folder, "*.mp3"), ".mp3")):
         for path in glob.glob(pattern):
             bases.add(os.path.basename(path)[: -len(suffix)])
@@ -620,7 +622,7 @@ def generate_subtitles(settings, base_names=None, backend="identity",
                        on_chapter_done=None, skip_existing=True):
     """Translates the named chapters (or every rendered one) and writes a
     .translation.json plus a .srt for each, into output_folder alongside
-    the MP3 and sync.json.
+    the audio and sync.json.
 
     sync.json is only ever read. Nothing in this module opens it for
     writing, and the English text never goes near its `text` field."""
@@ -759,7 +761,7 @@ def _translate_chapters(base_names, output_folder, translate, settings, backend,
 
 
 if __name__ == "__main__":
-    # Mirrors mp3_metadata.py's entry point: re-reads settings.json itself
+    # Mirrors audio_metadata.py's entry point: re-reads settings.json itself
     # so the GUI (or run_audiobook.py at the end of a run) can shell out to
     # `uv run --project <here> python translate_pipeline.py --all` without
     # having to pass any configuration through.

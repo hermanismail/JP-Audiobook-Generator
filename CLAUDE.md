@@ -12,7 +12,8 @@ Everything in this file describes code that exists today.
 
 A Windows desktop tool (Python + CustomTkinter) that turns Japanese chapter
 text files into a chaptered audiobook: cleaned/chunked text → Irodori-TTS →
-per-chunk wavs → stitched MP3 + `sync.json` timing data + ID3 tags, and
+per-chunk wavs → stitched mono AAC `.m4a` + `sync.json` timing data + MP4
+tags, and
 optionally an English `.srt` per chapter. Its output folder is the input to
 the separate **player** project (`F:\JPAudiobookPlayer` — Android app + Node
 server/web client; that repo has its own detailed CLAUDE.md).
@@ -20,7 +21,7 @@ server/web client; that repo has its own detailed CLAUDE.md).
 **Two-venv architecture**: a lightweight GUI venv for this project, and a
 separate heavy ML venv at `C:\Irodori-TTS` for the TTS engine.
 `run_audiobook.py` runs inside the Irodori venv and is stdlib-only where it
-can be; it shells out to `mp3_metadata.py` with `uv run --project <this dir>`
+can be; it shells out to `audio_metadata.py` with `uv run --project <this dir>`
 so `mutagen` never needs installing in the ML venv. Keep that separation — it
 is deliberate.
 
@@ -32,7 +33,7 @@ is deliberate.
   `sync.json` → **step 6** optional auto-tag. `main()` then optionally runs
   translation once for the whole book.
   - `build_sync_data()` is the load-bearing piece for anything downstream: it
-    walks the *same* concat ordering used to stitch the MP3, summing
+    walks the *same* concat ordering used to stitch the `.m4a`, summing
     `ffprobe`'d durations, so each chunk's `start`/`end` in the final file
     falls out with no separate alignment pass. Output is
     `{version, chunks:[{index, start, end, text}]}` written to
@@ -61,9 +62,10 @@ is deliberate.
     and what the reader app displays.** Do not conflate them.
 - `translate_pipeline.py` — subtitle generation. Stdlib only, so it runs
   unchanged in either venv. See the Translation section below.
-- `mp3_metadata.py` — ID3 tagging (mutagen). Has a `--chapter <base>` CLI and
-  re-reads `settings.json` itself. The pattern `translate_pipeline.py`
-  copies.
+- `audio_metadata.py` — tagging (mutagen): MP4 atoms on `.m4a`, ID3 on a
+  legacy `.mp3`. Was `mp3_metadata.py` until the switch to AAC. Has a
+  `--chapter <base>` CLI and re-reads `settings.json` itself. The pattern
+  `translate_pipeline.py` copies.
 - `gui_settings.py` — CustomTkinter settings GUI. Three pages (General,
   Metadata, Advanced) plus a bottom bar with Import / Export / Save & Run.
 - `subtitle_window.py` — the Subtitle Generation Tool window. Owns the worker
@@ -103,7 +105,7 @@ what actually shipped.
 
 Translation reads the finished `<chapter>.sync.json`, never the raw text, and
 emits a sidecar `.srt` plus a `.translation.json` artifact. Chunk boundaries
-are already fixed by the rendered MP3 by then, so timing is correct by
+are already fixed by the rendered audio by then, so timing is correct by
 construction. `sync.json` is only ever read; English never goes near its
 `text` field.
 
@@ -165,6 +167,56 @@ never sees an index, so it cannot renumber one. There is no retry loop.
   `sync.json`, and an `.srt` is timed against that file.
 
 ---
+
+# Output encoding — mono AAC `.m4a` (since 2026-09-10)
+
+The stitch (`aac_stitch_command()`) writes `chapter_<N>.m4a`: ffmpeg's
+native `aac`, `-ac 1`, `-b:a <aac_bitrate>` (default 64k),
+`-movflags +faststart`. The format was settled on the player side ("Phase 0"
+in `F:\JPAudiobookPlayer\CLAUDE.md`, where the whole library was re-encoded)
+and moved here so new books no longer need `npm run publish -- --reencode`.
+That script stays in the player repo as the path for older MP3 folders.
+
+- **The contract with the player.** Filename `chapter_<N>.m4a`; the player
+  matches `^(chapter_(\d+))\.(?:mp3|m4a)$` and prefers `.m4a`, so mixed
+  folders are fine. Title/artist/album and cover come out of the file's MP4
+  atoms (`©nam`/`©ART`/`©alb`/`covr`) via music-metadata. A chapter with no
+  cover is handled; **one with no title is a regression**, so the title is
+  always written. `sync.json`, `.srt` and `.translation.json` did not change.
+- **faststart is load-bearing** — the player streams from R2 with Range
+  requests. mutagen's tagging afterwards keeps `moov` ahead of `mdat`
+  (it grows moov in place and shifts the chunk offsets); verified with a
+  185 KB cover. Anything else that rewrites the file must be re-checked:
+  top-level atoms must read `ftyp, moov, …, mdat`.
+- **Timing is exact through AAC — verified, not assumed.** ffmpeg records
+  the 1024-sample encoder priming in the MP4 edit list (`elst` media time
+  1024) and the decoder skips it. Measured on a real render and on a
+  68-minute chapter built from the same concat list: stated duration equals
+  the summed wavs and the old MP3's duration to 0.0 ms, and
+  cross-correlating the decoded audio against the source wavs gives a lag
+  of **0 samples** at the first, middle and last chunk. The decoder emits
+  ~830–900 samples of final-frame padding *after* the last chunk; that is
+  harmless (it only extends the tail) and is not drift.
+- **Always mono; there is no channels switch.** The TTS renders mono and
+  every stereo file this produced measured as dual mono (L−R at −91 dB,
+  re-checked on `wall/chapter_068`, the last file made by the old path).
+  If a second voice or any stereo effect is ever added, re-measure before
+  keeping the downmix.
+- **`aac_bitrate` is a new key on purpose.** `mp3_bitrate` / `mp3_mono` are
+  never read, so a 320k from an old preset cannot silently become a 320k
+  AAC; `_collect_and_validate()` drops them on the next save. Range 32–128k.
+  No CBR requirement any more: MP4 seeks through its sample table, not the
+  coarse 100-entry TOC that made VBR MP3 seeking miss chunk offsets.
+- **An existing `.mp3` counts as a finished chapter** (`CHAPTER_AUDIO_EXTS`,
+  mirrored in the GUI's chapter count). Re-rendering hours of TTS to change
+  a container would be absurd. Regenerating such a chapter prints a note
+  that the leftover `.mp3` no longer matches the new `sync.json`; it is not
+  deleted.
+- **The stitch's exit code is checked now.** Before, a failed encode still
+  printed "Done!" and wrote a `sync.json` for audio that did not exist.
+- `audio_metadata.py` tags both containers (MP4 on `.m4a`, ID3 on a legacy
+  `.mp3`), so "Apply Tags" still works on old books, and exits non-zero if
+  any file failed so the auto-tag step reports it.
 
 # Disk layout — C: is tight, new things go on F:
 
@@ -303,7 +355,8 @@ Real numbers from this machine (RTX 4060, 8GB), 2026-09-06/07.
 | llama-server cold start | ~18 s |
 | A 314-chunk chapter | ~13 min |
 | An 18-chapter book (~1040 chunks) | ~42 min |
-| MP3 at 96k mono vs old 320k stereo | ~30% of the size |
+| Output since 2026-09-10 | mono AAC `.m4a`, 64k target, ~57 kbps actual (native encoder, speech with silences) |
+| 68-min chapter, same concat list | 30.1 MB `.m4a` (incl. 185 KB cover) vs 49.1 MB old 96k stereo MP3 |
 | TTS output | 48 kHz, mono, 16-bit PCM (fixed; not configurable) |
 
 Chunk counts vary with `max_chunk_length`, which is user-configurable — the

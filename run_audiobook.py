@@ -35,9 +35,9 @@ DEFAULT_SETTINGS = {
     "no_trim_tail": True,
     "seed_enabled": False,
     "seed_value": 20260906,
-    # Output encoding.
-    "mp3_mono": True,
-    "mp3_bitrate": "96k",
+    # Output encoding. The chapter is always mono AAC in an .m4a; only the
+    # bitrate is a setting. See AAC_BITRATE below.
+    "aac_bitrate": "64k",
     # Translation subtitles. See translate_pipeline.py.
     "auto_translate_after_run": False,
     "translation_backend": "vntl",
@@ -169,10 +169,33 @@ NO_TRIM_TAIL = bool(SETTINGS["no_trim_tail"])
 SEED_ENABLED = bool(SETTINGS["seed_enabled"])
 SEED_VALUE = int(SETTINGS["seed_value"])
 
-# ffmpeg output encoding. Mono because that is what Irodori-TTS renders;
-# stereo would duplicate the same signal into both channels.
-MP3_CHANNELS = "1" if bool(SETTINGS["mp3_mono"]) else "2"
-MP3_BITRATE = str(SETTINGS["mp3_bitrate"])
+# ffmpeg output encoding: ffmpeg's native AAC encoder into an MP4 container
+# (.m4a), always mono. Irodori-TTS renders mono, and every stereo MP3 this
+# script used to write measured as dual mono (L-R at -91 dB, i.e. digital
+# silence), so a second channel is an exact duplicate that only halves the
+# bits available per channel. 64k is what the player library was re-encoded
+# to after an A/B by ear - see the player repo's CLAUDE.md, "Phase 0".
+#
+# The old mp3_bitrate / mp3_mono keys are deliberately NOT read: a value
+# chosen for stereo MP3 (320k, in older presets) is meaningless for AAC and
+# would silently produce files five times larger than they need to be.
+AAC_BITRATE = str(SETTINGS["aac_bitrate"])
+
+# Extensions a finished chapter can have, preferred first. .m4a is what this
+# script writes now; .mp3 is what it wrote before. A chapter that already has
+# an .mp3 is still finished - re-rendering it would spend hours of GPU time
+# just to change the container, which the player repo's
+# `npm run publish -- --reencode` does in seconds. The player accepts either
+# and prefers .m4a when both are present.
+CHAPTER_AUDIO_EXTS = (".m4a", ".mp3")
+
+
+def existing_chapter_audio(base_name):
+    """Paths of this chapter's finished audio in OUTPUT_FOLDER, .m4a first.
+    Empty when the chapter has not been generated yet."""
+    candidates = (os.path.join(OUTPUT_FOLDER, base_name + ext)
+                  for ext in CHAPTER_AUDIO_EXTS)
+    return [path for path in candidates if os.path.exists(path)]
 
 # Shared, run-scoped folder holding the three rendered silence wavs. They
 # are generated once (on the first chapter, once a real TTS wav exists to
@@ -313,7 +336,7 @@ def get_audio_duration(path):
     for the Android player - see android-player-phase0-spec.md). Reads the
     duration of the actual rendered file rather than trusting the
     requested/configured value, so timestamps match what's really in the
-    stitched MP3 (matters most for the silence wavs, whose real duration
+    stitched chapter (matters most for the silence wavs, whose real duration
     can differ very slightly from the `-t` value passed to ffmpeg)."""
     try:
         result = subprocess.run(
@@ -397,7 +420,14 @@ def build_sync_data(audio_files, sync_chunk_texts, silence_kind_before_wav, sile
     Mirrors concat_list.txt's exact ordering: one silence file then one
     chunk audio file, per chunk. Walking that same sequence and summing
     ffprobe'd durations as we go gives each chunk's [start, end) window in
-    the final stitched MP3 for free, with no separate alignment pass.
+    the final stitched .m4a for free, with no separate alignment pass.
+
+    This stays exact through the AAC encode. AAC adds ~1024 samples of
+    encoder priming at the start and pads the last frame; ffmpeg records
+    both in the MP4 edit list, and players (browsers included) trim them,
+    so the presented timeline is sample-for-sample the concatenated wavs.
+    Measured: 0.0 ms drift on all 48 chapters of the re-encoded library.
+
     Silence-wav durations are probed once per kind and reused (the wavs
     themselves are already shared/cached the same way by get_silence_wavs)."""
     cumulative = 0.0
@@ -424,6 +454,28 @@ def build_sync_data(audio_files, sync_chunk_texts, silence_kind_before_wav, sile
         cumulative = end
 
     return {"version": 1, "chunks": entries}
+
+
+def aac_stitch_command(concat_list_path, output_path):
+    """The ffmpeg command that turns a chapter's concat list into its final
+    .m4a. A function of its own so the encode can be exercised against a
+    kept concat list without re-running TTS."""
+    return [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_list_path,
+        "-c:a", "aac",
+        "-b:a", AAC_BITRATE,
+        "-ac", "1",
+        # moov atom before mdat. Load-bearing: the player streams these from
+        # R2 with HTTP Range requests, and without faststart it must fetch
+        # the index from the END of the file before it can play anything.
+        # Tagging afterwards keeps it in front (mutagen rewrites moov in
+        # place and shifts mdat's chunk offsets).
+        "-movflags", "+faststart",
+        output_path,
+    ]
 
 
 def process_chapter(chapter_path):
@@ -505,7 +557,7 @@ def process_chapter(chapter_path):
             print("    " + (stderr[-600:].replace("\n", "\n    ")
                             if stderr else "(no error output)"))
 
-    # Step 5: Combine parts into final MP3, inserting exactly one silence
+    # Step 5: Combine parts into the final .m4a, inserting exactly one silence
     # file before each chunk - silence_sentence.wav, silence_paragraph.wav
     # or silence_section.wav, chosen by chunk["silence_kind"]. Each has its
     # own duration from the GUI's Advanced page, so long gaps are a single
@@ -515,7 +567,7 @@ def process_chapter(chapter_path):
         print(f"Error: No audio parts generated for {chapter_name[0]}")
         return
 
-    output_mp3 = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.mp3")
+    output_audio = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.m4a")
 
     # The silence wavs are rendered once for the whole run, from the first
     # chapter's first TTS wav; later chapters hit the _SILENCE_WAVS cache
@@ -537,23 +589,33 @@ def process_chapter(chapter_path):
             f.write(f"file '{silence_wavs[kind]}'\n")
             f.write(f"file '{os.path.abspath(audio_file)}'\n")
 
-    ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", concat_list_path,
-        "-acodec", "libmp3lame",
-        "-ac", MP3_CHANNELS,
-        "-b:a", MP3_BITRATE,
-        output_mp3
-    ]
+    print(f"Stitching {chapter_name[0]} into final .m4a...")
+    stitch = subprocess.run(aac_stitch_command(concat_list_path, output_audio),
+                            capture_output=True)
+    if stitch.returncode != 0 or not os.path.exists(output_audio):
+        # Without this a failed encode printed "Done!" anyway and went on to
+        # write a sync.json for audio that does not exist.
+        stderr = stitch.stderr.decode("utf-8", "replace").strip()
+        print(f"Error: ffmpeg failed to stitch {chapter_name[0]} "
+              f"(exit code {stitch.returncode}):")
+        print("    " + (stderr[-600:].replace("\n", "\n    ")
+                        if stderr else "(no error output)"))
+        return
+    print(f"Done! Saved to: {output_audio}")
 
-    print(f"Stitching {chapter_name[0]} into final MP3...")
-    subprocess.run(ffmpeg_cmd, capture_output=True)
-    print(f"Done! Saved to: {output_mp3}")
+    # A regenerated chapter can leave an .mp3 from before the switch to AAC.
+    # The player prefers the .m4a so it is harmless there, but that .mp3 is
+    # no longer timed against the sync.json about to be written. Deleting
+    # finished work is left to the person, so just say so.
+    stale_mp3 = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.mp3")
+    if os.path.exists(stale_mp3):
+        print(f"Note: {os.path.basename(stale_mp3)} from an earlier run is "
+              f"still in the output folder and no longer matches the new "
+              f"sync.json. The player uses the .m4a; delete the .mp3 before "
+              f"using it anywhere else.")
 
     # Step 5b: Build and write sync.json - chunk start/end offsets (in
-    # seconds) into the just-stitched MP3, for the Android player app (see
+    # seconds) into the just-stitched .m4a, for the Android player app (see
     # android-player-phase0-spec.md). MUST run before Step 6's cleanup:
     # build_sync_data() needs ffprobe access to the individual per-chunk
     # wav files, which clean_temp_dir() deletes right afterwards.
@@ -563,7 +625,7 @@ def process_chapter(chapter_path):
         json.dump(sync_data, f, ensure_ascii=False, indent=2)
     print(f"Sync data saved to: {sync_path}")
 
-    # Step 6: Auto-tag step - runs the mp3_metadata.py tagger from the GUI
+    # Step 6: Auto-tag step - runs the audio_metadata.py tagger from the GUI
     # project's OWN lightweight uv venv (via `--project`), not this heavy
     # Irodori-TTS venv, so mutagen never needs to be installed here. Runs
     # right away, per chapter, so the file is fully usable (correct
@@ -572,13 +634,13 @@ def process_chapter(chapter_path):
     # before copying chapters over. Only runs when "Auto-tag generated
     # files" is turned on in the Metadata settings tab - otherwise the
     # person applies tags manually afterwards via the GUI's "Apply Tags to
-    # Output MP3s" button.
+    # Output Files" button.
     if SETTINGS.get("auto_tag_generated_files", False):
-        print(f"Auto-tagging {chapter_name[0]}.mp3...")
+        print(f"Auto-tagging {os.path.basename(output_audio)}...")
         try:
             tag_result = subprocess.run(
                 ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python",
-                 os.path.join(SCRIPT_DIR, "mp3_metadata.py"),
+                 os.path.join(SCRIPT_DIR, "audio_metadata.py"),
                  "--chapter", chapter_name[0]],
                 cwd=SCRIPT_DIR, capture_output=True, text=True,
             )
@@ -663,28 +725,29 @@ def main():
         print(f"No files found in {INPUT_FOLDER} matching 'chapter_*.txt'")
         return
 
-    # Chapters whose MP3 already exists are skipped unless the person has
-    # explicitly asked for a rebuild. This replaces the old workflow of
+    # Chapters whose audio already exists (.m4a, or an .mp3 from before the
+    # switch to AAC - see CHAPTER_AUDIO_EXTS) are skipped unless the person
+    # has explicitly asked for a rebuild. This replaces the old workflow of
     # moving .txt files in and out of the input folder by hand to avoid
     # clobbering work - which is easy to get wrong, and expensive when you
     # do, since a chapter is hours of GPU time.
     pending, already_done = [], []
     for chapter_file in chapter_files:
         base = os.path.splitext(os.path.basename(chapter_file))[0]
-        if (not REGENERATE_EXISTING_CHAPTERS
-                and os.path.exists(os.path.join(OUTPUT_FOLDER, f"{base}.mp3"))):
-            already_done.append(base)
+        existing = existing_chapter_audio(base)
+        if not REGENERATE_EXISTING_CHAPTERS and existing:
+            already_done.append(os.path.basename(existing[0]))
         else:
             pending.append(chapter_file)
 
     if already_done:
-        print(f"Skipping {len(already_done)} chapter(s) that already have an MP3 "
+        print(f"Skipping {len(already_done)} chapter(s) that already have audio "
               f"(turn on 'Regenerate existing chapters' to rebuild them):")
-        for base in already_done:
-            print(f"  - {base}")
+        for name in already_done:
+            print(f"  - {name}")
 
     if not pending:
-        print("Nothing to generate - every chapter already has an MP3.")
+        print("Nothing to generate - every chapter already has audio.")
         return
 
     print(f"Found {len(chapter_files)} chapters, {len(pending)} to process.")
@@ -710,7 +773,7 @@ def main():
     # an already-generated book free.
     #
     # Runs in the GUI-side venv via `uv run --project`, matching
-    # mp3_metadata.py. Two deliberate choices about its output:
+    # audio_metadata.py. Two deliberate choices about its output:
     #   - not captured, so it inherits this process's stdout and flows
     #     straight into the GUI progress window's log as it happens;
     #   - "-u", so Python doesn't block-buffer that pipe. Without it the

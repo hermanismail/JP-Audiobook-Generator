@@ -24,8 +24,9 @@ Layout notes (2026-08 tab restructure):
       + Max Chunk Length + Keep Temp Files.
     - Metadata page = Author / Book Title / Genre / auto chapter
       numbering / cover art, all persisted to settings.json. "Apply Tags
-      to Output MP3s" (mp3_metadata.py, using mutagen) writes the actual
-      ID3v2 tags onto the already-generated chapter MP3s in output_folder
+      to Output Files" (audio_metadata.py, using mutagen) writes the actual
+      MP4 tags (or ID3v2, for an older .mp3) onto the already-generated
+      chapter files in output_folder
       - it's a separate manual step from generation, since Save & Run
       launches run_audiobook.py in a detached console the GUI doesn't
       wait on.
@@ -52,7 +53,7 @@ from ui_common import (
     COLOR_TOGGLE_ON, COLOR_BTN_NEUTRAL_BORDER, COLOR_BTN_NEUTRAL_TEXT, IconBadge,
 )
 
-# mp3_metadata (mutagen-based tagging) is imported lazily inside
+# audio_metadata (mutagen-based tagging) is imported lazily inside
 # on_apply_metadata_tags() rather than here, so a missing `mutagen`
 # install (e.g. before running `uv sync` after this feature was added)
 # doesn't crash the whole settings GUI on launch - only the Apply Tags
@@ -93,9 +94,10 @@ DEFAULT_SETTINGS = {
     "no_trim_tail": True,
     "seed_enabled": False,
     "seed_value": 20260906,
-    # Output encoding.
-    "mp3_mono": True,
-    "mp3_bitrate": "96k",
+    # Output encoding. Always mono AAC (.m4a); only the bitrate is a
+    # setting. The old mp3_bitrate / mp3_mono keys are not read - see
+    # run_audiobook.py's AAC_BITRATE for why.
+    "aac_bitrate": "64k",
     # Translation subtitles. See translate_pipeline.py.
     "auto_translate_after_run": False,
     "translation_backend": "vntl",
@@ -137,7 +139,6 @@ ICON_REGENERATE = ("♻", "#FFF1E0", "#E08A2C")        # ♻ recycle
 ICON_DURATION_SCALE = ("⏳", "#EDEBFC", "#6C5DD3")    # ⏳ hourglass (pacing)
 ICON_TRIM_TAIL = ("✂", "#FCEAEA", "#D85A5A")         # ✂ scissors
 ICON_SEED = ("\U0001F331", "#E6F8ED", "#2FB668")          # 🌱 seedling
-ICON_CHANNELS = ("\U0001F3A7", "#E6F1FB", "#3378C9")      # 🎧 headphones
 ICON_BITRATE = ("\U0001F4CA", "#FFF1E0", "#E08A2C")       # 📊 bar chart
 ICON_TRANSLATE = ("\U0001F310", "#E6F1FB", "#3378C9")     # 🌐 globe
 ICON_ENDPOINT = ("\U0001F517", "#EDEBFC", "#6C5DD3")      # 🔗 link
@@ -340,8 +341,8 @@ class SettingsApp(ctk.CTk):
                 value=str(self.settings["duration_scale"])),
             "seed_value": ctk.StringVar(
                 value=str(self.settings["seed_value"])),
-            "mp3_bitrate": ctk.StringVar(
-                value=str(self.settings["mp3_bitrate"])),
+            "aac_bitrate": ctk.StringVar(
+                value=str(self.settings["aac_bitrate"])),
             "llama_server_url": ctk.StringVar(
                 value=str(self.settings["llama_server_url"])),
             "llama_server_exe": ctk.StringVar(
@@ -360,8 +361,6 @@ class SettingsApp(ctk.CTk):
             value=1 if self.settings.get("no_trim_tail", True) else 0)
         self.seed_enabled_var = ctk.IntVar(
             value=1 if self.settings.get("seed_enabled", False) else 0)
-        self.mp3_mono_var = ctk.IntVar(
-            value=1 if self.settings.get("mp3_mono", True) else 0)
         self.auto_translate_var = ctk.IntVar(
             value=1 if self.settings.get("auto_translate_after_run", False) else 0)
 
@@ -565,7 +564,7 @@ class SettingsApp(ctk.CTk):
         self._add_path_row(paths_card, *ICON_INPUT, "Input Folder",
                             "Folder containing input chapters", "input_folder", "folder")
         self._add_path_row(paths_card, *ICON_OUTPUT, "Output Folder",
-                            "Folder to save generated MP3 files", "output_folder", "folder")
+                            "Folder to save generated .m4a files", "output_folder", "folder")
         # Directly beneath the folder each one acts on, so the consequence is
         # attached to the path it applies to rather than sitting on another
         # page where you have to remember which folder it meant.
@@ -619,12 +618,11 @@ class SettingsApp(ctk.CTk):
         ctk.CTkLabel(parent, text="Output Encoding", text_color=COLOR_TITLE,
                      font=ctk.CTkFont(size=15, weight="bold"),
                      anchor="w").pack(fill="x", pady=(20, 8))
-        mp3_card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16,
-                                border_width=1, border_color=COLOR_CARD_BORDER)
-        mp3_card.pack(fill="x")
+        encoding_card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16,
+                                     border_width=1, border_color=COLOR_CARD_BORDER)
+        encoding_card.pack(fill="x")
 
-        self._add_channels_row(mp3_card)
-        self._add_bitrate_row(mp3_card)
+        self._add_bitrate_row(encoding_card)
 
         # Translation runs over the finished sync.json, so it belongs after
         # generation rather than inside it - see translate_pipeline.py.
@@ -775,8 +773,8 @@ class SettingsApp(ctk.CTk):
             meta_card, *ICON_AUTO_TAG, "Auto-tag generated files",
             "Sets the metadata of output files automatically",
             self.auto_tag_var,
-            on_text="(Tag the output mp3 files automatically upon generation)",
-            off_text="(Tag the output mp3 files manually)",
+            on_text="(Tag the output audio files automatically upon generation)",
+            off_text="(Tag the output audio files manually)",
             command=self._on_auto_tag_changed)
         self._add_cover_art_row(meta_card)
 
@@ -784,7 +782,7 @@ class SettingsApp(ctk.CTk):
         apply_card.pack(fill="x", pady=(16, 0))
 
         self.apply_tags_button = ctk.CTkButton(
-            apply_card, text="\U0001F3F7  Apply Tags to Output MP3s", height=40,
+            apply_card, text="\U0001F3F7  Apply Tags to Output Files", height=40,
             corner_radius=8, fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             text_color="white", font=ctk.CTkFont(size=13, weight="bold"),
             command=self.on_apply_metadata_tags,
@@ -926,7 +924,7 @@ class SettingsApp(ctk.CTk):
 
         text_frame = self._title_block(
             row, "Regenerate existing chapters",
-            "ON rebuilds chapters that already have an MP3 in the folder above, "
+            "ON rebuilds chapters that already have audio in the folder above, "
             "overwriting them. OFF skips them")
         text_frame.pack(side="left", fill="x", expand=True)
 
@@ -1071,51 +1069,28 @@ class SettingsApp(ctk.CTk):
             self.seed_entry.pack_forget()
 
     # ---------- Advanced page: output encoding rows ----------
-    def _add_channels_row(self, parent):
-        """ffmpeg -ac. Irodori-TTS renders mono, so stereo duplicates the
-        same signal into both channels and halves the bits available to the
-        content - mono is the default for that reason."""
-        row = self._row_shell(parent)
-        glyph, pastel_bg, icon_color = ICON_CHANNELS
-        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
-            side="left", padx=(0, 14))
-        text_frame = self._title_block(
-            row, "Output channels",
-            "Mono matches what the TTS actually renders. Stereo duplicates it "
-            "into both channels")
-        text_frame.pack(side="left", fill="x", expand=True)
-
-        self.mp3_mono_switch = ctk.CTkSwitch(
-            row, text=self._mono_text(bool(self.mp3_mono_var.get())),
-            variable=self.mp3_mono_var, onvalue=1, offvalue=0,
-            progress_color=COLOR_TOGGLE_ON, button_color="white",
-            switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
-            font=ctk.CTkFont(size=12), command=self._on_mono_changed)
-        self.mp3_mono_switch.pack(side="right")
-
-    def _mono_text(self, mono):
-        return "MONO" if mono else "STEREO"
-
-    def _on_mono_changed(self):
-        self.mp3_mono_switch.configure(
-            text=self._mono_text(bool(self.mp3_mono_var.get())))
-
+    # There used to be an Output channels switch here too. It went with the
+    # move to AAC: the TTS renders mono, and every stereo MP3 it produced
+    # measured as dual mono (L-R at -91 dB), so stereo only ever split the
+    # bitrate across two identical channels. If a stereo voice path is ever
+    # added, re-measure before bringing it back.
     def _add_bitrate_row(self, parent):
-        """ffmpeg -b:a. Constant bitrate on purpose: build_sync_data() writes
-        per-chunk offsets that a player seeks to, and VBR seeking leans on a
-        100-entry table that is far coarser than one chunk."""
+        """ffmpeg -b:a for the native AAC encoder; the output is always mono.
+        Unlike MP3 there is no reason to insist on CBR: an .m4a is seeked
+        through its MP4 sample table, which is exact to the frame, not the
+        coarse 100-entry TOC that made VBR MP3 seeking miss chunk offsets."""
         row = self._row_shell(parent)
         glyph, pastel_bg, icon_color = ICON_BITRATE
         IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
             side="left", padx=(0, 14))
         text_frame = self._title_block(
-            row, "MP3 Bitrate",
-            "Constant bitrate for the stitched chapter, e.g. 96k. "
+            row, "AAC Bitrate",
+            "Mono AAC bitrate for the chapter .m4a, e.g. 64k. "
             "Speech needs far less than music")
         text_frame.pack(side="left", fill="x", expand=True)
 
         ctk.CTkEntry(
-            row, textvariable=self.vars["mp3_bitrate"], width=110, height=36,
+            row, textvariable=self.vars["aac_bitrate"], width=110, height=36,
             corner_radius=8, border_width=1, border_color=COLOR_ENTRY_BORDER,
             text_color=COLOR_ENTRY_TEXT, fg_color="white").pack(side="right")
 
@@ -1204,7 +1179,7 @@ class SettingsApp(ctk.CTk):
         glyph, pastel_bg, icon_color = ICON_COVER_ART
         IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
             side="left", padx=(0, 14))
-        self._title_block(row, "Cover Art", "Embedded as artwork in every chapter's MP3",
+        self._title_block(row, "Cover Art", "Embedded as artwork in every chapter file",
                            fixed_width=220, fixed_height=56)
 
         entry = ctk.CTkEntry(
@@ -1306,12 +1281,12 @@ class SettingsApp(ctk.CTk):
                     "(e.g. 20260906), or turn the seed switch off.")
                 return None
 
-        mp3_bitrate = self._normalize_bitrate(self.vars["mp3_bitrate"].get())
-        if mp3_bitrate is None:
+        aac_bitrate = self._normalize_bitrate(self.vars["aac_bitrate"].get())
+        if aac_bitrate is None:
             messagebox.showerror(
                 "Invalid Value",
-                "MP3 Bitrate must be between 32k and 320k, written as "
-                "'96k' or '96'.")
+                "AAC Bitrate must be between 32k and 128k, written as "
+                "'64k' or '64'.")
             return None
 
         data = {
@@ -1336,8 +1311,7 @@ class SettingsApp(ctk.CTk):
             "no_trim_tail": bool(self.no_trim_tail_var.get()),
             "seed_enabled": bool(self.seed_enabled_var.get()),
             "seed_value": seed_value,
-            "mp3_mono": bool(self.mp3_mono_var.get()),
-            "mp3_bitrate": mp3_bitrate,
+            "aac_bitrate": aac_bitrate,
             "auto_translate_after_run": bool(self.auto_translate_var.get()),
             "translation_backend": self.translation_backend_var.get(),
             "llama_server_url": self.vars["llama_server_url"].get().strip(),
@@ -1355,15 +1329,17 @@ class SettingsApp(ctk.CTk):
 
     @staticmethod
     def _normalize_bitrate(raw):
-        """Accepts '96k', '96K' or '96' and returns a canonical '96k'.
-        Returns None if it isn't a usable CBR value, which the caller turns
-        into an error dialog."""
+        """Accepts '64k', '64K' or '64' and returns a canonical '64k'.
+        Returns None if it isn't a sensible mono AAC speech bitrate, which
+        the caller turns into an error dialog. 128k is already far past
+        transparent for a single voice; the cap is there so a 320k carried
+        over from an old MP3 habit is caught rather than obeyed."""
         text = (raw or "").strip().lower().rstrip("k").strip()
         try:
             kbps = int(float(text))
         except ValueError:
             return None
-        if not 32 <= kbps <= 320:
+        if not 32 <= kbps <= 128:
             return None
         return f"{kbps}k"
 
@@ -1379,7 +1355,7 @@ class SettingsApp(ctk.CTk):
             self.vars[key].set(merged[key])
         for key in ("silence_duration_sentence", "silence_duration_paragraph",
                     "silence_duration_section", "max_chunk_length",
-                    "duration_scale", "seed_value", "mp3_bitrate",
+                    "duration_scale", "seed_value", "aac_bitrate",
                     "llama_server_url", "llama_server_exe", "llama_model_path"):
             self.vars[key].set(str(merged[key]))
         self.translation_backend_var.set(str(merged["translation_backend"]))
@@ -1389,7 +1365,6 @@ class SettingsApp(ctk.CTk):
             1 if merged["regenerate_existing_chapters"] else 0)
         self.no_trim_tail_var.set(1 if merged["no_trim_tail"] else 0)
         self.seed_enabled_var.set(1 if merged["seed_enabled"] else 0)
-        self.mp3_mono_var.set(1 if merged["mp3_mono"] else 0)
         self.auto_translate_var.set(1 if merged["auto_translate_after_run"] else 0)
 
         for key in ("author_name", "book_title", "genre", "cover_art_path"):
@@ -1406,14 +1381,13 @@ class SettingsApp(ctk.CTk):
         self._on_regenerate_chapters_changed()
         self._on_no_trim_tail_changed()
         self._on_seed_toggled()
-        self._on_mono_changed()
         self._on_auto_translate_changed()
         for switch, var, on_text, off_text in (
             (self.auto_number_switch, self.auto_number_var,
              "(Sets the track number based on chapter filename)", "(set track number manually)"),
             (self.auto_tag_switch, self.auto_tag_var,
-             "(Tag the output mp3 files automatically upon generation)",
-             "(Tag the output mp3 files manually)"),
+             "(Tag the output audio files automatically upon generation)",
+             "(Tag the output audio files manually)"),
         ):
             switch.configure(text=on_text if var.get() else off_text)
         self._on_auto_tag_changed()
@@ -1534,20 +1508,22 @@ class SettingsApp(ctk.CTk):
 
         # Mirror run_audiobook.py's own skip rule when counting, or the
         # progress window would promise "Chapter 1 of 18" for a run that only
-        # intends to build three of them.
+        # intends to build three of them. Either container counts as done,
+        # matching run_audiobook.CHAPTER_AUDIO_EXTS.
         if not data["regenerate_existing_chapters"]:
             chapter_files = [
                 f for f in chapter_files
-                if not os.path.exists(os.path.join(
+                if not any(os.path.exists(os.path.join(
                     data["output_folder"],
-                    os.path.splitext(os.path.basename(f))[0] + ".mp3"))]
+                    os.path.splitext(os.path.basename(f))[0] + ext))
+                    for ext in (".m4a", ".mp3"))]
 
         total_chapters = len(chapter_files)
         if total_chapters == 0:
             messagebox.showinfo(
                 "Nothing to Generate",
-                "Every chapter in the input folder already has an MP3 in the "
-                "output folder, so there is nothing to do.\n\nTurn on "
+                "Every chapter in the input folder already has audio (.m4a or "
+                ".mp3) in the output folder, so there is nothing to do.\n\nTurn on "
                 "'Regenerate existing chapters' on the Advanced page to "
                 "rebuild them.")
             return
@@ -1658,7 +1634,7 @@ class SettingsApp(ctk.CTk):
     def _finish_run(self):
         """Called once run_audiobook.py's stdout has closed. Waits on the
         actual exit code rather than assuming success just because the
-        process stopped printing - auto-tagging (mp3_metadata.py) runs
+        process stopped printing - auto-tagging (audio_metadata.py) runs
         after every chapter and could itself fail on any of those calls."""
         returncode = self._run_process.wait()
         if self._run_window is None or not self._run_window.winfo_exists():
@@ -1751,7 +1727,7 @@ class SettingsApp(ctk.CTk):
                 f"'{data['input_folder']}' does not exist.\n"
                 "Chapter order and track numbers are read from the chapter_*.txt "
                 "files there, so this needs to be correct even though we're only "
-                "tagging MP3s right now.")
+                "tagging existing files right now.")
             return
         if not os.path.isdir(data["output_folder"]):
             messagebox.showerror(
@@ -1766,7 +1742,7 @@ class SettingsApp(ctk.CTk):
         save_settings(data)
 
         try:
-            import mp3_metadata
+            import audio_metadata
         except ImportError:
             messagebox.showerror(
                 "mutagen Not Installed",
@@ -1776,15 +1752,15 @@ class SettingsApp(ctk.CTk):
             return
 
         try:
-            result = mp3_metadata.apply_metadata(data, data)
+            result = audio_metadata.apply_metadata(data, data)
         except Exception as e:
             messagebox.showerror("Tagging Failed", f"Unexpected error while tagging:\n{e}")
             return
 
-        summary_lines = [f"Tagged {result.tagged_count} MP3 file(s)."]
+        summary_lines = [f"Tagged {result.tagged_count} audio file(s)."]
         if result.missing:
             summary_lines.append(
-                f"{len(result.missing)} chapter(s) have no MP3 yet in the output "
+                f"{len(result.missing)} chapter(s) have no audio file yet in the output "
                 "folder (skipped): " + ", ".join(result.missing[:5]) +
                 ("..." if len(result.missing) > 5 else ""))
         if result.errors:
