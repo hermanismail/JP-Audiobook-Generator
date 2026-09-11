@@ -60,6 +60,32 @@ is deliberate.
     collapsed). What goes to the TTS engine.
   - `display_text` — original wording. **This is what lands in `sync.json`
     and what the reader app displays.** Do not conflate them.
+
+  A closing bracket (`」』）`) right after a terminator belongs to the
+  sentence it closes: `…から？」` | `彼女は…`, never `…から？` | `」彼女は…`
+  (`TERMINATOR_RE` takes it as part of the terminator; `merge_units()`'s
+  `、` fallback does the same). Before 2026-09-11 the bracket opened the
+  next chunk — 297 chunks across the chapter files at length 40 — and a
+  lone `」` left as its own fragment produced empty TTS text and was
+  **dropped from `sync.json` entirely** (4 files). Chapters rendered before
+  then still carry that in their `sync.json` until regenerated.
+
+  A run of `─` (the conventional `──`) is reduced to a single `─` in
+  `split_paragraphs()`, so `sync.json` shows one dash and chunk lengths
+  count one character; the TTS text still turns it into `、`.
+
+  Both rules were back-applied to the published library on 2026-09-11:
+  every `sync.json` in `F:\AUDIOBOOK-HOST-AAC` had its text repaired in
+  place (text fields only — the audio already matched, since the TTS drops
+  an edge bracket and reads a dash as `、` either way). Originals are in
+  `F:\_backup\AUDIOBOOK-HOST-AAC-sync-20260911`. `F:\AUDIOBOOK-HOST` (the
+  MP3 masters) and `F:\AUDIOBOOK_OUTPUT` were not touched. Two chunks in
+  sputnik (ch.007 #34, ch.012 #193) were a lone `」` with their own 0.76 s
+  audio slot — left by an older bracket-edge splitter at broken-off speech —
+  and were merged into the chunk before (its `end` stretched over the slot,
+  later chunks renumbered). Those two chapters therefore have one fewer
+  chunk than their `.srt` has cues; the extra cue is time-matched, so it
+  still displays correctly.
 - `translate_pipeline.py` — subtitle generation. Stdlib only, so it runs
   unchanged in either venv. See the Translation section below.
 - `audio_metadata.py` — tagging (mutagen): MP4 atoms on `.m4a`, ID3 on a

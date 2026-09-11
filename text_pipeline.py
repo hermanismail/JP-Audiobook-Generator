@@ -23,12 +23,16 @@ Pipeline stages implemented here:
                             (2+ CRLF is the paragraph boundary - see
                             build_chunks() docstring for why the old
                             single-CRLF paragraph tier was dropped),
-                            merged into one line and stripped of inline
-                            whitespace (spaces/tabs/IDSP) ready for
-                            sentence splitting.
+                            merged into one line, stripped of inline
+                            whitespace (spaces/tabs/IDSP), and with any
+                            "──" (run of "─") reduced to a single "─",
+                            ready for sentence splitting.
   3. split_sentences()   - split a paragraph into sentence strings on
-                            。/？/…… terminators. No more forced breaks at
-                            bracket edges or "──" - see prepare_tts_text().
+                            。/？/…… terminators. A closing bracket right
+                            after a terminator stays with the sentence it
+                            closes ("…？」" | "彼女は…"), never opens the
+                            next one. No more forced breaks at bracket
+                            edges or "──" - see prepare_tts_text().
   4. merge_units()       - merge sentence strings into ~100-char (130 hard
                             limit) TTS input chunks: keep adding sentences
                             to a chunk while it fits, otherwise flush and
@@ -100,7 +104,21 @@ import re
 IDSP = "\u3000"  # ideographic space (full-width space)
 INLINE_WHITESPACE_RE = re.compile(r"[ \t" + IDSP + r"]")
 
-TERMINATOR_RE = re.compile(r"(。|？|……)")
+# A run of box-drawing dashes ("\u2500\u2500", the conventional Japanese double dash)
+# is reduced to a single "\u2500" at paragraph-cleaning time, so both the reader
+# text in sync.json and the chunk-length accounting see one character. The
+# TTS text then turns that "\u2500" into a "\u3001" - see prepare_tts_text().
+DASH = "\u2500"
+DASH_RUN_RE = re.compile(DASH + "+")
+
+# Closing brackets belong to the sentence they close. Without this, a split
+# right after the terminator in "…から？」彼女は…" left the "」" at the start
+# of the NEXT sentence - and so at the start of the next chunk and its
+# sync.json text, where the reader app showed a stray "」" opening a line.
+CLOSING_BRACKETS = "」』）"
+
+# A terminator plus any closing brackets straight after it, as one token.
+TERMINATOR_RE = re.compile(r"((?:。|？|……)[" + CLOSING_BRACKETS + r"]*)")
 COMMA = "、"
 
 SOFT_LIMIT = 100
@@ -174,19 +192,24 @@ def split_paragraphs(section_text):
     either side merge into the same TTS chunk instead of always being cut
     apart. Inline whitespace (half-width space, tab, IDSP - e.g. the
     space in "衝突？　衝突って") is stripped here too, for both the TTS and
-    the reader-facing text.
+    the reader-facing text. A "──" (any run of "─") becomes a single "─"
+    here as well, for the same two consumers.
 
     Returns a single-element list (or [] if the section is blank) so the
     section/paragraph working-file structure and indices are unchanged."""
     cleaned = INLINE_WHITESPACE_RE.sub("", section_text.replace("\n", ""))
+    cleaned = DASH_RUN_RE.sub(DASH, cleaned)
     return [cleaned] if cleaned.strip() else []
 
 
 def split_sentences(paragraph_text):
     """Split a cleaned paragraph into sentence strings on 。/？/……
-    terminators, keeping the terminator attached. Falls back to treating
-    any un-terminated trailing text as its own sentence. No forced breaks
-    at bracket edges or "──" any more - see prepare_tts_text()."""
+    terminators, keeping the terminator attached - together with any
+    closing brackets (」』）) right after it, so "…から？」彼女は…" splits
+    as "…から？」" + "彼女は…", never "…から？" + "」彼女は…". Falls back
+    to treating any un-terminated trailing text as its own sentence. No
+    forced breaks at bracket edges or "──" any more - see
+    prepare_tts_text()."""
     parts = TERMINATOR_RE.split(paragraph_text)
     sentences = []
     buf = ""
@@ -252,9 +275,16 @@ def merge_units(units, soft_limit=SOFT_LIMIT, hard_limit=HARD_LIMIT):
                     best = p
 
         if best is not None:
-            buffer_text = buffer_text + text[: best + 1]
+            # Carry any closing brackets straight after the 、 along with
+            # it, for the same reason split_sentences() does - otherwise the
+            # next chunk opens on a stray "」". This can take the chunk a
+            # character or two past the limit it was measured against.
+            end = best + 1
+            while end < len(text) and text[end] in CLOSING_BRACKETS:
+                end += 1
+            buffer_text = buffer_text + text[:end]
             flush()
-            remainder = text[best + 1:]
+            remainder = text[end:]
             if remainder.strip():
                 buffer_text = remainder
         else:
@@ -268,7 +298,6 @@ def merge_units(units, soft_limit=SOFT_LIMIT, hard_limit=HARD_LIMIT):
 
 
 # --- TTS-only text normalization ------------------------------------------
-DASH_RUN_RE = re.compile("─+")
 PUNCT_TOKEN_RE = re.compile(r"。|？|……|、")
 PUNCT_ONLY_RE = re.compile(r"[。？……、]+")
 BRACKETS = "「」"
