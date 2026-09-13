@@ -84,8 +84,15 @@ is deliberate.
   audio slot — left by an older bracket-edge splitter at broken-off speech —
   and were merged into the chunk before (its `end` stretched over the slot,
   later chunks renumbered). Those two chapters therefore have one fewer
-  chunk than their `.srt` has cues; the extra cue is time-matched, so it
+  chunk than their `.srt` has cues; the extra cue is time-matched, so it
   still displays correctly.
+
+  The repaired files were published to R2 the same evening (objects
+  written 2026-09-11 15:38 UTC, in a separate session), so the live site
+  serves the corrected text. Verified 2026-09-14 with `rclone check`
+  against `r2:shama-audiobooks`: all 71 `sync.json` match by hash, and
+  none has a chunk opening on a closing bracket or containing `──`.
+  rclone's `lsl` timestamps are UTC; local time here is +0800.
 - `translate_pipeline.py` — subtitle generation. Stdlib only, so it runs
   unchanged in either venv. See the Translation section below.
 - `audio_metadata.py` — tagging (mutagen): MP4 atoms on `.m4a`, ID3 on a
