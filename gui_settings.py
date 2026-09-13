@@ -1205,6 +1205,38 @@ class SettingsApp(ctk.CTk):
         if chosen:
             self.metadata_vars["cover_art_path"].set(os.path.normpath(chosen))
 
+    def _ensure_cover_art(self, data):
+        """Checks the Cover Art path still points at a real file, and offers
+        to re-pick it if it does not. Returns False to abort the run.
+
+        Cover art is optional, so an EMPTY path is fine - but a path left
+        over from a previous run whose image has since moved is not. Nothing
+        downstream complains: audio_metadata.py treats an unreadable cover
+        as "no cover" and tags every chapter without one, so the first sign
+        is missing artwork in the player, hours of GPU time later. Asked
+        here instead, while it is still free to fix."""
+        while True:
+            path = data["cover_art_path"]
+            if not path or os.path.isfile(path):
+                return True
+
+            if not messagebox.askyesno(
+                    "Cover Art Not Found",
+                    f"The cover art image is no longer here:\n{path}\n\n"
+                    "It looks like it was moved, renamed or deleted since the "
+                    "last run. Chapters generated now would be tagged with no "
+                    "cover art at all.\n\n"
+                    "Choose a new location for it?"):
+                return False
+
+            self._browse_cover_art()
+            chosen = self.metadata_vars["cover_art_path"].get().strip()
+            if chosen == path:
+                # Picker cancelled - the value is unchanged, so asking again
+                # would just loop on the same dead path.
+                return False
+            data["cover_art_path"] = chosen
+
     # ---------- Actions ----------
     def _browse(self, key, kind, filetypes):
         current = self.vars[key].get()
@@ -1480,6 +1512,12 @@ class SettingsApp(ctk.CTk):
         data = self._collect_and_validate()
         if data is None:
             return
+
+        # Before save_settings(), so a re-picked image persists and backing
+        # out leaves settings.json untouched.
+        if not self._ensure_cover_art(data):
+            return
+
         save_settings(data)
 
         if not os.path.exists(RUN_SCRIPT_PATH):
