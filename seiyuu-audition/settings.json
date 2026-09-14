@@ -1,0 +1,17 @@
+{
+  "irodori_root": "C:\\Irodori-TTS",
+  "batch_script": "",
+  "temp_root": "F:\\tmp\\audition-tmp",
+  "clean_temp_on_exit": true,
+  "mode": "simple",
+  "text": "",
+  "speaker_path": "",
+  "max_chunk_length": 40,
+  "duration_scale": 1.2,
+  "no_trim_tail": false,
+  "seed_enabled": false,
+  "seed_value": 20260906,
+  "silence_duration_sentence": 0.5,
+  "silence_duration_paragraph": 0.5,
+  "silence_duration_section": 0.8
+}

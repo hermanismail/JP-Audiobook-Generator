@@ -1,0 +1,19 @@
+[project]
+name = "seiyuu-audition"
+version = "0.1.0"
+description = "Audition a seiyuu against a book's text before committing a chapter to it"
+readme = "README.md"
+authors = [
+    { name = "hermanismail", email = "hermanismail@gmail.com" }
+]
+requires-python = ">=3.12"
+# No torch, no irodori_tts: the TTS runs in the Irodori-TTS venv, reached
+# through `uv run` on the generator's irodori_batch.py. This venv stays
+# small enough to sync in seconds.
+dependencies = [
+    "customtkinter>=6.0.0",
+    "pillow>=12.3.0",
+]
+
+[tool.uv]
+package = false

@@ -61,6 +61,11 @@ is deliberate.
   - `display_text` — original wording. **This is what lands in `sync.json`
     and what the reader app displays.** Do not conflate them.
 
+  It has a second consumer now: `seiyuu-audition/` imports it so its E2E
+  mode chunks exactly the way a real chapter does. Changing
+  `build_chunks()`'s signature or the keys of a chunk dict breaks that
+  tool as well as the generator.
+
   A closing bracket (`」』）`) right after a terminator belongs to the
   sentence it closes: `…から？」` | `彼女は…`, never `…から？` | `」彼女は…`
   (`TERMINATOR_RE` takes it as part of the terminator; `merge_units()`'s
@@ -130,6 +135,82 @@ The gate is not automatable: Whisper returns unpunctuated lines AND mishears
 — the real `moeshi/calm-01` text opens with an `えへへ。` that is nowhere in
 its output. Saved text always wins over a fresh suggestion, or re-opening a
 speaker would discard hand corrections.
+
+**Proven end to end (2026-09-14).** A new speaker was onboarded entirely
+through this tool - wav samples in, review gate, manifest, training - and
+the resulting `seiyuu/list/*.speaker.safetensors` was then used for real
+inference with no issue. The manual command-line path is retired.
+
+## `seiyuu-audition/` — the other separate tool in this repo
+
+**Also not part of the generator**, and it answers the question that
+comes after the onboarder's: this speaker exists, but what chunk length
+and duration scale should a book use with it? Speaker embeddings behave
+differently on identical parameters, which is why those two are
+per-preset settings rather than constants.
+
+One text, one or more SAMPLES (a seiyuu plus a parameter set), played
+back to back in a Results window. Two modes, never mixed in one
+audition: `simple` speaks the text verbatim, `e2e` runs the real
+chunking and cleaning and stitches the chunks with silences.
+
+Three things about it are load-bearing:
+
+- **It imports `text_pipeline.py` from the folder above** — the one
+  exception to the onboarder's shares-nothing rule, and a deliberate
+  one. A copy would drift away from the generator the next time a
+  bracket or dash rule is revised, and e2e mode would then be
+  simulating something that no longer exists. `text_pipeline` is
+  stdlib-only and reads no settings, so it imports cleanly into this
+  tool's small venv. `run_audiobook.py` deliberately is NOT imported:
+  it builds module-level globals out of the generator's live
+  `settings.json`, so importing it would drag a half-edited book preset
+  into an audition. Its silence and concat logic is reimplemented in
+  `audition.py` instead — short, and not the part that has to stay in
+  step.
+- **The engine stops after the stitch and never encodes.** An audition
+  is heard once and deleted: nothing is streamed, tagged or published,
+  so AAC would only buy file size that is thrown away minutes later. It
+  also keeps playback inside the GUI, because `winsound` plays WAV and
+  nothing else. `aac_bitrate` and the watermark are therefore absent by
+  design. Verified 2026-09-14: 0.5 + 4.48 + 0.8 + 4.56 wavs stitch to
+  exactly 10.34 s, mono 48 kHz `pcm_s16le`.
+- **A sample is generated once, and the fingerprint says when.**
+  `sample_fingerprint()` captures everything that decides how a sample
+  sounds — mode, text, speaker path AND that file's size/mtime (the
+  onboarder republishes `seiyuu/list/*.speaker.safetensors` in place, so
+  the path alone does not identify a voice), duration scale, trim tail,
+  seed, and in e2e mode the chunk length and silences. It is written
+  beside the wav as `sample_NNN.json` only AFTER the stitch succeeds, or
+  a half-made sample would be reused forever. Parameters inert in the
+  current mode are excluded, matching what the GUI greys out.
+
+  The reason is not speed. Samples run on a **random seed**, so
+  regenerating one yields a different take — the sample you already
+  judged silently changes when you add another to the comparison. Reuse
+  prevents that; `Regenerate all` is the way to ask for fresh draws.
+
+  Added 2026-09-14 after a report that reuse “stopped working when a
+  second seiyuu was introduced”. There was no reuse at all at that
+  point — timestamps showed all six samples rendering back to back — and
+  the impression came from the auto-scrolling log plus the worker line
+  `model loaded in 14.9s - reused for all 5 chunk(s) of this sample`,
+  where “reused” means across chunks, not across samples. The seiyuu was
+  never the variable. Worth remembering twice over: the misleading word
+  was in a log line inherited from the generator, and the fix for a
+  “why did it do that” report came from file timestamps, not from
+  reading the code harder.
+- **The TTS is `irodori_batch.py`, run unmodified.** Its job file is a
+  documented contract (see its docstring) and this tool is simply a
+  second caller of it — one worker per SAMPLE, so one model load each.
+  Samples run one at a time, never two workers at once; that is
+  catastrophically slower on this card, as recorded below.
+
+Cleanup deletes exactly what a session created and then walks up
+through emptied folders, stopping at the configured temp root. A tool
+that recursively deletes a user-supplied path on exit is one typo from
+being a disaster, so `remove_paths()` never takes that shortcut.
+
 
 ## Conventions worth not breaking
 
