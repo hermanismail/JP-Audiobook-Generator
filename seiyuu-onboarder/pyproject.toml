@@ -1,0 +1,18 @@
+[project]
+name = "seiyuu-onboarder"
+version = "0.1.0"
+description = "Onboards a new Irodori-TTS speaker: wav samples in, trained speaker file out"
+readme = "README.md"
+authors = [
+    { name = "hermanismail", email = "hermanismail@gmail.com" }
+]
+requires-python = ">=3.12"
+# Whisper is deliberately absent: the tool shells out to the existing
+# transcription venv (C:\Transcribe) rather than installing a second copy.
+dependencies = [
+    "customtkinter>=6.0.0",
+    "pillow>=12.3.0",
+]
+
+[tool.uv]
+package = false

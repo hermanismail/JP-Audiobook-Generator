@@ -1,0 +1,10 @@
+{
+  "irodori_root": "C:\\Irodori-TTS",
+  "whisper_exe": "C:\\Transcribe\\.venv\\Scripts\\whisper.exe",
+  "transcript_root": "C:\\Transcribe\\output",
+  "whisper_model": "large-v3-turbo",
+  "whisper_language": "Japanese",
+  "device": "cuda",
+  "train_config": "configs/train_v4_small_speaker_inversion.yaml",
+  "init_checkpoint": "./model.safetensors"
+}

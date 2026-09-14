@@ -111,6 +111,26 @@ is deliberate.
   thread, pause/resume, the llama-server lifecycle and its own log.
 - `progress_window.py`, `ui_common.py` — progress UI and shared design tokens.
 
+## `seiyuu-onboarder/` — a separate tool in the same repo
+
+**Not part of the generator.** It shares no code with the files above, has
+its own venv, `pyproject.toml` and `settings.json`, and imports nothing from
+its neighbours. It lives here for one history and one clone, nothing more —
+treat the folder boundary as the separation.
+
+What it does: onboards a new Irodori-TTS speaker. Wav samples in
+`audio/<speaker>/<style>` -> Whisper (shelled out to the existing
+`C:\Transcribe` venv, never installed twice) -> **a review gate where the
+person fixes the text** -> `metadata.csv` -> `prepare_manifest.py` ->
+`train.py` -> a hardlink at `seiyuu/list/<speaker>-<style>.speaker.safetensors`,
+which is what the generator's Speaker Path field points at.
+
+The pair `<speaker>/<style>` is the only input; every path derives from it.
+The gate is not automatable: Whisper returns unpunctuated lines AND mishears
+— the real `moeshi/calm-01` text opens with an `えへへ。` that is nowhere in
+its output. Saved text always wins over a fresh suggestion, or re-opening a
+speaker would discard hand corrections.
+
 ## Conventions worth not breaking
 
 - Hand-rolled `json` building; no serialization library.
@@ -462,6 +482,16 @@ library functions with an explicit throwaway settings dict instead.
 silently and the script still prints success. One such failure left the
 end-of-run translation hook out of a commit whose message claimed it shipped.
 Every replacement gets an `assert old in s`.
+
+**A child Python writing Japanese to a PIPE dies on cp1252.** Capture a
+subprocess's output and its stdout is no longer a console, so Python falls
+back to the Windows locale encoding and the first Japanese character raises
+`UnicodeEncodeError`. Whisper catches that per file, prints `Skipping ...`,
+and the run "succeeds" having transcribed nothing. It never reproduces when
+the same command is typed into a terminal, because a console takes a
+different write path. Any subprocess that might print Japanese needs
+`PYTHONIOENCODING=utf-8` in its environment — see
+`seiyuu-onboarder/pipeline.run_streaming()`.
 
 **Windows will not composite the off-screen part of a window.** `PrintWindow`
 captures of a window taller than the screen come back black below the screen
