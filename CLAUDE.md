@@ -317,6 +317,40 @@ Speed at real settings (wall, chunk length 40, ~10 s of audio per chunk):
 generation time scales with audio length, so the win is the fixed ~17 s
 load, not a constant multiple.
 
+## Two workers at once — tried 2026-09-14, do not repeat
+
+Running two chapters (or two halves of one) concurrently on this card is not
+"no gain", it is **catastrophically slower**. Measured with the production
+worker, six chunks either way:
+
+| | GPU util | peak VRAM | result |
+|---|---|---|---|
+| one worker | 80% while generating, 98% peaks | 7790 MiB of 8188 | six chunks in ~20 s |
+| two workers | pegged ~100% | 7920 MiB | ONE chunk in several minutes, killed |
+
+- **One worker already fills the card.** The checkpoint is 3.06 GB in fp32;
+  with codec, SilentCipher, CUDA context and activations a single worker
+  peaks at 7.8 of 8.2 GB. A second copy does not fit.
+- **Windows does not OOM, it spills.** Neither worker logged an error: WDDM
+  pages GPU memory out to system RAM over PCIe and everything crawls.
+  `nvidia-smi` still reads ~100% utilisation throughout — **utilisation is
+  not evidence of useful work**.
+- **The GPU was already well fed.** CFG concatenates the batch
+  (`cfg_batch_mult` in `rf.py`), so each of the 40 diffusion steps runs at an
+  effective batch of 2-4, not a tiny tensor. The ~20% headroom is mostly the
+  gaps between chunks.
+- **Threads are excluded by design**: `InferenceRuntime._infer_lock`
+  (`inference_runtime.py:620`) is taken by `synthesize()` (line 1184), so two
+  threads in one process serialise anyway.
+- **Real batching of different sentences is not reachable through the API**:
+  `synthesize()` builds the batch as `[normalized_text] * num_candidates`
+  (line 1195) — candidates of ONE sentence. Different texts would need
+  changes inside Irodori (padding to a common length, attention masks,
+  per-item duration prediction) and more VRAM than this card has.
+
+The only genuine paths to parallelism are a second GPU or a smaller/quantised
+checkpoint that leaves room for two copies. Neither is a code change here.
+
 # Disk layout — C: is tight, new things go on F:
 
 Recorded 2026-09-07, after the cache migration described below.
