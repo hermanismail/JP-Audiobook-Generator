@@ -94,6 +94,9 @@ DEFAULT_SETTINGS = {
     "no_trim_tail": True,
     "seed_enabled": False,
     "seed_value": 20260906,
+    # SilentCipher watermarking. ON is the engine default - see
+    # run_audiobook.py and irodori_batch.py.
+    "watermark_audio": True,
     # Output encoding. Always mono AAC (.m4a); only the bitrate is a
     # setting. The old mp3_bitrate / mp3_mono keys are not read - see
     # run_audiobook.py's AAC_BITRATE for why.
@@ -140,6 +143,7 @@ ICON_DURATION_SCALE = ("⏳", "#EDEBFC", "#6C5DD3")    # ⏳ hourglass (pacing)
 ICON_TRIM_TAIL = ("✂", "#FCEAEA", "#D85A5A")         # ✂ scissors
 ICON_SEED = ("\U0001F331", "#E6F8ED", "#2FB668")          # 🌱 seedling
 ICON_BITRATE = ("\U0001F4CA", "#FFF1E0", "#E08A2C")       # 📊 bar chart
+ICON_WATERMARK = ("\U0001F510", "#EDEBFC", "#6C5DD3")     # 🔐 locked marker
 ICON_TRANSLATE = ("\U0001F310", "#E6F1FB", "#3378C9")     # 🌐 globe
 ICON_ENDPOINT = ("\U0001F517", "#EDEBFC", "#6C5DD3")      # 🔗 link
 
@@ -361,6 +365,8 @@ class SettingsApp(ctk.CTk):
             value=1 if self.settings.get("no_trim_tail", True) else 0)
         self.seed_enabled_var = ctk.IntVar(
             value=1 if self.settings.get("seed_enabled", False) else 0)
+        self.watermark_var = ctk.IntVar(
+            value=1 if self.settings.get("watermark_audio", True) else 0)
         self.auto_translate_var = ctk.IntVar(
             value=1 if self.settings.get("auto_translate_after_run", False) else 0)
 
@@ -623,6 +629,7 @@ class SettingsApp(ctk.CTk):
         encoding_card.pack(fill="x")
 
         self._add_bitrate_row(encoding_card)
+        self._add_watermark_row(encoding_card)
 
         # Translation runs over the finished sync.json, so it belongs after
         # generation rather than inside it - see translate_pipeline.py.
@@ -1094,6 +1101,42 @@ class SettingsApp(ctk.CTk):
             corner_radius=8, border_width=1, border_color=COLOR_ENTRY_BORDER,
             text_color=COLOR_ENTRY_TEXT, fg_color="white").pack(side="right")
 
+    def _add_watermark_row(self, parent):
+        """SilentCipher embeds an inaudible marker identifying the audio as
+        AI-generated. Turning it OFF also removes the 48k -> 44.1k -> 48k
+        resample it performs around the embed (SilentCipher's model is 44.1k
+        only), which is the part that actually alters the waveform - measured
+        at ~11 dB less content above 22.05 kHz with it ON, plus 60-200 ms per
+        chunk.
+
+        Packed right-hand control first, like every other switch row here -
+        see CLAUDE.md on Tk packing order."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_WATERMARK
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+
+        self.watermark_switch = ctk.CTkSwitch(
+            row, text=self._watermark_text(bool(self.watermark_var.get())),
+            variable=self.watermark_var, onvalue=1, offvalue=0,
+            progress_color=COLOR_TOGGLE_ON, button_color="white",
+            switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
+            font=ctk.CTkFont(size=12), command=self._on_watermark_changed)
+        self.watermark_switch.pack(side="right")
+
+        text_frame = self._title_block(
+            row, "SilentCipher watermark",
+            "ON embeds an inaudible AI-generated marker; OFF skips it and its "
+            "44.1 kHz resample")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+    def _watermark_text(self, enabled):
+        return "ON (watermarked)" if enabled else "OFF (skipped)"
+
+    def _on_watermark_changed(self):
+        self.watermark_switch.configure(
+            text=self._watermark_text(bool(self.watermark_var.get())))
+
     # ---------- Metadata page row helpers (UI-only) ----------
     def _add_text_row(self, parent, glyph, pastel_bg, icon_color, title, subtitle,
                        string_var, placeholder=""):
@@ -1342,6 +1385,7 @@ class SettingsApp(ctk.CTk):
             "duration_scale": duration_scale,
             "no_trim_tail": bool(self.no_trim_tail_var.get()),
             "seed_enabled": bool(self.seed_enabled_var.get()),
+            "watermark_audio": bool(self.watermark_var.get()),
             "seed_value": seed_value,
             "aac_bitrate": aac_bitrate,
             "auto_translate_after_run": bool(self.auto_translate_var.get()),
@@ -1397,6 +1441,7 @@ class SettingsApp(ctk.CTk):
             1 if merged["regenerate_existing_chapters"] else 0)
         self.no_trim_tail_var.set(1 if merged["no_trim_tail"] else 0)
         self.seed_enabled_var.set(1 if merged["seed_enabled"] else 0)
+        self.watermark_var.set(1 if merged["watermark_audio"] else 0)
         self.auto_translate_var.set(1 if merged["auto_translate_after_run"] else 0)
 
         for key in ("author_name", "book_title", "genre", "cover_art_path"):
@@ -1413,6 +1458,7 @@ class SettingsApp(ctk.CTk):
         self._on_regenerate_chapters_changed()
         self._on_no_trim_tail_changed()
         self._on_seed_toggled()
+        self._on_watermark_changed()
         self._on_auto_translate_changed()
         for switch, var, on_text, off_text in (
             (self.auto_number_switch, self.auto_number_var,

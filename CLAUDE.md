@@ -99,6 +99,12 @@ is deliberate.
   legacy `.mp3`. Was `mp3_metadata.py` until the switch to AAC. Has a
   `--chapter <base>` CLI and re-reads `settings.json` itself. The pattern
   `translate_pipeline.py` copies.
+- `irodori_batch.py` — the TTS worker: one model load per CHAPTER instead
+  of one per chunk. Runs in the Irodori venv, reads a job file written by
+  `run_audiobook.py`, and speaks a line protocol back (`MODEL_LOADED`,
+  `CHUNK_START/DONE/FAIL`, `BATCH_DONE`) which `run_batch_worker()`
+  translates into the same `Generating chunk i/N` output as before. See
+  the TTS batching section below.
 - `gui_settings.py` — CustomTkinter settings GUI. Three pages (General,
   Metadata, Advanced) plus a bottom bar with Import / Export / Save & Run.
 - `subtitle_window.py` — the Subtitle Generation Tool window. Owns the worker
@@ -251,6 +257,66 @@ That script stays in the player repo as the path for older MP3 folders.
   `.mp3`), so "Apply Tags" still works on old books, and exits non-zero if
   any file failed so the auto-tag step reports it.
 
+# TTS batching — one model load per chapter (since 2026-09-14)
+
+`run_audiobook.py` used to run `infer.py` once per chunk, and `infer.py`
+loads the DiT checkpoint, the DACVAE codec and SilentCipher before it can
+speak a word. Measured: **19–21 s per chunk, of which ~2–6 s was generation**
+— the rest was re-loading the same model, hundreds of times per book.
+
+Now `process_chapter()` writes `batch_jobs.json` into the chapter's work dir
+and calls `irodori_batch.py` once; the worker loads the model (~16 s) and
+loops over the chunks.
+
+- **One worker per chapter, not per book.** A crash then costs one chapter,
+  and the model leaves the card before `translate_pipeline.py` wants it for
+  VNTL (they would otherwise contend for the same 8 GB).
+- **The worker mirrors `infer.py` exactly**, including `resolve_cfg_scales()`
+  — the `SamplingRequest` defaults alone are NOT equivalent, because the
+  resolution depends on which conditions the checkpoint uses. Proven before
+  the switch: same seed, same text, **byte-identical wavs** (sha256) from
+  both paths, and sentence 2 generated after sentence 1 in one process
+  matched a fresh process, so nothing leaks between chunks.
+- **A failing chunk must not take the chapter with it.** Each chunk is
+  wrapped; a failure reports `CHUNK_FAIL` (with the exception), empties the
+  CUDA cache and carries on, matching what separate processes gave for free.
+- **Progress must stay live.** The worker flushes every protocol line and is
+  launched with `-u`; `run_batch_worker()` reads the pipe line by line and
+  re-prints `Generating chunk i/N ...`, which is what
+  `gui_settings._CHUNK_LINE_RE` parses. Buffer it and the progress bar
+  freezes for minutes.
+- **`watermark_audio` turns SilentCipher off** (GUI: Advanced -> Output
+  Encoding). The worker drops the already-loaded model rather than avoiding
+  its construction, because `InferenceRuntime.__init__` always builds one;
+  `watermark.py` treats a missing model as "unavailable" and passes the audio
+  through. It saves 60-200 ms per chunk on the GPU (600-1100 ms if the codec
+  runs on CPU) and, more interestingly, removes the **48k -> 44.1k -> 48k
+  resample** SilentCipher performs around the embed - its model is 44.1k
+  only, which is where that `Reducing the sampling rate` warning comes from.
+  Measured with a fixed seed: watermarking leaves the audio ~11 dB poorer
+  above 22.05 kHz (inaudible, but it is a real round trip) and differs from
+  the clean signal by -48.7 dB. **Default ON**, the engine's own default; the
+  marker identifies the audio as AI-generated, so turning it off is a
+  deliberate choice rather than pure optimisation.
+- **Library noise goes to `batch_jobs.json.log`** beside the job file —
+  SilentCipher prints two lines per chunk. The path is printed when a chunk
+  fails.
+
+**Judged by ear and accepted (2026-09-14).** The same 10 chunks of wall
+`chapter_066` were generated both ways at the book's real settings
+(ueshama, scale 1.1, chunk length 40, no seed) and listened to: no
+noticeable change in speaker behaviour or audio quality, so batching is
+considered a pass. Samples kept at
+`F:\AUDIOBOOK_TEST\batch-vs-perchunk-20260914`. Note both stitched to
+exactly the same length (108.9 s) - chunk durations are predicted from
+the text, so batching does not change pacing.
+
+Speed at real settings (wall, chunk length 40, ~10 s of audio per chunk):
+**20.6 s → 6.2 s per chunk**, so a 314-chunk chapter drops from ~108 min to
+~33 min. Note this is ~3.3x, not the ~9x that short test sentences suggest:
+generation time scales with audio length, so the win is the fixed ~17 s
+load, not a constant multiple.
+
 # Disk layout — C: is tight, new things go on F:
 
 Recorded 2026-09-07, after the cache migration described below.
@@ -390,6 +456,8 @@ Real numbers from this machine (RTX 4060, 8GB), 2026-09-06/07.
 | An 18-chapter book (~1040 chunks) | ~42 min |
 | Output since 2026-09-10 | mono AAC `.m4a`, 64k target, ~57 kbps actual (native encoder, speech with silences) |
 | 68-min chapter, same concat list | 30.1 MB `.m4a` (incl. 185 KB cover) vs 49.1 MB old 96k stereo MP3 |
+| TTS per chunk, one infer.py each (old) | 19–21 s, of which ~2–6 s generation |
+| TTS per chunk, batched worker | ~6.2 s at chunk length 40, plus ~16 s model load per chapter |
 | TTS output | 48 kHz, mono, 16-bit PCM (fixed; not configurable) |
 
 Chunk counts vary with `max_chunk_length`, which is user-configurable — the

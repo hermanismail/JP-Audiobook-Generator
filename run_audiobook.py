@@ -35,6 +35,10 @@ DEFAULT_SETTINGS = {
     "no_trim_tail": True,
     "seed_enabled": False,
     "seed_value": 20260906,
+    # SilentCipher embeds an inaudible "this is AI-generated" marker.
+    # Leaving it ON is the engine default; OFF skips the embed and the
+    # 48k->44.1k->48k resample it does on the way (see irodori_batch.py).
+    "watermark_audio": True,
     # Output encoding. The chapter is always mono AAC in an .m4a; only the
     # bitrate is a setting. See AAC_BITRATE below.
     "aac_bitrate": "64k",
@@ -117,6 +121,12 @@ TEMP_DIR = SETTINGS["temp_dir"]
 # Aratako/Irodori-TTS-v4.1-Small-Quantized/int8-weight-only.
 MODEL_REF = "Aratako/Irodori-TTS-v4.1-Small"
 SPEAKER_PATH = SETTINGS["speaker_path"]
+
+# The per-chapter TTS worker (see irodori_batch.py). It is launched with
+# cwd set to the Irodori-TTS project so `uv run --no-sync` resolves that
+# venv, the same one this script is itself running in.
+BATCH_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "irodori_batch.py")
+UV_PROJECT_DIR = SETTINGS["uv_project_dir"]
 # Independent gap durations, in seconds - one per silence kind produced by
 # text_pipeline.silence_kind_for(). Each is rendered to its own wav once
 # per run (see get_silence_wavs) and referenced by name in concat_list.txt.
@@ -168,6 +178,7 @@ DURATION_SCALE = float(SETTINGS["duration_scale"])
 NO_TRIM_TAIL = bool(SETTINGS["no_trim_tail"])
 SEED_ENABLED = bool(SETTINGS["seed_enabled"])
 SEED_VALUE = int(SETTINGS["seed_value"])
+WATERMARK_AUDIO = bool(SETTINGS["watermark_audio"])
 
 # ffmpeg output encoding: ffmpeg's native AAC encoder into an MP4 container
 # (.m4a), always mono. Irodori-TTS renders mono, and every stereo MP3 this
@@ -478,6 +489,60 @@ def aac_stitch_command(concat_list_path, output_path):
     ]
 
 
+def run_batch_worker(jobs_path, chunks):
+    """Runs irodori_batch.py once for the whole chapter and relays its
+    progress, translating the worker's protocol lines into the same
+    "Generating chunk i/N ..." output this script has always printed - the
+    GUI progress window parses exactly that (see gui_settings._CHUNK_LINE_RE),
+    so the batching stays invisible to it.
+
+    Reading the pipe line by line (with "-u" on the worker) is what keeps the
+    progress live; buffering it would freeze the progress bar for minutes and
+    then jump."""
+    cmd = ["uv", "run", "--no-sync", "python", "-u", BATCH_SCRIPT_PATH,
+           "--jobs", jobs_path]
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=UV_PROJECT_DIR, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1,
+            encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"Error: could not start the TTS worker ({e}).")
+        return
+
+    total = len(chunks)
+    for raw_line in proc.stdout:
+        line = raw_line.rstrip()
+        if line.startswith("MODEL_LOADED "):
+            print(f"Model loaded in {line.split()[1]}s - reused for all "
+                  f"{total} chunk(s) of this chapter.")
+        elif line.startswith("CHUNK_START "):
+            i = int(line.split()[1])
+            chunk = chunks[i - 1]
+            print(f" Generating chunk {i}/{total} "
+                  f"(sec {chunk['section']:03d} par {chunk['paragraph']:03d}, "
+                  f"{len(chunk['text'])} chars, "
+                  f"silence_{chunk['silence_kind']} before "
+                  f"[{','.join(chunk['boundary_tags'])}])...")
+        elif line.startswith("CHUNK_FAIL "):
+            parts = line.split(" ", 2)
+            print(f"  ! chunk {parts[1]} failed: "
+                  f"{parts[2] if len(parts) > 2 else '(no message)'}")
+        elif line == "WATERMARK off":
+            print("SilentCipher watermarking is OFF for this run.")
+        elif line.startswith("BATCH_LOG "):
+            print(f"  Worker log: {line.split(' ', 1)[1]}")
+        elif line.startswith(("CHUNK_DONE ", "BATCH_DONE ")):
+            pass  # accounted for by the wav check below
+        elif line:
+            print(line)  # anything unexpected is worth seeing
+
+    code = proc.wait()
+    if code != 0:
+        print(f"Error: the TTS worker exited with code {code} - no audio was "
+              f"produced for this chapter.")
+
+
 def process_chapter(chapter_path):
     chapter_name = os.path.splitext(os.path.basename(chapter_path))
     print(f"\n>>> Processing: {chapter_name[0]}")
@@ -504,9 +569,10 @@ def process_chapter(chapter_path):
     # Step 3: Write out the sec/par/sen/input working files for this
     # chapter so they can be inspected if something looks off.
     work_dir = os.path.join(TEMP_DIR, chapter_name[0])
-    input_paths = write_working_files(working_data, chunks, work_dir)
+    write_working_files(working_data, chunks, work_dir)
 
-    # Step 4: Generate audio for each input chunk
+    # Step 4: Generate audio for every chunk, in ONE worker process that
+    # loads the model once (see irodori_batch.py and run_batch_worker).
     audio_files = []          # list of wav paths, in order
     silence_kind_before_wav = []  # which silence wav precedes each entry
     sync_chunk_texts = []     # chunk["display_text"] (original wording,
@@ -514,48 +580,47 @@ def process_chapter(chapter_path):
                                # audio_files - only used to build sync.json
                                # (see build_sync_data)
 
+    wav_by_index = {}
+    jobs = []
     for i, chunk in enumerate(chunks, start=1):
-        key = (chunk["section"], chunk["paragraph"], chunk["chunk"])
-        txt_filename = input_paths[key]
         wav_filename = os.path.join(
             work_dir, text_pipeline.chunk_filename(chunk, ext="wav"))
+        wav_by_index[i] = wav_filename
+        jobs.append({"index": i, "text": chunk["text"],
+                     "output_wav": wav_filename})
 
-        cmd = [
-            "uv", "run", "--no-sync", "python", "infer.py",
-            *CHECKPOINT_ARGS,
-            "--ref-embed", SPEAKER_PATH,
-            "--text", chunk["text"],
-            "--output-wav", wav_filename,
-            "--duration-scale", str(DURATION_SCALE),
-        ]
-        if NO_TRIM_TAIL:
-            cmd.append("--no-trim-tail")
-        if SEED_ENABLED:
-            cmd += ["--seed", str(SEED_VALUE)]
+    # One worker for the whole chapter instead of one infer.py per chunk.
+    # The model load dominated everything else: 19.1 s per chunk of which
+    # only ~1.9 s was generation, measured 2026-09-14. Same engine, same
+    # request parameters - verified byte-identical output on a fixed seed
+    # before this replaced the per-chunk path.
+    jobs_path = os.path.join(work_dir, "batch_jobs.json")
+    with open(jobs_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "uv_project_dir": UV_PROJECT_DIR,
+            "checkpoint": CHECKPOINT_ARGS[1],
+            "checkpoint_is_hf": CHECKPOINT_ARGS[0] == "--hf-checkpoint",
+            "speaker_path": SPEAKER_PATH,
+            "duration_scale": DURATION_SCALE,
+            "trim_tail": not NO_TRIM_TAIL,
+            "seed": SEED_VALUE if SEED_ENABLED else None,
+            "watermark": WATERMARK_AUDIO,
+            "jobs": jobs,
+        }, f, ensure_ascii=False, indent=2)
 
-        print(f" Generating chunk {i}/{len(chunks)} "
-              f"(sec {chunk['section']:03d} par {chunk['paragraph']:03d}, "
-              f"{len(chunk['text'])} chars, "
-              f"silence_{chunk['silence_kind']} before "
-              f"[{','.join(chunk['boundary_tags'])}])...")
-        result = subprocess.run(cmd, capture_output=True)
+    run_batch_worker(jobs_path, chunks)
 
+    for i, chunk in enumerate(chunks, start=1):
+        wav_filename = wav_by_index[i]
         if os.path.exists(wav_filename):
             audio_files.append(wav_filename)
             silence_kind_before_wav.append(chunk["silence_kind"])
             sync_chunk_texts.append(chunk["display_text"])
         else:
-            # Previously this branch just skipped the chunk in silence,
-            # which made any systematic infer.py failure (a bad checkpoint
-            # argument, a missing speaker file, an out-of-memory GPU) look
-            # like "nothing happened" with nothing to debug from. Print what
-            # infer.py actually said - the tail, since a traceback's last
-            # lines are the informative part.
-            stderr = result.stderr.decode("utf-8", "replace").strip()
-            print(f"  ! chunk {i} produced no audio (infer.py exit code "
-                  f"{result.returncode}):")
-            print("    " + (stderr[-600:].replace("\n", "\n    ")
-                            if stderr else "(no error output)"))
+            # The worker already said why on its CHUNK_FAIL line; this keeps
+            # the old habit of naming every chunk that produced no audio, so
+            # a systematic failure is obvious in the log rather than silent.
+            print(f"  ! chunk {i} produced no audio.")
 
     # Step 5: Combine parts into the final .m4a, inserting exactly one silence
     # file before each chunk - silence_sentence.wav, silence_paragraph.wav
