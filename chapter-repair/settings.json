@@ -1,0 +1,17 @@
+{
+  "library_root": "F:\\AUDIOBOOK-HOST-AAC",
+  "master_root": "F:\\AUDIOBOOK-HOST-MASTER",
+  "backup_root": "F:\\_backup\\chapter-repair",
+  "work_root": "F:\\tmp\\chapter-repair",
+  "irodori_root": "C:\\Irodori-TTS",
+  "batch_script": "",
+  "whisper_exe": "C:\\Transcribe\\.venv\\Scripts\\whisper.exe",
+  "whisper_model": "large-v3-turbo",
+  "whisper_language": "ja",
+  "device": "cuda",
+  "aac_bitrate": "64k",
+  "speaker_path": "",
+  "duration_scale": 1.2,
+  "no_trim_tail": false,
+  "similarity_threshold": 0.72
+}

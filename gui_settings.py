@@ -101,6 +101,10 @@ DEFAULT_SETTINGS = {
     # setting. The old mp3_bitrate / mp3_mono keys are not read - see
     # run_audiobook.py's AAC_BITRATE for why.
     "aac_bitrate": "64k",
+    # A lossless FLAC of the stitched chapter, beside the .m4a. ON by
+    # default: a master you did not keep cannot be recovered without
+    # re-rendering, while one you did not want is a single delete.
+    "keep_flac_master": True,
     # Translation subtitles. See translate_pipeline.py.
     "auto_translate_after_run": False,
     "translation_backend": "vntl",
@@ -144,6 +148,7 @@ ICON_TRIM_TAIL = ("✂", "#FCEAEA", "#D85A5A")         # ✂ scissors
 ICON_SEED = ("\U0001F331", "#E6F8ED", "#2FB668")          # 🌱 seedling
 ICON_BITRATE = ("\U0001F4CA", "#FFF1E0", "#E08A2C")       # 📊 bar chart
 ICON_WATERMARK = ("\U0001F510", "#EDEBFC", "#6C5DD3")     # 🔐 locked marker
+ICON_MASTER = ("\U0001F4BF", "#E6F8ED", "#1E8B4E")        # 💿 lossless master
 ICON_TRANSLATE = ("\U0001F310", "#E6F1FB", "#3378C9")     # 🌐 globe
 ICON_ENDPOINT = ("\U0001F517", "#EDEBFC", "#6C5DD3")      # 🔗 link
 
@@ -367,6 +372,8 @@ class SettingsApp(ctk.CTk):
             value=1 if self.settings.get("seed_enabled", False) else 0)
         self.watermark_var = ctk.IntVar(
             value=1 if self.settings.get("watermark_audio", True) else 0)
+        self.flac_master_var = ctk.IntVar(
+            value=1 if self.settings.get("keep_flac_master", True) else 0)
         self.auto_translate_var = ctk.IntVar(
             value=1 if self.settings.get("auto_translate_after_run", False) else 0)
 
@@ -630,6 +637,7 @@ class SettingsApp(ctk.CTk):
 
         self._add_bitrate_row(encoding_card)
         self._add_watermark_row(encoding_card)
+        self._add_flac_master_row(encoding_card)
 
         # Translation runs over the finished sync.json, so it belongs after
         # generation rather than inside it - see translate_pipeline.py.
@@ -1130,6 +1138,44 @@ class SettingsApp(ctk.CTk):
             "44.1 kHz resample")
         text_frame.pack(side="left", fill="x", expand=True)
 
+    def _add_flac_master_row(self, parent):
+        """A lossless FLAC of the stitched chapter, from the same concat
+        list the .m4a is built from.
+
+        It exists for chapter-repair: splicing a replacement chunk into
+        an .m4a stacks a fresh generation of AAC loss every repair,
+        while splicing into a master is always exactly one generation.
+        The masters built retroactively for the published library are
+        lossless containers around already-decoded 64k audio; one
+        written here is a genuine original.
+
+        The file lands in the output folder and the player has no use
+        for it - move it out before publishing."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_MASTER
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+
+        self.flac_master_switch = ctk.CTkSwitch(
+            row, text=self._flac_master_text(bool(self.flac_master_var.get())),
+            variable=self.flac_master_var, onvalue=1, offvalue=0,
+            progress_color=COLOR_TOGGLE_ON, button_color="white",
+            switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
+            font=ctk.CTkFont(size=12), command=self._on_flac_master_changed)
+        self.flac_master_switch.pack(side="right")
+
+        text_frame = self._title_block(
+            row, "Keep FLAC master",
+            "Lossless copy beside the .m4a, so a later repair costs no quality")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+    def _flac_master_text(self, enabled):
+        return "ON (kept)" if enabled else "OFF (not written)"
+
+    def _on_flac_master_changed(self):
+        self.flac_master_switch.configure(
+            text=self._flac_master_text(bool(self.flac_master_var.get())))
+
     def _watermark_text(self, enabled):
         return "ON (watermarked)" if enabled else "OFF (skipped)"
 
@@ -1388,6 +1434,7 @@ class SettingsApp(ctk.CTk):
             "watermark_audio": bool(self.watermark_var.get()),
             "seed_value": seed_value,
             "aac_bitrate": aac_bitrate,
+            "keep_flac_master": bool(self.flac_master_var.get()),
             "auto_translate_after_run": bool(self.auto_translate_var.get()),
             "translation_backend": self.translation_backend_var.get(),
             "llama_server_url": self.vars["llama_server_url"].get().strip(),
@@ -1442,6 +1489,7 @@ class SettingsApp(ctk.CTk):
         self.no_trim_tail_var.set(1 if merged["no_trim_tail"] else 0)
         self.seed_enabled_var.set(1 if merged["seed_enabled"] else 0)
         self.watermark_var.set(1 if merged["watermark_audio"] else 0)
+        self.flac_master_var.set(1 if merged["keep_flac_master"] else 0)
         self.auto_translate_var.set(1 if merged["auto_translate_after_run"] else 0)
 
         for key in ("author_name", "book_title", "genre", "cover_art_path"):

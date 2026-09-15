@@ -408,6 +408,12 @@ def write_job_file(path, spec, jobs, irodori_root):
         "watermark": False,
         "jobs": jobs,
     }
+    # Only when a caller asks for it. Absent, irodori_batch.py leaves the
+    # engine's 30 s ceiling alone, which is what every chapter so far was
+    # rendered with. The chapter-repair tool raises it for a chunk whose
+    # text genuinely needs longer than 30 seconds to speak.
+    if spec.get("max_seconds"):
+        payload["max_seconds"] = float(spec["max_seconds"])
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 

@@ -98,6 +98,90 @@ is deliberate.
   against `r2:shama-audiobooks`: all 71 `sync.json` match by hash, and
   none has a chunk opening on a closing bracket or containing `──`.
   rclone's `lsl` timestamps are UTC; local time here is +0800.
+
+  ### Chunking overhaul, 2026-09-16
+
+  Four changes in one pass, after `wall/chapter_013` #35 came back as a
+  175-character chunk against a `max_chunk_length` of 40.
+
+  **1. `merge_units()` lost track of the remainder.** When a sentence
+  overflowed the hard limit it split at ONE break point and put the whole
+  remainder into the buffer without ever re-measuring it. Worse, the next
+  sentence's break search measures `buffer + text[:p]` - which an
+  oversized buffer already exceeds - so it fell through to “accept the
+  overflow” and glued another whole sentence on top. chapter_013's
+  129-character unit (commas at 7, 16, 60, 90, 104 - five usable points)
+  became a 17-char chunk plus a 112-char remainder, which then grew to
+  175. Now the buffer closes and the rest is broken down by
+  `_split_oversized()` until every piece fits.
+
+  **2. `！` `!` `?` are break points, NOT terminators.** This distinction
+  is the whole point and was settled by measurement, not intuition. Same
+  carrier sentence with no grammatical break at the insertion point, two
+  independent seeds agreeing:
+
+  | symbol | gap seed A | gap seed B | |
+  |---|---|---|---|
+  | (nothing) | 0.81 s | 0.59 s | baseline |
+  | `、` | 1.01 | 1.05 | pauses |
+  | `。` | 1.14 | 1.25 | pauses |
+  | `？` | 1.16 | 1.49 | pauses |
+  | `……` | 2.03 | 2.17 | pauses hardest |
+  | `＊` | 1.16 | 1.25 | pauses, but as TWO silences - it stumbles |
+  | `！` | 0.36 | 0.36 | **no pause - SHORTER than baseline** |
+  | `─` | 0.81 | 0.59 | **identical to no symbol - deleted** |
+
+  `！` does not merely fail to cue a pause, it shortens the natural gap:
+  an intonation cue, not a break. Promoting it to a terminator would
+  split there and insert a full silence wav the model never wanted, so
+  `戦争が始まりました！！` would be followed by a second of nothing. As a
+  fallback break point it costs nothing: a normal exclamation stays whole
+  and only an over-long run is cut there. The ascii `?` is included
+  because only the full-width `？` was ever a terminator and the library
+  has 18 of the ascii form.
+
+  The `─` row independently confirms Irodori's `text_normalization.py`,
+  which deletes the whole dash range outright - so our `─` -> `、` rule
+  is doing real work, not duplicating the engine. Without it the beat
+  would vanish silently.
+
+  **3. Invisible characters are stripped** (`INVISIBLE_RE`). 20 of the 82
+  chapter files start with a UTF-8 BOM, and `open(..., encoding="utf-8")`
+  keeps it (only `utf-8-sig` strips it). `str.strip()` does not touch
+  U+FEFF - it is a format character, not whitespace - and neither did
+  Irodori's normalizer, so it was reaching the engine as the first
+  character of those chapters' first chunk.
+
+  **4. `CLOSING_BRACKETS` widened** from `」』）` to include `〉》】〟)`.
+  A scan of all 82 files found `〉` x83, `】` x8, `》` x7, `〟` x6, none of
+  them covered by the rule that keeps a closer with the sentence it
+  closes. One published chunk already opens on one: yojo-senki/
+  chapter_002 #185 starts with `》`. That one is text-only and therefore
+  back-applicable like the 2026-09-11 fix, because Irodori deletes `《》`
+  outright and the audio never spoke it.
+
+  **Measured across all 69 source chapters, old vs new:**
+
+  | | before | after |
+  |---|---|---|
+  | chunks over the hard limit | 474 | **14** |
+  | chunks that would hit the 30 s ceiling | 52 | **0** |
+  | longest chunk | 222 chars | 93 |
+  | chunks opening on a closing bracket | 2 | 0 |
+  | chapters whose first chunk carries a BOM | 15 | 0 |
+  | total chunks | 7,754 | 8,202 (+5.8%) |
+
+  **Not one character of text changed**: for all 82 chapters the
+  concatenation of every `display_text` is identical before and after,
+  apart from the removed BOMs. No empty chunks, none punctuation-only.
+  The 14 still over the limit have 0 or 1 break points in them - genuinely
+  unsplittable sentences, the documented fallback - and none of them
+  reaches the ceiling.
+
+  **None of this can be back-applied.** Chunk boundaries are fixed by
+  rendered audio, so existing books keep their chunking until re-rendered;
+  their over-long chunks stay a `chapter-repair` job.
+
 - `translate_pipeline.py` — subtitle generation. Stdlib only, so it runs
   unchanged in either venv. See the Translation section below.
 - `audio_metadata.py` — tagging (mutagen): MP4 atoms on `.m4a`, ID3 on a
@@ -211,6 +295,174 @@ through emptied folders, stopping at the configured temp root. A tool
 that recursively deletes a user-supplied path on exit is one typo from
 being a disaster, so `remove_paths()` never takes that shortcut.
 
+
+## `chapter-repair/` — the third separate tool, and the only one that
+writes to the published library
+
+Post-publication, where the other two are pre-generation. A finished
+chapter occasionally has a spot where the TTS hallucinated - a sentence
+read half way, words not in the book, an ad-libbed noise - and you find
+it by listening, which for a long book means after publishing. This
+replaces that one chunk instead of re-rendering the chapter.
+
+Built 2026-09-14. It imports `text_pipeline` (to recover a chunk's TTS
+text from its reader-facing text) and two functions from
+`seiyuu-audition/audition.py` (`write_job_file`, `run_worker`) so the
+replacement comes out of the same engine as its neighbours. Separate
+tool, not a mode of the audition tool, because they belong to different
+phases of publication.
+
+**Why splicing is safe at all** - measured on after-dark/chapter_001,
+not assumed:
+
+- the gaps between chunks are pure silence at the configured durations
+  (112 gaps of exactly 1.000 s, 4 of 1.300 s), so a cut at a chunk
+  boundary never lands mid-word;
+- `sync.json` describes the timeline exactly - last `end` 2740.98
+  against a file duration of 2740.980000;
+- the `.srt` is a mirror of `sync.json` - 117 cues for 117 chunks with
+  ZERO differing timestamps;
+- **the text never changes.** A hallucination is wrong audio for correct
+  text, so `sync.json`'s text, the translations and the English cues all
+  stay valid. Everything after a repaired chunk shifts by ONE number.
+
+Several chunks can be fixed in a single pass: takes are kept per chunk,
+choosing one queues it, and Apply does one splice, one encode and one
+backup for the whole batch. Beyond speed that buys two things - a chapter
+is never left partly repaired between two applies, and the Whisper scan
+survives the batch, where fixing one chunk at a time would mean
+re-transcribing after every single fix.
+
+**The `.srt` is edited in place, never re-emitted.** The published
+folders carry no `.translation.json` (those stay in `AUDIOBOOK_OUTPUT`),
+so there is nothing to re-emit from, and an existing `.srt` may hold
+hand corrections. Times are mapped by TIME, not by cue index - which is
+what keeps it correct on the two sputnik chapters whose cue count does
+not match their chunk count.
+
+**faststart is verified after every re-encode**, by reading the
+top-level atom order back; a file whose `moov` landed after `mdat` is
+refused rather than published. Tags are copied from the OLD FILE, not
+rebuilt from the generator's `settings.json` - that now describes
+whatever book was generated last, and a chapter with no title is a
+regression.
+
+### The 30-second ceiling (found 2026-09-14)
+
+**Not every bad chunk is a hallucination.** `irodori_tts` clamps its
+duration predictor to `SamplingRequest.max_seconds`, default **30.0**
+(`inference_runtime.py:217`; the clamp is `latent_steps = max(min_frames,
+min(max_frames, latent_steps))` around line 1314). `infer.py` does not
+expose it and nothing in this repo ever set it, so **every chapter ever
+rendered used a 30 s ceiling**.
+
+Text needing longer is NOT truncated - it is crammed into 30 s and the
+middle garbles. **68 chunks in the published library sit at exactly
+30.00 s.** They are findable from `sync.json` alone: no Whisper, no GPU,
+the whole library in about a second (`repair.duration_rows`).
+
+**Hitting the ceiling is not itself damage.** A chunk can land on it
+because the book's `duration_scale` asked for more than 30 s while still
+reading at a normal rate. What garbles audio is speaking FASTER than the
+book does, so ranking uses each capped chunk's characters-per-second
+against ITS OWN CHAPTER's median (pace is per-book: wall ~4.0 ch/s,
+yojo-senki ~5.1). Of the 68: **14 read 15%+ above their chapter's pace**,
+47 sit at or below it and are probably fine.
+
+Proven on yojo-senki/chapter_002 #97 (207 chars, published at 30.00 s and
+6.90 ch/s against the chapter's 5.13), same seed, the book's real
+settings (tanya, duration_scale 1.5):
+
+| | duration | pace |
+|---|---|---|
+| engine default | 30.00 s (clamped) | 6.90 ch/s |
+| max_seconds 50 | **41.16 s** | 5.03 ch/s |
+
+No OOM at 41 s on the 8 GB card; 44 s to generate.
+
+**But raising the ceiling is NOT the fix.** The 41.16 s render was judged
+by ear on 2026-09-15 and was still gibberish - differently broken, not
+better. The reason is in Irodori's own training configs: all ten set
+`max_latent_steps: 750`, which is exactly the 30 s the inference default
+allows. **The ceiling is the trained window**, not an arbitrary limit, so
+a 41 s request is outside anything the model has ever seen. The
+generator's chunking is not a convenience - it is what keeps every
+request inside that window.
+
+The fix is to SPLIT the chunk (`repair.split_for_repair`): cut only at
+terminators - `。？……` plus `！` and `!` - with a zero-width cut, so the
+pieces rejoin byte-identically. Piece length comes from the chapter's own
+median chunk so they match their neighbours' texture. #97's 207
+characters become five requests of 46/51/25/35/50, longest 10.3 s of
+audio, rendered in ONE worker run and joined into one wav that is spliced
+in like any other take.
+
+**Nothing downstream changes**: `sync.json` keeps ONE entry for #97 with
+its original 207-character text, the `.srt` keeps ONE cue, chunk and cue
+counts do not move. Only audio and duration change (30.0 s -> 42.56 s
+butt-joined, 43.56 s with 0.25 s gaps). The gap between pieces is the one
+audible difference from a single perfect render and is an ear decision.
+
+`max_seconds` stays as an escape hatch but is deliberately NOT pre-filled
+for a capped chunk - reaching for it is the wrong instinct.
+
+For the record, the measurement that led here (still valid, still useful
+for understanding the clamp):
+**`max_seconds` and `duration_scale` are a pair.** Raising the ceiling
+alone does nothing if the scale is low - the predictor never asks for the
+room. The first run of this test used scale 1.1 instead of the book's 1.5
+and produced 30.16 s, which read as “the fix does not work”. Always
+reproduce at the settings the chapter was actually rendered with; the
+snapshot in the book's `AUDIOBOOK_OUTPUT` folder records them.
+
+`irodori_batch.py` accepts an optional `max_seconds` in its job file.
+**Absent, nothing changes** - the engine default applies, exactly as every
+chapter so far. Only chapter-repair sets it.
+
+Why these chunks got so long in the first place: the terminator set is
+`。？……`. The yojo-senki passage uses half-width `!` six times and `！`
+once, neither of which is a terminator, so 156 characters pass before the
+first `。` and the run cannot be split at any chunk length. **Adding `！`
+and `!` to `TERMINATOR_RE` would prevent most of these** - not yet done,
+and unlike the bracket fix it CANNOT be back-applied, because chunk
+boundaries are tied to rendered audio.
+
+**Finding the bad chunk is the actual value.** Whisper transcribes the
+chapter once and every chunk is scored against the text it should have
+read, worst first, on two signals: a low similarity catches invented
+words, and a length ratio far from 1 catches a sentence abandoned half
+way or an ad-lib tacked on. It is a SHORTLIST, not a verdict - Whisper
+mishears too (see the onboarder's `えへへ。`), so the window always shows
+the script, the transcript and a play button together.
+
+### FLAC masters - `F:\AUDIOBOOK-HOST-MASTER` (built 2026-09-14)
+
+`make_masters.py` built one per published chapter: 71 of 71 verified by
+comparing the decoded PCM MD5 of the `.m4a` and the FLAC, 1.1 GB of
+`.m4a` to 4.83 GB of FLAC in 4.5 minutes, recorded in `_masters.json`.
+
+**They are not lossless originals** and cannot be - the audio inside is
+what the `.m4a` decodes to. What they buy is that damage stops
+compounding: with a master every repair is exactly ONE encode generation
+from today's audio however many repairs happen, and the replacement
+chunk arrives pristine from the TTS. Repairing straight from an `.m4a`
+stacks a generation every time.
+
+A master runs 0.012 s longer than its `sync.json` total - the AAC
+decoder's final-frame padding, inherited once when the master was made
+from the `.m4a`. Measured across two consecutive repairs of one chapter
+it was still exactly 0.012 s, because repairs splice master to master.
+It does not compound and it is not drift.
+
+`sandbox_test.py` repairs a COPY of a real chapter and checks 18 things
+(earlier chunks untouched, later ones shifted by exactly the delta,
+silence gaps preserved, text unchanged, `.srt` still mirroring
+`sync.json`, faststart, tags, cover, backup). It needs no GPU. Run it
+after touching `repair.py`.
+
+Still to do: teach `run_audiobook.py` to keep its own FLAC master at
+render time, which would make future chapters' masters genuinely
+lossless. Agreed 2026-09-14, deferred until this tool had been used.
 
 ## Conventions worth not breaking
 

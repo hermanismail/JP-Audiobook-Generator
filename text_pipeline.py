@@ -104,6 +104,15 @@ import re
 IDSP = "\u3000"  # ideographic space (full-width space)
 INLINE_WHITESPACE_RE = re.compile(r"[ \t" + IDSP + r"]")
 
+# Invisible characters that must never reach the TTS. U+FEFF is the UTF-8
+# BOM: 20 of the 82 chapter files in the library start with one, and
+# open(..., encoding="utf-8") keeps it (only "utf-8-sig" strips it), so it
+# was travelling into the first chunk of those chapters as the first
+# character the engine saw. Neither our cleaning nor Irodori's normalizer
+# removed it - str.strip() does not touch U+FEFF, which is a format
+# character, not whitespace.
+INVISIBLE_RE = re.compile(r"[\ufeff\u200b\u200c\u200d\u2060]")
+
 # A run of box-drawing dashes ("\u2500\u2500", the conventional Japanese double dash)
 # is reduced to a single "\u2500" at paragraph-cleaning time, so both the reader
 # text in sync.json and the chunk-length accounting see one character. The
@@ -115,11 +124,43 @@ DASH_RUN_RE = re.compile(DASH + "+")
 # right after the terminator in "…から？」彼女は…" left the "」" at the start
 # of the NEXT sentence - and so at the start of the next chunk and its
 # sync.json text, where the reader app showed a stray "」" opening a line.
-CLOSING_BRACKETS = "」』）"
+# Widened 2026-09-16 after scanning all 82 chapter files: the library also
+# uses 〉(83), 】(8), 》(7) and 〟(6), none of which were listed, so the
+# rule that keeps a closer with the sentence it closes did not apply to
+# them. One published chunk already opens on one - yojo-senki/chapter_002
+# #185 starts with "》". (Its audio is unaffected: Irodori's normalizer
+# deletes 《》 outright, so that one is a text-only repair, exactly like
+# the 」 fix of 2026-09-11.)
+CLOSING_BRACKETS = "」』）〉》】〟)"
 
 # A terminator plus any closing brackets straight after it, as one token.
-TERMINATOR_RE = re.compile(r"((?:。|？|……)[" + CLOSING_BRACKETS + r"]*)")
+TERMINATOR_RE = re.compile(r"((?:。|？|……)[" + re.escape(CLOSING_BRACKETS) + r"]*)")
 COMMA = "、"
+
+# Where an over-long sentence may be cut when it has no terminator.
+#
+# 、 has always been here. ！ ! ? were added 2026-09-16, and deliberately
+# NOT as terminators, because of what the engine actually does with them.
+# Measured on a carrier sentence with no grammatical break at the
+# insertion point, two independent seeds agreeing:
+#
+#   (nothing)  0.81 / 0.59 s gap      ！  0.36 / 0.36 s  - NO pause
+#   、          1.01 / 1.05 s  pauses  ？  1.16 / 1.49 s  - pauses
+#   。          1.14 / 1.25 s  pauses  ……  2.03 / 2.17 s  - pauses hardest
+#
+# So ！ does not merely fail to cue a pause, it SHORTENS the natural gap -
+# it is an intonation cue, not a break. Promoting it to a terminator would
+# split there and insert a full silence wav the model never wanted, and
+# "戦争が始まりました！！" would be followed by a second of nothing.
+#
+# As a fallback split point it costs nothing: a normal-length exclamation
+# is left whole, and a 173-character run gets cut at one only because the
+# alternative is the engine's 30 s ceiling and the garbling that follows.
+# The ascii ? is here for the same reason it should have been a terminator
+# all along - only the full-width ？ was ever listed, and the library has
+# 18 of the ascii form.
+BREAK_CHARS = COMMA + "！!?"
+BREAK_RUN_RE = re.compile("[" + re.escape(BREAK_CHARS) + "]+")
 
 SOFT_LIMIT = 100
 HARD_LIMIT = 130
@@ -198,6 +239,7 @@ def split_paragraphs(section_text):
     Returns a single-element list (or [] if the section is blank) so the
     section/paragraph working-file structure and indices are unchanged."""
     cleaned = INLINE_WHITESPACE_RE.sub("", section_text.replace("\n", ""))
+    cleaned = INVISIBLE_RE.sub("", cleaned)
     cleaned = DASH_RUN_RE.sub(DASH, cleaned)
     return [cleaned] if cleaned.strip() else []
 
@@ -223,6 +265,59 @@ def split_sentences(paragraph_text):
     if buf.strip():
         sentences.append(buf)
     return sentences
+
+
+def _best_break(text, soft_room, hard_room):
+    """Index just past the best break point in `text`, or None.
+
+    Prefers the LATEST point that still fits `soft_room`, falling back to
+    the latest that fits `hard_room` - the same preference the comma
+    search has always had, so a chunk is filled rather than cut early.
+
+    Any closing brackets straight after the break travel with it, for the
+    reason split_sentences() does the same: otherwise the next chunk opens
+    on a stray "」". That can take the piece a character or two past the
+    room it was measured against, which is accepted.
+
+    A break at the very end of `text` is not a break - splitting there
+    would produce an empty remainder."""
+    def end_of(match):
+        end = match.end()
+        while end < len(text) and text[end] in CLOSING_BRACKETS:
+            end += 1
+        return end
+
+    for room in (soft_room, hard_room):
+        best = None
+        for match in BREAK_RUN_RE.finditer(text):
+            end = end_of(match)
+            if end >= len(text):
+                continue
+            if end <= room:
+                best = end
+        if best is not None:
+            return best
+    return None
+
+
+def _split_oversized(text, soft_limit, hard_limit):
+    """Breaks one over-long sentence into pieces that fit, repeatedly.
+
+    Returns at least one piece. A piece still longer than the hard limit
+    means the sentence genuinely has no break point left in it - the
+    documented fallback, where letting the chunk run long beats cutting a
+    sentence off unfinished."""
+    pieces = []
+    rest = text
+    while len(rest) > hard_limit:
+        best = _best_break(rest, soft_limit, hard_limit)
+        if best is None:
+            break
+        pieces.append(rest[:best])
+        rest = rest[best:]
+    if rest:
+        pieces.append(rest)
+    return pieces
 
 
 def merge_units(units, soft_limit=SOFT_LIMIT, hard_limit=HARD_LIMIT):
@@ -261,37 +356,37 @@ def merge_units(units, soft_limit=SOFT_LIMIT, hard_limit=HARD_LIMIT):
             flush()
             continue
 
-        # candidate exceeds the hard limit - look for a 、 split point
-        # inside the sentence that just caused the overflow.
-        comma_positions = [m.start() for m in re.finditer(COMMA, text)]
-
-        best = None
-        for p in comma_positions:
-            if len(buffer_text + text[: p + 1]) <= soft_limit:
-                best = p  # keep the latest (largest) position under the soft limit
-        if best is None:
-            for p in comma_positions:
-                if len(buffer_text + text[: p + 1]) <= hard_limit:
-                    best = p
-
-        if best is not None:
-            # Carry any closing brackets straight after the 、 along with
-            # it, for the same reason split_sentences() does - otherwise the
-            # next chunk opens on a stray "」". This can take the chunk a
-            # character or two past the limit it was measured against.
-            end = best + 1
-            while end < len(text) and text[end] in CLOSING_BRACKETS:
-                end += 1
-            buffer_text = buffer_text + text[:end]
+        # The incoming sentence takes us past the hard limit.
+        #
+        # Before 2026-09-16 this split `text` at ONE break point and put
+        # the whole remainder into the buffer without ever re-measuring
+        # it, and then - because the next sentence's break search measures
+        # `buffer + text[:p]`, which an oversized buffer already exceeds -
+        # fell through to "accept the overflow" and glued another whole
+        # sentence on top. wall/chapter_013's 129-character unit (commas
+        # at 7, 16, 60, 90, 104 - five usable points) became a 17-char
+        # chunk plus a 112-char remainder, which then grew to 175: the
+        # worst capped chunk in the published library.
+        #
+        # Now the buffer closes, and whatever is left is broken down on
+        # its own until every piece fits.
+        if buffer_text:
+            head = _best_break(text, soft_limit - len(buffer_text),
+                               hard_limit - len(buffer_text))
+            if head is not None:
+                buffer_text += text[:head]
+                rest = text[head:]
+            else:
+                rest = text
             flush()
-            remainder = text[end:]
-            if remainder.strip():
-                buffer_text = remainder
         else:
-            # No usable comma - accept the overflow rather than cut the
-            # sentence off unfinished.
-            buffer_text = candidate
+            rest = text
+
+        pieces = _split_oversized(rest, soft_limit, hard_limit)
+        for piece in pieces[:-1]:
+            buffer_text = piece
             flush()
+        buffer_text = pieces[-1] if pieces else ""
 
     flush()
     return chunks

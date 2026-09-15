@@ -136,6 +136,22 @@ def main():
             )
 
             seed = spec.get("seed")
+            # SamplingRequest.max_seconds defaults to 30.0 and the runtime
+            # CLAMPS the predicted duration to it
+            # (inference_runtime.py: latent_steps = max(min_frames,
+            # min(max_frames, latent_steps))). A chunk whose text needs
+            # longer is not truncated - it is crammed into 30 s, which is
+            # what garbles the middle of very long chunks. 68 chunks in the
+            # published library sit at exactly 30.00 s for this reason.
+            #
+            # Absent from a job file, nothing changes: the engine default
+            # applies, exactly as every chapter rendered so far. Only the
+            # repair tool sets it, and only for a chunk that needs it.
+            extra = {}
+            if spec.get("max_seconds"):
+                extra["max_seconds"] = float(spec["max_seconds"])
+                emit(f"MAX_SECONDS {extra['max_seconds']:.1f}")
+
             for job in jobs:
                 index = int(job["index"])
                 emit(f"CHUNK_START {index}")
@@ -149,6 +165,7 @@ def main():
                         cfg_scale_text=cfg_text,
                         cfg_scale_caption=cfg_caption,
                         cfg_scale_speaker=cfg_speaker,
+                        **extra,
                     ))
                     save_wav(job["output_wav"], result.audio, result.sample_rate)
                     emit(f"CHUNK_DONE {index} {result.used_seed}")

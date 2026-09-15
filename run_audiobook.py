@@ -42,6 +42,7 @@ DEFAULT_SETTINGS = {
     # Output encoding. The chapter is always mono AAC in an .m4a; only the
     # bitrate is a setting. See AAC_BITRATE below.
     "aac_bitrate": "64k",
+    "keep_flac_master": True,
     # Translation subtitles. See translate_pipeline.py.
     "auto_translate_after_run": False,
     "translation_backend": "vntl",
@@ -191,6 +192,23 @@ WATERMARK_AUDIO = bool(SETTINGS["watermark_audio"])
 # chosen for stereo MP3 (320k, in older presets) is meaningless for AAC and
 # would silently produce files five times larger than they need to be.
 AAC_BITRATE = str(SETTINGS["aac_bitrate"])
+
+# Keep a lossless FLAC of the stitched chapter beside the .m4a.
+#
+# Why it earns its disk: chapter-repair splices a replacement chunk into a
+# chapter and re-encodes. Done against the .m4a that stacks a fresh
+# generation of AAC loss every repair; done against a master it is always
+# exactly one generation from the master, however many repairs happen. The
+# 71 masters built retroactively in F:\AUDIOBOOK-HOST-MASTER are lossless
+# CONTAINERS around already-decoded 64k audio - the best that could be done
+# after the fact. One written here is a genuine lossless original, because
+# it comes from the same wavs the encoder sees.
+#
+# Default ON: a master you did not keep cannot be recovered without
+# re-rendering the chapter, while one you did not want is a single delete.
+# It lands in the output folder and is NOT something the player wants - move
+# or delete it before publishing.
+KEEP_FLAC_MASTER = bool(SETTINGS["keep_flac_master"])
 
 # Extensions a finished chapter can have, preferred first. .m4a is what this
 # script writes now; .mp3 is what it wrote before. A chapter that already has
@@ -489,6 +507,30 @@ def aac_stitch_command(concat_list_path, output_path):
     ]
 
 
+def flac_master_command(concat_list_path, output_path):
+    """The lossless master, built from the SAME concat list the .m4a is.
+
+    Deliberately a second pass over that list rather than encoding the
+    .m4a from the FLAC: the concat -> AAC path is the one whose timing was
+    verified sample-exact, and it stays untouched. FLAC is lossless, so
+    both encoders receive byte-identical PCM and the master is a faithful
+    record of what was encoded.
+
+    No `-ac`: the master preserves the TTS output as it is. The .m4a
+    downmixes to mono because that is a delivery decision, and a master
+    should not bake a delivery decision in."""
+    return [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_list_path,
+        "-c:a", "flac",
+        "-sample_fmt", "s16",
+        "-compression_level", "8",
+        output_path,
+    ]
+
+
 def run_batch_worker(jobs_path, chunks):
     """Runs irodori_batch.py once for the whole chapter and relays its
     progress, translating the worker's protocol lines into the same
@@ -667,6 +709,26 @@ def process_chapter(chapter_path):
                         if stderr else "(no error output)"))
         return
     print(f"Done! Saved to: {output_audio}")
+
+    # Step 5a: the lossless master, from the same concat list. A failure
+    # here must not cost the chapter - the .m4a, sync.json and the
+    # subtitles are all still correct without it, so it warns and carries
+    # on rather than returning.
+    if KEEP_FLAC_MASTER:
+        master_path = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.flac")
+        master = subprocess.run(flac_master_command(concat_list_path, master_path),
+                                capture_output=True)
+        if master.returncode != 0 or not os.path.exists(master_path):
+            stderr = master.stderr.decode("utf-8", "replace").strip()
+            print(f"Warning: could not write the FLAC master (exit code "
+                  f"{master.returncode}). The chapter itself is fine.")
+            print("    " + (stderr[-400:].replace("\n", "\n    ")
+                            if stderr else "(no error output)"))
+        else:
+            size = os.path.getsize(master_path) / (1024 * 1024)
+            print(f"Master saved to: {master_path} ({size:.1f} MB)")
+            print("    Move it out of the output folder before publishing - "
+                  "the player has no use for it.")
 
     # A regenerated chapter can leave an .mp3 from before the switch to AAC.
     # The player prefers the .m4a so it is harmless there, but that .mp3 is
