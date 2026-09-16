@@ -214,3 +214,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# book-profiler keeps its settings local, like the other tools' settings.json
+book-profiler/settings.json
