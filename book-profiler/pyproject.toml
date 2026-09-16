@@ -7,10 +7,14 @@ authors = [
     { name = "hermanismail", email = "hermanismail@gmail.com" }
 ]
 requires-python = ">=3.12"
-# Stage 1 (the text analyser) is stdlib only. No torch, no irodori_tts: the
+# Stages 1-4 are stdlib only; customtkinter is for the listening test's
+# Results window, reused from seiyuu-audition. No torch, no irodori_tts: the
 # TTS runs in the Irodori-TTS venv through the generator's irodori_batch.py,
 # exactly as seiyuu-audition and chapter-repair reach it.
-dependencies = []
+dependencies = [
+    "customtkinter>=6.0.0",
+    "pillow>=12.3.0",
+]
 
 [tool.uv]
 package = false
