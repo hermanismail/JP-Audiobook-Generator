@@ -89,7 +89,8 @@ is deliberate.
   audio slot — left by an older bracket-edge splitter at broken-off speech —
   and were merged into the chunk before (its `end` stretched over the slot,
   later chunks renumbered). Those two chapters therefore have one fewer
-  chunk than their `.srt` has cues; the extra cue is time-matched, so it
+  chunk than their `.srt` has cues; the extra cue is time-matched, so it
+
   still displays correctly.
 
   The repaired files were published to R2 the same evening (objects
@@ -181,6 +182,36 @@ is deliberate.
   **None of this can be back-applied.** Chunk boundaries are fixed by
   rendered audio, so existing books keep their chunking until re-rendered;
   their over-long chunks stay a `chapter-repair` job.
+
+  ### Dynamic profile mode functions, 2026-09-16
+
+  `text_pipeline.py` also carries the text rules for the planned **dynamic
+  profile mode** (see `book-profiler/` below). They are ADDITIVE:
+  `build_chunks()` and `prepare_tts_text()` are untouched, proven by
+  comparing them against the previous module over 103 chapter files at
+  chunk lengths 40 and 100 - 20,581 chunk lists, 0 differences.
+
+  - `dynamic_sentences(raw)` - a **line break ends a sentence** as well as
+    `。？……`. Normal mode joins an author's lines, and because dialogue in
+    these books closes with `」` and no `。`, 910 of yojo-senki's 7,020
+    "sentences" were a dialogue line welded to the narration after it -
+    including its longest (168 chars; 134 with line breaks).
+  - `split_for_length(text, limit, measure)` - cuts a sentence longer than
+    the seiyuu's comfortable length after `、」）)` or before `「（(` (0.7 s
+    `comma` silence) or after `！!?` (1.0 s `sentence` silence). The whole
+    set of cuts is chosen at once - fit the limit if possible, then fewest
+    pieces, then most even - and no piece is shorter than
+    `DYNAMIC_MIN_PIECE` (5). A greedy latest-cut-that-fits was tried first
+    and stranded requests like `と。` and `だから、`.
+  - `prepare_tts_text_dynamic(text)` - `prepare_tts_text()` plus: `×` is
+    stripped; `（）()` are treated like `「」` (removed at an edge, else `、`);
+    four-digit kanji years (`一九二三年` -> `1923年`) and every other
+    positional kanji number holding a `〇` (`高度四三〇〇` -> `4300`) go to
+    digits, because Irodori's normaliser turns `〇` into `○`. A run touching
+    `十百千万` (`二〇十三年`) is left alone.
+
+  All of it is a boundary rule for future renders only - nothing to
+  back-apply.
 
 - `translate_pipeline.py` — subtitle generation. Stdlib only, so it runs
   unchanged in either venv. See the Translation section below.
@@ -464,6 +495,83 @@ Still to do: teach `run_audiobook.py` to keep its own FLAC master at
 render time, which would make future chapters' masters genuinely
 lossless. Agreed 2026-09-14, deferred until this tool had been used.
 
+## `book-profiler/` — the fourth separate tool: a recipe per book and seiyuu
+
+Built 2026-09-16/17 on branch `book-profiler`. Pre-generation, like the
+audition tool, but it answers a different question: instead of one
+hand-picked `duration_scale` / chunk length for a whole book, what should
+each sentence get with THIS seiyuu, and does one recipe hold for the whole
+book? Its output is a profile the generator's planned **dynamic profile
+mode** will read (two modes on Advanced: normal = today, dynamic = a
+profile). CLI only for now; the GUI comes after the listening test.
+
+Imports, all deliberate and one-way: `text_pipeline` (sentences, cut rules,
+TTS text), `chapter-repair/repair.py` (`similarity()`,
+`run_streaming()`), and the generator's `irodori_batch.py` as the TTS.
+Own venv, own `settings.json` (gitignored). Output on F: under
+`F:\tmp\book-profiler\<book>\<scope>\`.
+
+| stage | script | GPU | what it does |
+|---|---|---|---|
+| 1 | `analyze.py` | no | book or chosen chapters -> sentence lengths in ENGINE characters (after `prepare_tts_text_dynamic` AND Irodori's own `normalize_text`, loaded by file path because `irodori_tts/__init__` imports torch), structure, cut table for candidate lengths, symbol inventory marked measured / judged by ear / unmeasured / removed, 7 length-step sentences per chapter |
+| 2 | `irodori_batch.py` | - | per-job `duration_scale`, `seed`, `seconds` (see TTS batching) |
+| 3 | `sweep.py` | yes | each step sentence at scales 1.0-1.8, seeded + random arms, 3 takes each; resumable by per-take marker; a fresh worker every 80 takes |
+| 4a | `score.py` | yes | Whisper over every take (one call per step/arm folder), scored with `repair.similarity()` |
+| 4b | `recipe.py` | no | per-chapter and book recipes -> `profile_*.json` + `recipe.md` |
+
+**The recipe formula (agreed 2026-09-16).** Per length step: a scale is
+clean when no take is flagged; faster = the lowest scale with only clean
+scales above it, + 0.1; slower = the highest clean scale (1.8 is the top
+tested); default = midway. A sentence uses the next LONGER step. A flagged
+take with at most 6 wrong characters that keeps its sentence ending is a
+**word slip** (`玉響` read たまひょう, `議事進行` heard `疑似信仰`) and moves
+nothing; a step of 6 characters or fewer cannot show a hallucination and
+is not judged. The book recipe is the cautious envelope of the chapter
+recipes; book L is the shortest length where some chapter failed, or the
+longest measured if none did.
+
+**First result - yojo-senki x tanya, 6 chapters (chapter_007, the
+afterword, skipped), 2,268 takes.** One book recipe is viable and no
+length limit was found (L = 116):
+
+| engine chars | faster | default | slower |
+|---|---|---|---|
+| 1–32 | 1.5 | 1.7 | 1.8 |
+| 33–44 | 1.3 | 1.6 | 1.8 |
+| 45–116 | 1.4 | 1.6 | 1.8 |
+
+The 1–32 band is set by two short sentences with hard readings
+(`玉響の安息`, `左腕一本で…`), not by short sentences in general.
+
+**What the sweep established - measured, not assumed:**
+
+- **A take's length is fixed by text x scale.** All 6 takes of a sentence
+  at a scale came out the same length to the sample, seeded or random,
+  and exactly probe x scale (63 of 63 cells in chapter_001, 0 off
+  prediction). The seed changes what is spoken, not how long it lasts. So
+  one probe per step predicts every scale, and the repeats exist only for
+  hallucination, which IS random.
+- **Hallucination comes from reading too FAST.** Every chapter's flags sat
+  at 1.0-1.3; none anywhere at 1.4 or above.
+- **Pace predicts it better than length.** Flag rate by engine characters
+  per second over all judged takes: 0.3% at 5.0, 2.1% at 6.0, 9.1% at 6.5,
+  20% at 7.0, 53% at 7.5, 83% at 8.0, 100% at 9.0. Each sentence has its
+  own pace at 1.0 (6.3-9.2 ch/s): chapter_003's 32-character step reads at
+  9.2 and needed 1.4, where an 85-character one was clean from 1.1. Under
+  the scale recipe, "default" therefore spans 3.7-6.2 ch/s. A pace-targeted
+  recipe through `SamplingRequest.seconds` is being compared by ear in the
+  listening test; not decided.
+- **Seeds make no difference to hallucination**: seeded 25 vs random 19
+  flagged in chapter_001, mean similarity 0.906 vs 0.905. Render with fresh
+  random seeds, as always.
+- **The 30 s ceiling hardly matters once line breaks end sentences**: the
+  longest take in the whole sweep was under 26 s at scale 1.8.
+
+**Still open**: the listening test (stage 5 - default / slower / faster,
+scale recipe and pace recipe, rendered sentence by sentence with the
+dynamic silences), then the generator's dynamic mode (stage 6), and how the
+reader groups one-sentence `sync.json` entries for display.
+
 ## Conventions worth not breaking
 
 - Hand-rolled `json` building; no serialization library.
@@ -654,6 +762,19 @@ loops over the chunks.
 - **Library noise goes to `batch_jobs.json.log`** beside the job file —
   SilentCipher prints two lines per chunk. The path is printed when a chunk
   fails.
+- **Per-job overrides** (2026-09-16/17): a job may carry its own
+  `duration_scale`, `seed` (null = fresh draw) and `seconds` (a fixed
+  length in place of predictor x scale). Absent, the file-level value
+  applies, so existing callers are unchanged - proven sha256-identical.
+- **GPU memory is released after every job** (2026-09-17): the result is
+  deleted, `gc.collect()`, `torch.cuda.empty_cache()`. In the profiler's
+  sweep a long-running worker slowed from ~2 s to 13-43 s per take, and
+  takes over ~14 s of audio were slow even in a fresh worker - VRAM 7.7 of
+  8.2 GB with utilisation pinned, the same WDDM spill as two workers. With
+  the release, ~1,500 takes up to 26 s of audio never rendered slower than
+  7 s, and the audio is byte-identical. A short 5-take test did NOT show
+  the slowdown at all - it builds up over a long worker, so only a long
+  run can prove a fix for it.
 
 **Judged by ear and accepted (2026-09-14).** The same 10 chunks of wall
 `chapter_066` were generated both ways at the book's real settings
@@ -837,7 +958,180 @@ it destabilised chapters instead, because one unlucky draw then affects every
 chunk rather than averaging out. The setting exists and defaults to OFF. Do
 not "fix" this again.
 
+**A bash heredoc eats doubled backslashes.** A Python script written with
+`cat <<'EOF'` from the Bash tool turned `"C:\\Irodori-TTS\\seiyuu\\list\\tanya..."`
+into a path where `\t` became a TAB. Write scripts that contain Windows
+paths with the file tool, or use forward slashes, and assert the path
+exists before spending GPU time on it.
+
+**Stopping a background shell does not stop its children.** Killing the
+`bash run_five.sh` task left `uv`, the sweep and the TTS worker running
+and holding 7.7 GB of VRAM. After stopping anything long-running, list
+`python`/`uv` processes and check `nvidia-smi` before starting the next
+GPU job.
+
+**Each book-profiler script reads only its own keys.** Every script's
+`load_settings()` merged over the analyser's, which drops unknown keys - so
+a sweep key like `batch_script` written into `settings.json` was silently
+ignored. `analyze.merged_settings(defaults)` is the fix; a new script must
+use it.
+
+**`chapter-repair/sandbox_test.py` needs `PYTHONUTF8=1` from a piped
+shell.** It prints `→` and decodes ffprobe's Japanese tags with the locale
+encoding; with the variable set it passes 33 of 33.
+
 ---
+
+---
+
+# Text, chunking and hallucination — one map for tuning sessions
+
+Added 2026-09-16 as the entry point for further work on the text logic.
+Nothing here is new information; it collects what is already scattered
+through this file (the `chapter-repair` sections, the chunking overhaul,
+`seiyuu-audition`, the TTS batching notes) into the order a tuning
+session needs it, and says what is still open.
+
+## The one path text takes
+
+```
+<chapter>.txt  (UTF-8, 20 of 82 files carry a BOM)
+  -> split_sections()      blank-line split
+  -> split_paragraphs()    strip invisibles, ── run -> ─, whitespace
+  -> split_sentences()     TERMINATOR_RE:  。 ？ ……  + trailing closers
+  -> merge_units()         fill to soft_limit, never past hard_limit,
+                           _split_oversized() breaks what does not fit
+  -> build_chunks()        per chunk: text (TTS) + display_text (reader)
+                           + gap tags -> silence kind
+  -> irodori_batch.py      one worker per chapter, 30 s ceiling per chunk
+  -> stitch + build_sync_data()   boundaries frozen into audio forever
+```
+
+**After the stitch, chunk boundaries are permanent.** Everything the
+reader, the `.srt`, the translations and `chapter-repair` do is keyed to
+them. This is why text-logic changes divide cleanly into two kinds, and
+why the distinction matters more than any other rule in this file:
+
+- **text-only** (the wording inside a chunk, with the same boundaries) —
+  back-applicable to the published library, as the bracket and dash fixes
+  were on 2026-09-11;
+- **boundary-changing** (anything touching terminators, limits, or the
+  merge) — applies to future renders ONLY. Existing books keep their
+  chunking until re-rendered, and their bad chunks stay a `chapter-repair`
+  job. Do not offer to back-apply one of these.
+
+## Where the knobs actually are
+
+| Knob | Lives in | Notes |
+|---|---|---|
+| `max_chunk_length` | `settings.json`, GUI Advanced | = `soft_limit`; **hard limit is `soft + 30`**, hardcoded at `run_audiobook.py:144`. Not a setting. |
+| `SOFT_LIMIT` / `HARD_LIMIT` = 100 / 130 | `text_pipeline.py:165` | Defaults only — the generator always passes its own. The audition tool passes `soft`, `soft + 30` too. |
+| `TERMINATOR_RE` | `text_pipeline.py:137` | `。 ？ ……` plus trailing `CLOSING_BRACKETS`. Splits AND earns a silence wav. |
+| `BREAK_CHARS` | `text_pipeline.py:162` | `、！!?` — fallback cut points inside an over-long sentence. No silence, no split unless forced. |
+| `CLOSING_BRACKETS` | `text_pipeline.py:134` | `」』）〉》】〟)` |
+| `INVISIBLE_RE` | `text_pipeline.py:114` | BOM + zero-widths |
+| silence durations | settings, three tiers | `STRUCTURAL_WEIGHTS`; `paragraph` is currently unreachable by design |
+| `max_seconds` | job file only | absent = engine default 30.0. Only `chapter-repair` sets it. |
+
+`build_chunks(raw_text, soft_limit, hard_limit)` and the keys of a chunk
+dict are a **three-consumer contract**: the generator, `seiyuu-audition`
+(e2e mode) and `chapter-repair` (`tts_text_for`) all call in. Changing
+the signature or a key breaks two tools silently.
+
+`book-profiler` is a fourth consumer of the module, but not of
+`build_chunks()`: it uses `split_sections`, `split_lines`,
+`split_sentences`, `dynamic_sentences`, `split_for_length`,
+`prepare_tts_text_dynamic` and the character-class constants. Dynamic-mode
+knobs:
+
+| Knob | Lives in | Notes |
+|---|---|---|
+| `DYNAMIC_COMMA_AFTER` / `DYNAMIC_COMMA_BEFORE` | `text_pipeline.py` | `、」）)` / `「（(` - cut points, 0.7 s |
+| `DYNAMIC_SENTENCE_AFTER` | `text_pipeline.py` | `！!?` - cut points, 1.0 s |
+| `DYNAMIC_MIN_PIECE` | `text_pipeline.py` | 5 engine chars |
+| `DYNAMIC_STRIP_RE`, `KANJI_YEAR_RE`, `KANJI_ZERO_NUMBER_RE` | `text_pipeline.py` | `×`; kanji years and 〇-numbers to digits |
+| silences | profile JSON | section 1.5 / sentence 1.0 / comma 0.7 |
+| recipe bands, comfortable length L | profile JSON | from `book-profiler/recipe.py` |
+
+## What is settled by measurement — do not re-litigate
+
+- **30 s is the trained window, not a limit to raise.** All ten Irodori
+  training configs set `max_latent_steps: 750`. A 41 s render was made and
+  judged by ear: still gibberish. Splitting is the only fix.
+- **`！` is an intonation cue, not a pause.** It SHORTENS the natural gap
+  (0.36 s vs a 0.59-0.81 s baseline, two seeds). Never promote it to a
+  terminator; as a break char it costs nothing. Full table above under
+  "Chunking overhaul".
+- **`─` is deleted by Irodori's own normalizer**, which is why the
+  `─` -> `、` rule is load-bearing rather than cosmetic.
+- **A fixed seed makes output worse.** Tried, reverted, defaults OFF.
+- **Two concurrent workers are catastrophically slower.** Tried, measured.
+- **Batching did not change pacing** — durations are predicted per chunk
+  from the text.
+- **A take's length is text x scale, independent of the seed** - 2,268
+  sweep takes, see `book-profiler/`.
+- **Hallucination rises with pace, not length**: 0.3% of takes flagged at
+  5.0 ch/s, 20% at 7.0, 83% at 8.0; nothing flagged at scale 1.4 or above
+  in six chapters of yojo-senki with tanya.
+
+## What is still open
+
+1. **14 chunks still exceed the hard limit** after the overhaul — each has
+   0 or 1 break points, i.e. a genuinely unsplittable sentence. None
+   reaches the 30 s ceiling, so this is currently cosmetic. A finer break
+   set (particles? `て`/`が` clause ends?) is the obvious next experiment
+   and is **unmeasured** — treat any such rule as a hypothesis until it
+   has a pause probe behind it.
+2. **`＊` censored names** (`Ｍ＊＊くん`, 58 lines in the library) make the
+   model stumble — it renders TWO silences. What the text should say
+   instead is a content decision, not a code one, so it was left alone.
+3. **Hallucination prevention does not exist in the generator yet.**
+   Everything in it is detection and repair, after the fact. The first
+   attempt at prevention is `book-profiler/`: it measures, per seiyuu,
+   which scale (or pace) keeps each sentence length clean, for dynamic
+   profile mode to apply at render time. Not wired into the generator yet.
+4. **Detection is a shortlist, never a verdict.** Whisper mishears (see the
+   onboarder's `えへへ。`), so the UI always shows script, transcript and a
+   play button together. Do not add an "auto-repair the worst N" button.
+5. **The library is split in two eras.** 71 published chapters carry
+   pre-overhaul chunking; anything rendered from 2026-09-16 chunks the new
+   way. Comparisons across that line are not like for like.
+6. **Per-piece re-roll** in `chapter-repair` — when a split candidate has
+   one bad piece, the data to re-roll just that piece is already on disk;
+   there is no UI for it.
+
+## The two detectors, and what they cost
+
+| Detector | Input | Cost | Finds |
+|---|---|---|---|
+| `duration_rows()` / `capped_rows()` | `sync.json` only | ~1 s for the whole library, no GPU | chunks pinned at 30.00 s, ranked by pace against their OWN chapter's median (`chapter_pace`) |
+| `transcribe_chapter()` + `score_chapter()` | Whisper over the `.m4a` | one pass per chapter, GPU | invented words (low similarity) and abandoned/ad-libbed reads (length ratio far from 1) |
+
+Pace is per-book (wall ~4.0 ch/s, yojo-senki ~5.1), which is why the
+ranking is relative and not an absolute threshold. Of the 68 capped
+chunks, 14 read 15%+ above their chapter's pace; the other 47 are
+probably fine.
+
+## How to prove a text change before shipping it
+
+The overhaul's bar, and the one to hold to:
+
+1. **Zero text drift.** Concatenate every `display_text` across all 82
+   chapter files before and after. It must be identical (BOM removal
+   aside). This is what makes a text change safe to reason about.
+2. **Count what moved**: chunks over the hard limit, chunks that would hit
+   the ceiling, longest chunk, chunks opening on a closer, total chunks.
+3. **Measure, do not assume, what the model does with a symbol.** The
+   probe that settled the pause table: one carrier sentence that is a FLAT
+   NOUN LIST with no natural clause break at the insertion point, the
+   symbol inserted mid-list, silence measured with ffmpeg
+   `silencedetect`, and **two independent seeds** that must agree. v1 of
+   this probe used a carrier with a real clause break and its 1.20 s
+   baseline gap swamped the signal.
+4. `chapter-repair/sandbox_test.py` after touching `repair.py` — 33 checks
+   on a copy of a real chapter, no GPU.
+5. Audition e2e mode is the fastest way to HEAR a chunking change at real
+   settings without rendering a chapter.
 
 # Measured reference data
 
@@ -856,6 +1150,9 @@ Real numbers from this machine (RTX 4060, 8GB), 2026-09-06/07.
 | TTS per chunk, one infer.py each (old) | 19–21 s, of which ~2–6 s generation |
 | TTS per chunk, batched worker | ~6.2 s at chunk length 40, plus ~16 s model load per chapter |
 | TTS output | 48 kHz, mono, 16-bit PCM (fixed; not configurable) |
+| TTS per take, memory released per job (2026-09-17) | ~2 s at 8 s of audio, ~4-5 s at 16-20 s, ~6.5 s at 25 s |
+| Profiler sweep, one chapter | 378 takes, ~18 min render |
+| Whisper `large-v3-turbo` scan, one chapter | 378 takes in 14 calls, ~6-10 min |
 
 Chunk counts vary with `max_chunk_length`, which is user-configurable — the
 older reference figures of ~110 JA chars per chunk were taken at a higher
