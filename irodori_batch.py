@@ -33,6 +33,13 @@ Input is a job file written by run_audiobook.py:
                 "output_wav": "...wav"}, ...]
     }
 
+A job may also carry its own "duration_scale" and/or "seed" (null = fresh
+draw), which override the file-level values for that job only. Absent, the
+file-level value applies - so every job file written before this existed
+behaves exactly as it did. Dynamic profile mode and the book profiler's
+sweep need it: one worker, one model load, a different scale per sentence.
+Proven byte-identical on a fixed seed when added (2026-09-16).
+
 Protocol on stdout, one line each, flushed immediately so the GUI progress
 window keeps moving (see CLAUDE.md on why unbuffered output matters):
 
@@ -154,14 +161,19 @@ def main():
 
             for job in jobs:
                 index = int(job["index"])
+                # Per-job overrides; see the module docstring. "seed" is
+                # tested with `in`, because an explicit null is meaningful:
+                # a fresh draw for this job even when the file pins one.
+                job_scale = job.get("duration_scale", spec["duration_scale"])
+                job_seed = job["seed"] if "seed" in job else seed
                 emit(f"CHUNK_START {index}")
                 try:
                     result = runtime.synthesize(SamplingRequest(
                         text=job["text"],
                         ref_embed=spec["speaker_path"],
-                        duration_scale=float(spec["duration_scale"]),
+                        duration_scale=float(job_scale),
                         trim_tail=bool(spec["trim_tail"]),
-                        seed=None if seed is None else int(seed),
+                        seed=None if job_seed is None else int(job_seed),
                         cfg_scale_text=cfg_text,
                         cfg_scale_caption=cfg_caption,
                         cfg_scale_speaker=cfg_speaker,
