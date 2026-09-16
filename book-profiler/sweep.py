@@ -107,6 +107,12 @@ SWEEP_DEFAULTS = {
     "ceiling_margin": 0.5,
     # A take further than this from probe * scale is reported.
     "prediction_tolerance": 0.05,
+    # A fresh worker every this many takes. In the chapter_001 pilot one
+    # worker slowed from ~2 s to 13-36 s per take after ~155 takes, with
+    # VRAM at 7.7 of 8.2 GB and utilisation pinned at 100% - the WDDM spill
+    # CLAUDE.md records - and a restarted one was fast again. A model load
+    # is ~16 s; a spilled take costs more than that.
+    "max_takes_per_worker": 80,
     "max_rounds": 8,
 }
 
@@ -510,10 +516,19 @@ def main():
                 log(f"report only - {len(jobs)} take(s) would still be rendered")
             break
         rounds += 1
-        log(f"round {rounds}: {len(jobs)} take(s)")
-        code = render_round(jobs, speaker, settings, root, log)
-        if code != 0:
-            log(f"! worker exited with code {code} - stopping; run again to resume")
+        size = max(1, int(settings["max_takes_per_worker"]))
+        batches = [jobs[i:i + size] for i in range(0, len(jobs), size)]
+        log(f"round {rounds}: {len(jobs)} take(s) in {len(batches)} worker(s)")
+        failed = False
+        for number, batch in enumerate(batches, start=1):
+            if len(batches) > 1:
+                log(f" worker {number}/{len(batches)}: {len(batch)} take(s)")
+            code = render_round(batch, speaker, settings, root, log)
+            if code != 0:
+                log(f"! worker exited with code {code} - stopping; run again to resume")
+                failed = True
+                break
+        if failed:
             break
     else:
         log(f"! stopped after max_rounds={settings['max_rounds']}")
