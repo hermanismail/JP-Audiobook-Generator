@@ -390,22 +390,35 @@ def symbol_inventory(chapters, engine):
 
 
 def kanji_years(chapters):
-    """What the year rule converts, and every 〇 it leaves behind."""
+    """What the kanji number rules convert, and every 〇 they leave behind.
+
+    Run on each LINE, as the TTS text rules are, so a match can never
+    reach across a line break the sentence splitter would cut at."""
     converted, leftover = {}, []
     for chapter in chapters:
-        raw = chapter["raw"]
-        year_spans = []
-        for match in tp.KANJI_YEAR_RE.finditer(raw):
-            year_spans.append((match.start(1), match.end(1)))
-            key = match.group(1) + "年"
-            entry = converted.setdefault(key, {"from": key,
-                                               "to": tp._kanji_year_to_arabic(match) + "年",
-                                               "count": 0})
-            entry["count"] += 1
-        for i, ch in enumerate(raw):
-            if ch == "〇" and not any(a <= i < b for a, b in year_spans):
-                leftover.append(f"{chapter['chapter']}: {context_of(raw, i, i + 1)}")
-    return sorted(converted.values(), key=lambda e: -e["count"]), leftover
+        for line in chapter["raw"].split("\n"):
+            spans = []
+            for kind, regex, convert in (
+                    ("year", tp.KANJI_YEAR_RE, tp._kanji_year_to_arabic),
+                    ("number", tp.KANJI_ZERO_NUMBER_RE, tp._kanji_zero_number_to_arabic)):
+                for match in regex.finditer(line):
+                    start, end = match.start(1), match.end(1)
+                    if any(a < end and start < b for a, b in spans):
+                        continue
+                    result = convert(match)
+                    if result == match.group(1):
+                        continue
+                    spans.append((start, end))
+                    suffix = "年" if kind == "year" else ""
+                    key = match.group(1) + suffix
+                    entry = converted.setdefault(key, {
+                        "kind": kind, "from": key, "to": result + suffix, "count": 0,
+                        "example": f"{chapter['chapter']}: {context_of(line, start, end)}"})
+                    entry["count"] += 1
+            for i, ch in enumerate(line):
+                if ch == "〇" and not any(a <= i < b for a, b in spans):
+                    leftover.append(f"{chapter['chapter']}: {context_of(line, i, i + 1)}")
+    return sorted(converted.values(), key=lambda e: (e["kind"], -e["count"])), leftover
 
 
 # ------------------------------------------------------------ length steps
@@ -726,15 +739,16 @@ def render_markdown(r):
             f"{esc(s['engine_effect'])} | {s['status']} | {detail} |")
     add("")
 
-    add("## Kanji years\n")
-    add("| source | sent as | count |")
-    add("|---|---|---|")
+    add("## Kanji numbers\n")
+    add("Four-digit years before 年, and every other positional number holding a 〇, "
+        "are sent as arabic digits.\n")
+    add("| kind | source | sent as | count | example |")
+    add("|---|---|---|---|---|")
     for y in r["kanji_years"]:
-        add(f"| {y['from']} | {y['to']} | {y['count']} |")
+        add(f"| {y['kind']} | {y['from']} | {y['to']} | {y['count']} | {esc(y['example'])} |")
     add("")
     left = r["zero_not_in_a_year"]
-    add(f"**{len(left)}** 〇 not inside a converted year - these still reach the "
-        "engine as ○:\n")
+    add(f"**{len(left)}** 〇 left unconverted - these still reach the engine as ○:\n")
     for e in left[:20]:
         add(f"- {esc(e)}")
     if len(left) > 20:

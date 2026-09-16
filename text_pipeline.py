@@ -645,6 +645,15 @@ DYNAMIC_STRIP_RE = re.compile("[×]")
 KANJI_DIGITS = "〇一二三四五六七八九"
 KANJI_YEAR_RE = re.compile(
     "(?<![" + KANJI_DIGITS + "十百千万])([" + KANJI_DIGITS + "]{4})(?=年)")
+# Any other number written positionally with a 〇 - 高度四三〇〇, 第二〇五,
+# 一二〇ミリ - goes to digits as well (user decision 2026-09-16), for the same
+# reason: the engine would otherwise receive ○. Only runs CONTAINING 〇 are
+# touched, so 一二三 or 九五式 keep their kanji reading, and a run touching
+# 十百千万 (二〇十三年) is left, because it is not positional.
+KANJI_ZERO_NUMBER_RE = re.compile(
+    "(?<![" + KANJI_DIGITS + "十百千万])"
+    "([" + KANJI_DIGITS + "]*〇[" + KANJI_DIGITS + "]*)"
+    "(?![" + KANJI_DIGITS + "十百千万])")
 DYNAMIC_BRACKETS = "「」（）()"
 
 
@@ -652,12 +661,26 @@ def _kanji_year_to_arabic(match):
     return "".join(str(KANJI_DIGITS.index(ch)) for ch in match.group(1))
 
 
+def _kanji_zero_number_to_arabic(match):
+    run = match.group(1)
+    if len(run) < 2:
+        return run
+    return "".join(str(KANJI_DIGITS.index(ch)) for ch in run)
+
+
+def convert_kanji_numbers(text):
+    """Years first (they need no 〇), then every other positional number
+    that holds a 〇. Returns the converted text."""
+    text = KANJI_YEAR_RE.sub(_kanji_year_to_arabic, text)
+    return KANJI_ZERO_NUMBER_RE.sub(_kanji_zero_number_to_arabic, text)
+
+
 def prepare_tts_text_dynamic(text):
     """Dynamic mode's version of prepare_tts_text(). Same steps, plus:
-    kanji years to arabic digits, × stripped, and parentheses treated like
+    kanji years and 〇-numbers to arabic digits, × stripped, and parentheses treated like
     「」 - removed at an edge or next to punctuation, otherwise a 、, so the
     seiyuu voices the pause itself. The reader-facing text keeps all of it."""
-    text = KANJI_YEAR_RE.sub(_kanji_year_to_arabic, text)
+    text = convert_kanji_numbers(text)
     text = DYNAMIC_STRIP_RE.sub("", text)
     text = DASH_RUN_RE.sub(COMMA, text)
     text = _convert_brackets(text, DYNAMIC_BRACKETS)
