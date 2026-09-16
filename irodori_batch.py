@@ -40,6 +40,15 @@ behaves exactly as it did. Dynamic profile mode and the book profiler's
 sweep need it: one worker, one model load, a different scale per sentence.
 Proven byte-identical on a fixed seed when added (2026-09-16).
 
+A job may also carry "seconds": a fixed length for that take in place of
+predictor x duration_scale (SamplingRequest.seconds, still clamped to
+max_seconds). Absent, nothing changes. Added 2026-09-17 so the book
+profiler's listening test can render a pace-targeted recipe beside the
+scale-based one.
+
+After every job the request's tensors are released and the CUDA cache is
+emptied - see the comment in the loop for the measurement behind it.
+
 Protocol on stdout, one line each, flushed immediately so the GUI progress
 window keeps moving (see CLAUDE.md on why unbuffered output matters):
 
@@ -57,6 +66,7 @@ CHUNK_FAIL line, and the log path is printed at the end.
 
 import argparse
 import contextlib
+import gc
 import json
 import os
 import sys
@@ -70,6 +80,15 @@ _EMIT = sys.stdout
 def emit(message):
     _EMIT.write(message + "\n")
     _EMIT.flush()
+
+
+def _empty_cuda_cache():
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def main():
@@ -166,6 +185,12 @@ def main():
                 # a fresh draw for this job even when the file pins one.
                 job_scale = job.get("duration_scale", spec["duration_scale"])
                 job_seed = job["seed"] if "seed" in job else seed
+                job_extra = dict(extra)
+                if job.get("seconds"):
+                    # A fixed length instead of the duration predictor x
+                    # scale - SamplingRequest.seconds, which the runtime
+                    # still clamps to max_seconds.
+                    job_extra["seconds"] = float(job["seconds"])
                 emit(f"CHUNK_START {index}")
                 try:
                     result = runtime.synthesize(SamplingRequest(
@@ -177,10 +202,21 @@ def main():
                         cfg_scale_text=cfg_text,
                         cfg_scale_caption=cfg_caption,
                         cfg_scale_speaker=cfg_speaker,
-                        **extra,
+                        **job_extra,
                     ))
                     save_wav(job["output_wav"], result.audio, result.sample_rate)
-                    emit(f"CHUNK_DONE {index} {result.used_seed}")
+                    used_seed = result.used_seed
+                    # Hand the request's GPU memory back before the next job.
+                    # Without this a long run crawled: in the book-profiler
+                    # sweep a worker went from ~2 s to 13-43 s per take (VRAM
+                    # 7.7 of 8.2 GB, utilisation pinned - the WDDM spill), and
+                    # takes over ~14 s of audio were slow even in a fresh
+                    # worker. With it, ~1,500 takes up to 26 s of audio never
+                    # rendered slower than 7 s, and output is byte-identical.
+                    del result
+                    gc.collect()
+                    _empty_cuda_cache()
+                    emit(f"CHUNK_DONE {index} {used_seed}")
                     ok += 1
                 except Exception as exc:
                     # One bad chunk must not cost the rest of the chapter -
@@ -189,12 +225,7 @@ def main():
                     traceback.print_exc()
                     emit(f"CHUNK_FAIL {index} {type(exc).__name__}: {exc}")
                     failed += 1
-                    try:
-                        import torch
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                    except Exception:
-                        pass
+                    _empty_cuda_cache()
 
     emit(f"BATCH_DONE ok={ok} fail={failed}")
     if failed:
