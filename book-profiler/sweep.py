@@ -118,7 +118,7 @@ SWEEP_DEFAULTS = {
 
 
 def load_settings():
-    settings = dict(SWEEP_DEFAULTS)
+    settings = analyze.merged_settings(SWEEP_DEFAULTS)
     settings.update(analyze.load_settings())
     return settings
 
@@ -542,6 +542,13 @@ def main():
         f.write(render_md(args.book, args.chapter, speaker, settings, summary))
     log(f"done: {summary['takes']} takes, render {summary['render_seconds']} s, "
         f"wall {summary['wall_seconds']} s -> {root}")
+
+    # Exit non-zero whenever takes are still owed, so a script chaining
+    # sweep -> score never scores a half-rendered chapter as if it were whole.
+    remaining, _status = plan_round(root, steps, speaker, settings)
+    if remaining and not args.report_only:
+        log(f"! INCOMPLETE - {len(remaining)} take(s) still to render; run again to resume")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

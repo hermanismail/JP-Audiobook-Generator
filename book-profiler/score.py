@@ -76,7 +76,7 @@ SCORE_DEFAULTS = {
 
 
 def load_settings():
-    settings = dict(SCORE_DEFAULTS)
+    settings = sweep.analyze.merged_settings(SCORE_DEFAULTS)
     settings.update(sweep.load_settings())
     return settings
 

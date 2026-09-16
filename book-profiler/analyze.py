@@ -95,6 +95,24 @@ def load_settings():
         return dict(DEFAULT_SETTINGS)
 
 
+def merged_settings(defaults):
+    """`defaults` overlaid with any of THOSE keys found in settings.json.
+
+    The profiler's scripts share one settings.json but each owns its own
+    keys. load_settings() above keeps only the analyser's, so without this
+    a sweep or score key written into the file would be silently dropped -
+    the same trap CLAUDE.md records for the generator's
+    _collect_and_validate()."""
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    merged = dict(defaults)
+    merged.update({k: v for k, v in data.items() if k in defaults})
+    return merged
+
+
 def save_settings(data):
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(merge_setting_defaults(data), f, ensure_ascii=False, indent=2)
