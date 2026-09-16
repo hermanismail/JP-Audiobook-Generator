@@ -1,50 +1,47 @@
 """
 analyze.py
 ----------
-Stage 1 of the book profiler: read a book's chapter text and describe it,
-with no GPU and no TTS.
+Stage 1 of the book profiler: read a book's chapter text and describe it
+the way DYNAMIC PROFILE MODE will see it, with no GPU and no TTS.
 
-    uv run --project book-profiler python book-profiler/analyze.py --book  <folder>
+    uv run --project book-profiler python book-profiler/analyze.py --book <folder> [--exclude chapter_007]
     uv run --project book-profiler python book-profiler/analyze.py --chapter <file> [--chapter <file> ...]
 
 The scope is chosen up front - a whole book, or chosen chapters - because
 one book can legitimately use different seiyuu for different chapters.
 
-What it produces, into <work_root>/<book>/<scope>/analysis/:
+Output, into <work_root>/<book>/<scope>/analysis/:
 
     analysis.json   everything, for the later stages to read
     analysis.md     the same, for a person to read
 
-## Sentences are the generator's sentences
+## Dynamic mode's rules, not a copy of them
 
-Nothing here re-implements splitting. `split_sections`, `split_paragraphs`
-and `split_sentences` are imported from `text_pipeline.py` in the folder
-above - the same rule seiyuu-audition follows, for the same reason. A copy
-would drift the next time a bracket or dash rule changes, and the length
-steps chosen here would then be sentences the generator never produces.
-The analyser checks this itself: every paragraph's sentences must rejoin
-to exactly that paragraph (`drift` in the report must be 0).
+Sentences, cut points and the TTS text all come from `text_pipeline.py` in
+the folder above (`dynamic_sentences`, `split_for_length`,
+`prepare_tts_text_dynamic`) - the same functions the generator's dynamic
+mode will call. A copy here would drift the first time a rule changes, and
+the profile would describe sentences the generator never sends. Normal
+mode (`build_chunks`) is reported once, as a comparison row.
 
-## Two lengths per sentence
+In short: a line break ends a sentence as well as 。？……; a sentence longer
+than the seiyuu's comfortable length is cut after 、 」 ） (0.7 s), before
+「 （ (0.7 s) or after ！ ! ? (1.0 s).
 
-- `display_len` - the reader-facing wording, as `sync.json` would hold it.
-- `tts_len`     - what the ENGINE actually receives: the sentence through
-  `text_pipeline.prepare_tts_text()` and then through Irodori's own
-  `normalize_text()`, which deletes and rewrites more characters (see the
-  symbol table). This is the primary measure - it is what the seiyuu has
-  to read inside the 30 s window.
+## Length is what the ENGINE receives
 
-Irodori's normaliser is loaded by FILE PATH from `irodori_root`, not
-copied and not imported as a package: `irodori_tts/__init__.py` pulls in
-torch, while `text_normalization.py` itself is stdlib only. If the file is
-missing the report says so and `tts_len` falls back to the pipeline text.
+`tts_len` is a sentence through `prepare_tts_text_dynamic()` and then
+Irodori's own `normalize_text()`, which deletes and rewrites more (see the
+symbol table). That is what the seiyuu has to read inside the 30 s window.
+Irodori's normaliser is loaded by FILE PATH from `irodori_root`, because
+`irodori_tts/__init__.py` pulls in torch while `text_normalization.py`
+itself is stdlib only.
 
 ## Nothing here is a claim about how the model sounds
 
-A symbol is marked `measured` only where CLAUDE.md records a pause probe
-for it (two seeds, silencedetect). Everything else is `unmeasured`, with
-its count, what the pipeline and the normaliser do to it, and examples in
-context - the decision about it belongs to a probe or to a person.
+`measured` means a pause probe recorded in CLAUDE.md. `judged by ear` means
+a decision the user made by listening. Everything else that reaches the
+engine is `unmeasured`.
 """
 
 import argparse
@@ -59,11 +56,10 @@ import time
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(SCRIPT_DIR, "settings.json")
 
-# The generator, one folder up. Only text_pipeline is imported from it.
 GENERATOR_DIR = os.path.dirname(SCRIPT_DIR)
 if GENERATOR_DIR not in sys.path:
     sys.path.insert(0, GENERATOR_DIR)
-import text_pipeline  # noqa: E402
+import text_pipeline as tp  # noqa: E402
 
 DEFAULT_SETTINGS = {
     "irodori_root": "C:\\Irodori-TTS",
@@ -76,6 +72,9 @@ DEFAULT_SETTINGS = {
     # "「……" and "と。" are sentences to the splitter, but there is nothing
     # in them for Whisper to check or for pace to be measured on.
     "min_spoken_chars": 4,
+    # Comfortable lengths the split table is computed for. The real one is
+    # only known after the sweep; these show what each would mean.
+    "report_limits": [30, 40, 50, 60, 80, 100],
 }
 
 
@@ -104,8 +103,6 @@ def save_settings(data):
 # ------------------------------------------------------------ the engine side
 
 def load_irodori_normalizer(irodori_root):
-    """Irodori's normalize_text, or None. See the module docstring for why
-    this goes by file path."""
     path = os.path.join(irodori_root, "irodori_tts", "text_normalization.py")
     if not os.path.isfile(path):
         return None, path
@@ -115,27 +112,24 @@ def load_irodori_normalizer(irodori_root):
     return module.normalize_text, path
 
 
-def engine_text(text, normalize):
-    """What the engine receives for one sentence sent on its own."""
-    piped = text_pipeline.prepare_tts_text(text)
-    return normalize(piped).strip() if normalize else piped
+def make_engine(normalize):
+    """text -> what the engine receives when that text is sent on its own."""
+    def engine(text):
+        piped = tp.prepare_tts_text_dynamic(text)
+        return normalize(piped).strip() if normalize else piped
+    return engine
 
 
 # ------------------------------------------------------------ symbols
 
-# Ordinary Japanese text: kana, kanji, and the few marks that behave as
-# letters. Everything else is reported. The katakana middle dot (U+30FB)
-# sits inside the katakana block but is punctuation, so it is excluded.
+# Ordinary Japanese text: kana, kanji, and the marks that behave as letters.
+# The katakana middle dot (U+30FB) is punctuation and is reported.
 ORDINARY_RE = re.compile(r"[\u3041-\u309f\u30a0-\u30fa\u30fc-\u30ff"
                          r"\u3400-\u4dbf\u4e00-\u9fff\u3005\u3006\u30f6]")
-# Letters and digits, half- and full-width, reported as RUNS - "ＷＴＮ" is
-# one reading problem, not three.
 ALNUM_RUN_RE = re.compile(r"[0-9A-Za-z\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]+")
-LINE_BREAKS = "\r\n"
 
-# What CLAUDE.md records as measured. The pause probe of 2026-09-16: flat
-# noun-list carrier, symbol inserted mid-list, silencedetect, two seeds
-# (gap seed A / seed B; no symbol = 0.81 / 0.59 s).
+# Pause probe of 2026-09-16 (CLAUDE.md): flat noun-list carrier, symbol
+# mid-list, silencedetect, two seeds. No symbol = 0.81 / 0.59 s.
 MEASURED = {
     "、": "pauses - 1.01 / 1.05 s",
     "。": "pauses - 1.14 / 1.25 s",
@@ -146,195 +140,128 @@ MEASURED = {
     "─": "raw ─ is deleted by Irodori (0.81 / 0.59 s, same as no symbol); "
          "the pipeline turns it into 、 first",
 }
+JUDGED = {
+    "・": "judged by ear 2026-09-16: names are read without a pause - no harm",
+}
 
 
-def symbol_effects(ch, normalize):
-    """What the pipeline and then the engine make of one character in the
-    middle of a sentence. A carrier of kana on both sides keeps the
-    edge-only rules (bracket dropping, strip_outer_brackets) out of it."""
-    carrier = "あ" + ch + "あ"
-    piped = text_pipeline.prepare_tts_text(carrier)
-    # split_paragraphs strips inline whitespace and invisibles before any
-    # of that, so those never even reach prepare_tts_text.
-    if text_pipeline.INLINE_WHITESPACE_RE.fullmatch(ch) or \
-            text_pipeline.INVISIBLE_RE.fullmatch(ch):
-        piped = "ああ"
-    engine = normalize(piped) if normalize else piped
-
-    def middle(s):
-        return s[1:-1] if s.startswith("あ") and s.endswith("あ") else s
-
-    return middle(piped), middle(engine)
+def symbol_effects(ch, engine):
+    """What the TTS text and then the engine make of one character in the
+    middle of a sentence. Kana on both sides keeps the edge-only rules out
+    of it. Whitespace and invisibles never get that far - split_lines()
+    strips them first."""
+    if tp.INLINE_WHITESPACE_RE.fullmatch(ch) or tp.INVISIBLE_RE.fullmatch(ch):
+        return ""
+    result = engine("あ" + ch + "あ")
+    if result.startswith("あ") and result.endswith("あ"):
+        return result[1:-1]
+    return result
 
 
-def pipeline_role(ch):
-    if text_pipeline.INLINE_WHITESPACE_RE.fullmatch(ch):
+def dynamic_role(ch):
+    if tp.INLINE_WHITESPACE_RE.fullmatch(ch):
         return "whitespace - stripped"
-    if text_pipeline.INVISIBLE_RE.fullmatch(ch):
+    if tp.INVISIBLE_RE.fullmatch(ch):
         return "invisible - stripped"
     if ch in "。？…":
-        return "terminator"
-    if ch in text_pipeline.BREAK_CHARS:
-        return "break point"
-    if ch in text_pipeline.CLOSING_BRACKETS:
-        return "closing bracket - kept with its sentence"
-    if ch in text_pipeline.BRACKETS:
-        return "bracket - removed for TTS"
-    if ch == text_pipeline.DASH:
-        return "dash - becomes 、 for TTS"
-    return ""
+        return "ends a sentence"
+    if tp.DYNAMIC_STRIP_RE.fullmatch(ch):
+        return "stripped for TTS"
+    roles = []
+    if ch in tp.DYNAMIC_COMMA_BEFORE:
+        roles.append("cut before it (0.7 s)")
+    if ch in tp.DYNAMIC_COMMA_AFTER:
+        roles.append("cut after it (0.7 s)")
+    if ch in tp.DYNAMIC_SENTENCE_AFTER:
+        roles.append("cut after it (1.0 s)")
+    if ch in tp.DYNAMIC_BRACKETS:
+        roles.append("removed or 、 for TTS")
+    if ch == tp.DASH:
+        roles.append("becomes 、 for TTS")
+    return "; ".join(roles)
 
 
-def measured_status(ch, engine_form, normalize):
-    """`measured` if CLAUDE.md has a probe for this character, or for a
-    character the engine cannot tell apart from it - Irodori folds ！ to !
-    and ？ to ?, so the ascii forms reach the model as the same symbol."""
+def symbol_status(ch, engine_form, engine):
     if ch in MEASURED:
         return "measured", MEASURED[ch]
+    if ch in JUDGED:
+        return "judged by ear", JUDGED[ch]
     if engine_form == "":
         return "removed", "never reaches the engine"
-    if engine_form:
-        for known, note in MEASURED.items():
-            _p, known_engine = symbol_effects(known, normalize)
-            if known_engine and known_engine == engine_form:
-                return "measured", f"reaches the engine as {known} does: {note}"
+    for known, note in MEASURED.items():
+        if symbol_effects(known, engine) == engine_form:
+            return "measured", f"reaches the engine as {known} does: {note}"
     return "unmeasured", ""
 
 
 def context_of(text, start, end, width=10):
-    left = text[max(0, start - width):start]
-    right = text[end:end + width]
-    return (left + "[" + text[start:end] + "]" + right).replace("\n", "⏎")
+    return (text[max(0, start - width):start] + "[" + text[start:end] + "]"
+            + text[end:end + width]).replace("\n", "⏎")
 
 
 # ------------------------------------------------------------ one chapter
 
-TERMINATOR_END_RE = re.compile(
-    r"(?:。|？|……)[" + re.escape(text_pipeline.CLOSING_BRACKETS) + r"]*$")
-# A line ending in any of these reads on naturally into the next line, so
-# joining it is harmless. A line ending in anything else - a location
-# heading, a chapter title, a date - is glued onto the next sentence by
-# split_paragraphs(), which is what inflates sentence lengths.
-LINE_END_OK = "。？…！!?、" + text_pipeline.CLOSING_BRACKETS
+HEADING_END_OK = "。？…！!?、" + tp.CLOSING_BRACKETS
+TERMINATOR_END_RE = re.compile(r"(?:。|？|……)[" + re.escape(tp.CLOSING_BRACKETS) + r"]*$")
 
 
-def clean_line(line):
-    """split_paragraphs()'s cleaning, applied to one line so line offsets
-    can be mapped onto the joined paragraph."""
-    line = text_pipeline.INLINE_WHITESPACE_RE.sub("", line)
-    line = text_pipeline.INVISIBLE_RE.sub("", line)
-    # Without this every section holding a "──" is one character shorter
-    # as a paragraph than as lines, and its offsets cannot be trusted.
-    line = text_pipeline.DASH_RUN_RE.sub(text_pipeline.DASH, line)
-    return line
-
-
-def analyse_chapter(path, normalize):
+def analyse_chapter(path, engine):
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read()
     name = os.path.splitext(os.path.basename(path))[0]
 
-    sentences = []
-    skipped_punct_only = 0
-    drift = 0
-    sections_out = []
-    glued_lines = []
-    line_aware_lengths = []
+    sections = tp.split_sections(raw)
+    lines_per_section = [tp.split_lines(s) for s in sections]
+    cleaned = "".join(line for lines in lines_per_section for line in lines)
 
-    for sec_idx, section in enumerate(text_pipeline.split_sections(raw), start=1):
-        lines = [clean_line(l) for l in section.split("\n")]
-        lines = [l for l in lines if l]
-        paragraphs = text_pipeline.split_paragraphs(section)
-        section_sentences = 0
+    units = tp.dynamic_sentences(raw)
+    # Nothing added, nothing lost: every sentence rejoins to every line.
+    drift = 0 if "".join(u["text"] for u in units) == cleaned else 1
 
-        # Where each line ENDS inside the joined paragraph, for the lines
-        # that do not end on a natural break.
-        glued_offsets = []
-        line_ends = []
-        offset = 0
-        for line_idx, line in enumerate(lines):
-            offset += len(line)
-            is_last = line_idx == len(lines) - 1
-            if not is_last:
-                line_ends.append(offset)
-                if line[-1] not in LINE_END_OK:
-                    glued_offsets.append((offset, line))
-
-        # The alternative the report puts beside the generator's rule: what
-        # the sentences would be if every author line also ended one. Not a
-        # pipeline change - a measurement, so the choice can be made on it.
-        for line in lines:
-            for unit in text_pipeline.split_sentences(
-                    text_pipeline.DASH_RUN_RE.sub(text_pipeline.DASH, line)):
-                if text_pipeline.PUNCT_ONLY_RE.fullmatch(unit):
-                    continue
-                engine = engine_text(unit, normalize)
-                if engine:
-                    line_aware_lengths.append(len(engine))
-
-        for paragraph in paragraphs:
-            units = text_pipeline.split_sentences(paragraph)
-            if "".join(units) != paragraph:
-                drift += 1
-            # The dash-run rule can shorten a paragraph relative to its
-            # lines; offsets are only trusted when nothing was collapsed.
-            trust_offsets = sum(len(l) for l in lines) == len(paragraph)
-
-            position = 0
-            for unit in units:
-                start, end = position, position + len(unit)
-                position = end
-                if text_pipeline.PUNCT_ONLY_RE.fullmatch(unit):
-                    skipped_punct_only += 1
-                    continue
-                engine = engine_text(unit, normalize)
-                if not engine:
-                    skipped_punct_only += 1
-                    continue
-                joined = [line for off, line in glued_offsets
-                          if trust_offsets and start < off < end]
-                for line in joined:
-                    glued_lines.append({"chapter": name, "section": sec_idx,
-                                        "line": line, "sentence": unit})
-                sentences.append({
-                    "chapter": name,
-                    "section": sec_idx,
-                    "index": len(sentences) + 1,
-                    "text": unit,
-                    "engine_text": engine,
-                    "display_len": len(unit),
-                    "tts_len": len(engine),
-                    "terminated": bool(TERMINATOR_END_RE.search(unit)),
-                    "joined_lines": joined,
-                    # How many of the author's lines this sentence runs
-                    # across. >1 is typically dialogue closed by 」 with no
-                    # 。 before it, welded to the narration that follows.
-                    "lines_spanned": (1 + sum(1 for off in line_ends if start < off < end))
-                                     if trust_offsets else None,
-                    "spoken_chars": len(ORDINARY_RE.findall(unit)),
-                })
-                section_sentences += 1
-
-        sections_out.append({
-            "section": sec_idx,
-            "lines": len(lines),
-            "chars": sum(len(l) for l in lines),
-            "sentences": section_sentences,
-            "first_line": lines[0][:40] if lines else "",
-            "heading_like": bool(lines) and lines[0][-1] not in LINE_END_OK,
+    sentences, skipped = [], []
+    for unit in units:
+        text = unit["text"]
+        engine_text = engine(text)
+        if not engine_text or tp.PUNCT_ONLY_RE.fullmatch(engine_text):
+            skipped.append(text)
+            continue
+        sentences.append({
+            "chapter": name,
+            "index": len(sentences) + 1,
+            "section": unit["section"],
+            "line": unit["line"],
+            "gap_before": unit["gap_before"],
+            "text": text,
+            "engine_text": engine_text,
+            "display_len": len(text),
+            "tts_len": len(engine_text),
+            "spoken_chars": len(ORDINARY_RE.findall(text)),
+            "terminated": bool(TERMINATOR_END_RE.search(text)),
+            "heading_like": not text or text[-1] not in HEADING_END_OK,
         })
+
+    # Normal mode, for the comparison row only.
+    normal_lengths = []
+    for section in sections:
+        for paragraph in tp.split_paragraphs(section):
+            for unit in tp.split_sentences(paragraph):
+                if tp.PUNCT_ONLY_RE.fullmatch(unit):
+                    continue
+                piped = tp.prepare_tts_text(unit)
+                if piped:
+                    normal_lengths.append(len(piped))
 
     return {
         "chapter": name,
         "path": path,
         "chars": len(raw),
         "bom": raw.startswith("\ufeff"),
-        "sections": sections_out,
+        "sections": len(sections),
+        "lines_per_section": [len(lines) for lines in lines_per_section],
         "sentences": sentences,
-        "skipped_punct_only": skipped_punct_only,
+        "skipped": skipped,
         "drift": drift,
-        "glued_lines": glued_lines,
-        "line_aware_lengths": line_aware_lengths,
+        "normal_lengths": normal_lengths,
         "raw": raw,
     }
 
@@ -354,16 +281,11 @@ def length_stats(values):
     if not values:
         return {"count": 0}
     return {
-        "count": len(values),
-        "min": values[0],
-        "max": values[-1],
+        "count": len(values), "min": values[0], "max": values[-1],
         "mean": round(statistics.fmean(values), 1),
-        "median": percentile(values, 50),
-        "p10": percentile(values, 10),
-        "p25": percentile(values, 25),
-        "p75": percentile(values, 75),
-        "p90": percentile(values, 90),
-        "p95": percentile(values, 95),
+        "median": percentile(values, 50), "p10": percentile(values, 10),
+        "p25": percentile(values, 25), "p75": percentile(values, 75),
+        "p90": percentile(values, 90), "p95": percentile(values, 95),
         "p99": percentile(values, 99),
     }
 
@@ -379,141 +301,165 @@ def histogram(values, width=10):
             for b in range(0, max(bins) + 1)]
 
 
-THRESHOLDS = (40, 60, 80, 100, 150, 200)
+# ------------------------------------------------------------ splitting
 
+def split_table(sentences, limits, engine):
+    """For each candidate comfortable length L: how many sentences exceed
+    it, what cutting them does, and which ones cannot be brought under it.
 
-def over_counts(values):
-    return {str(t): sum(1 for v in values if v > t) for t in THRESHOLDS}
+    Every cut is checked to rejoin byte-identically; `split_drift` must be 0."""
+    measure = lambda text: len(engine(text))
+    rows = []
+    for limit in limits:
+        over = [s for s in sentences if s["tts_len"] > limit]
+        pieces_total = comma_cuts = sentence_cuts = split_drift = 0
+        stuck = []
+        longest_piece = 0
+        for s in over:
+            pieces = tp.split_for_length(s["text"], limit, measure)
+            if "".join(p for p, _k in pieces) != s["text"]:
+                split_drift += 1
+            pieces_total += len(pieces)
+            comma_cuts += sum(1 for _p, k in pieces if k == "comma")
+            sentence_cuts += sum(1 for _p, k in pieces if k == "sentence")
+            lengths = [measure(p) for p, _k in pieces]
+            longest_piece = max([longest_piece] + lengths)
+            worst = max(lengths)
+            if worst > limit:
+                stuck.append({
+                    "chapter": s["chapter"], "index": s["index"],
+                    "tts_len": s["tts_len"], "worst_piece": worst,
+                    "pieces": [p for p, _k in pieces], "text": s["text"],
+                })
+        stuck.sort(key=lambda r: -(r["worst_piece"] - limit))
+        rows.append({
+            "limit": limit,
+            "sentences_over": len(over),
+            "pieces_after_split": pieces_total,
+            "comma_cuts": comma_cuts,
+            "sentence_cuts": sentence_cuts,
+            "still_over": len(stuck),
+            "longest_after_split": longest_piece if over else 0,
+            "split_drift": split_drift,
+            "stuck": stuck,
+        })
+    return rows
 
 
 # ------------------------------------------------------------ symbols, whole scope
 
-def symbol_inventory(chapters, normalize):
-    found = {}
-    runs = {}
+def symbol_inventory(chapters, engine):
+    found, runs = {}, {}
     for chapter in chapters:
         raw = chapter["raw"]
+        spans = []
         for match in ALNUM_RUN_RE.finditer(raw):
-            key = match.group()
-            entry = runs.setdefault(key, {"run": key, "count": 0, "examples": []})
+            spans.append((match.start(), match.end()))
+            entry = runs.setdefault(match.group(), {"run": match.group(), "count": 0,
+                                                    "examples": []})
             entry["count"] += 1
             if len(entry["examples"]) < 2:
                 entry["examples"].append(
                     f"{chapter['chapter']}: {context_of(raw, match.start(), match.end())}")
-        alnum_spans = [(m.start(), m.end()) for m in ALNUM_RUN_RE.finditer(raw)]
-        span_iter = iter(alnum_spans)
-        current = next(span_iter, None)
+        in_run = set(i for a, b in spans for i in range(a, b))
         for i, ch in enumerate(raw):
-            while current and i >= current[1]:
-                current = next(span_iter, None)
-            if current and current[0] <= i < current[1]:
-                continue
-            if ch in LINE_BREAKS or ORDINARY_RE.match(ch):
+            if i in in_run or ch in "\r\n" or ORDINARY_RE.match(ch):
                 continue
             entry = found.setdefault(ch, {"char": ch, "codepoint": f"U+{ord(ch):04X}",
-                                          "count": 0, "chapters": {}, "examples": []})
+                                          "count": 0, "examples": []})
             entry["count"] += 1
-            entry["chapters"][chapter["chapter"]] = entry["chapters"].get(chapter["chapter"], 0) + 1
             if len(entry["examples"]) < 3:
-                entry["examples"].append(
-                    f"{chapter['chapter']}: {context_of(raw, i, i + 1)}")
+                entry["examples"].append(f"{chapter['chapter']}: {context_of(raw, i, i + 1)}")
 
     symbols = []
     for ch, entry in found.items():
-        piped, engine = symbol_effects(ch, normalize)
-        status, note = measured_status(ch, engine, normalize)
-        if engine == ch:
-            engine_effect = "unchanged"
-        elif engine == "":
-            engine_effect = "deleted"
-        else:
-            engine_effect = f"-> {engine}"
+        engine_form = symbol_effects(ch, engine)
+        status, note = symbol_status(ch, engine_form, engine)
         entry.update({
-            "pipeline_role": pipeline_role(ch),
-            "pipeline_gives": piped,
-            "engine_receives": engine,
-            "engine_effect": engine_effect,
+            "role": dynamic_role(ch),
+            "engine_receives": engine_form,
+            "engine_effect": ("unchanged" if engine_form == ch else
+                              "deleted" if engine_form == "" else f"-> {engine_form}"),
             "status": status,
             "note": note,
         })
         symbols.append(entry)
-    symbols.sort(key=lambda e: (e["status"] != "unmeasured", -e["count"]))
-    alnum = sorted(runs.values(), key=lambda e: -e["count"])
-    return symbols, alnum
+    order = {"unmeasured": 0, "judged by ear": 1, "measured": 2, "removed": 3}
+    symbols.sort(key=lambda e: (order[e["status"]], -e["count"]))
+    return symbols, sorted(runs.values(), key=lambda e: -e["count"])
 
 
-def unmeasured_chars(symbols):
-    """Characters that still reach the engine and have no probe behind
-    them. Characters the pipeline or the engine delete are harmless to a
-    length measurement and are not counted here."""
-    return {s["char"] for s in symbols
-            if s["status"] == "unmeasured" and s["engine_receives"] != ""}
+def kanji_years(chapters):
+    """What the year rule converts, and every 〇 it leaves behind."""
+    converted, leftover = {}, []
+    for chapter in chapters:
+        raw = chapter["raw"]
+        year_spans = []
+        for match in tp.KANJI_YEAR_RE.finditer(raw):
+            year_spans.append((match.start(1), match.end(1)))
+            key = match.group(1) + "年"
+            entry = converted.setdefault(key, {"from": key,
+                                               "to": tp._kanji_year_to_arabic(match) + "年",
+                                               "count": 0})
+            entry["count"] += 1
+        for i, ch in enumerate(raw):
+            if ch == "〇" and not any(a <= i < b for a, b in year_spans):
+                leftover.append(f"{chapter['chapter']}: {context_of(raw, i, i + 1)}")
+    return sorted(converted.values(), key=lambda e: -e["count"]), leftover
 
 
 # ------------------------------------------------------------ length steps
 
-def exclusion_reasons(sentence, unmeasured, min_spoken=0):
+def exclusion_reasons(sentence, unmeasured, min_spoken):
     reasons = []
     if sentence["spoken_chars"] < min_spoken:
         reasons.append(f"only {sentence['spoken_chars']} spoken characters")
-    if sentence["joined_lines"]:
-        reasons.append("a heading/unterminated line is glued into it")
-    if sentence["lines_spanned"] is None:
-        reasons.append("author-line structure could not be mapped")
-    elif sentence["lines_spanned"] > 1:
-        reasons.append(f"runs across {sentence['lines_spanned']} author lines")
-    if not sentence["terminated"]:
-        reasons.append("no terminator")
+    if sentence["heading_like"]:
+        reasons.append("heading-like line (no ending punctuation)")
     bad = sorted({ch for ch in sentence["text"] if ch in unmeasured})
     if bad:
         reasons.append("unmeasured symbol " + "".join(bad))
-    if ALNUM_RUN_RE.search(sentence["text"]):
-        reasons.append("latin letters or digits")
+    # Checked on the ENGINE text: a converted year arrives as digits too.
+    if ALNUM_RUN_RE.search(sentence["engine_text"]):
+        reasons.append("latin letters or digits reach the engine")
     return reasons
 
 
-def choose_length_steps(sentences, unmeasured, steps, min_spoken=0):
-    """`steps` real sentences whose lengths are spread EVENLY between the
-    chapter's shortest and longest usable sentence.
+def choose_length_steps(sentences, unmeasured, steps, min_spoken):
+    """`steps` real sentences spread EVENLY in length between the shortest
+    and longest usable one.
 
-    Evenly in length, not by percentile: the distribution is heavily
-    skewed short, so percentiles would put five of seven steps among short
-    sentences - and the long end is exactly where the 30 s question lives.
-    The percentile of each chosen step is reported so the skew is visible.
+    Evenly, not by percentile: the distribution is skewed short, so
+    percentiles would crowd the steps among short sentences - and the long
+    end is where the 30 s question lives. Each step's percentile is
+    reported so the skew stays visible.
 
-    A sentence is usable when nothing but its LENGTH could explain a bad
-    take: no glued heading, a real terminator, no unmeasured symbol and no
-    latin letters or digits, enough spoken characters, and one author line
-    only (see exclusion_reasons). The longest sentence overall is reported
-    separately when it is not usable."""
+    Usable = nothing but LENGTH could explain a bad take (exclusion_reasons).
+    The two ends are chosen first: filling the middle first let a sparse
+    long tail hand the longest sentence to the step below it."""
     usable = [s for s in sentences if not exclusion_reasons(s, unmeasured, min_spoken)]
     if not usable:
         return [], usable
     lo = min(s["tts_len"] for s in usable)
     hi = max(s["tts_len"] for s in usable)
     all_lengths = sorted(s["tts_len"] for s in sentences)
+    targets = [lo if steps == 1 else lo + (hi - lo) * i / (steps - 1) for i in range(steps)]
+    order = [0, steps - 1] + list(range(1, steps - 1)) if steps > 1 else [0]
 
     chosen, used = [], set()
-    targets = [lo if steps == 1 else lo + (hi - lo) * step / (steps - 1)
-               for step in range(steps)]
-    # The two ends first: they are exact by construction, and filling the
-    # middle first let a sparse long tail hand the longest sentence to the
-    # step BELOW it, pushing the last step back down the distribution.
-    order = [0, steps - 1] + list(range(1, steps - 1)) if steps > 1 else [0]
     for step in order:
         target = targets[step]
         ranked = sorted(usable, key=lambda s: (abs(s["tts_len"] - target), s["index"]))
-        pick = next((s for s in ranked if (s["chapter"], s["index"]) not in used), None)
+        pick = next((s for s in ranked if s["index"] not in used), None)
         if pick is None:
             break
-        used.add((pick["chapter"], pick["index"]))
-        below = sum(1 for v in all_lengths if v <= pick["tts_len"])
+        used.add(pick["index"])
         chosen.append({
-            "step": step + 1,
             "target_len": round(target, 1),
             "tts_len": pick["tts_len"],
             "display_len": pick["display_len"],
-            "percentile": round(100 * below / len(all_lengths), 1),
+            "percentile": round(100 * sum(1 for v in all_lengths if v <= pick["tts_len"])
+                                / len(all_lengths), 1),
             "chapter": pick["chapter"],
             "sentence_index": pick["index"],
             "text": pick["text"],
@@ -528,107 +474,103 @@ def choose_length_steps(sentences, unmeasured, steps, min_spoken=0):
 # ------------------------------------------------------------ scope
 
 def scope_for(args):
-    """(book name, scope id, [chapter paths])."""
+    """(book name, scope id, [chapter paths], [excluded names])."""
+    excluded = []
     if args.book:
         folder = os.path.abspath(args.book)
-        paths = sorted(os.path.join(folder, n) for n in os.listdir(folder)
-                       if n.lower().endswith(".txt"))
-        book_dir = folder
-        scope = "book"
+        skip = {os.path.splitext(e)[0] for e in (args.exclude or [])}
+        paths = []
+        for n in sorted(os.listdir(folder)):
+            if not n.lower().endswith(".txt"):
+                continue
+            if os.path.splitext(n)[0] in skip:
+                excluded.append(os.path.splitext(n)[0])
+                continue
+            paths.append(os.path.join(folder, n))
+        book_dir, scope = folder, "book"
     else:
         paths = [os.path.abspath(p) for p in args.chapter]
         book_dir = os.path.dirname(paths[0])
         scope = "+".join(os.path.splitext(os.path.basename(p))[0] for p in paths)
-    # F:\AUDIOBOOK-FINAL\yojo-senki\text -> yojo-senki
     name = os.path.basename(book_dir)
     if name.lower() == "text":
         name = os.path.basename(os.path.dirname(book_dir))
-    return args.name or name, scope, paths
+    return args.name or name, scope, paths, excluded
 
 
 def run(args, settings):
     normalize, normalizer_path = load_irodori_normalizer(settings["irodori_root"])
-    book, scope, paths = scope_for(args)
+    engine = make_engine(normalize)
+    book, scope, paths, excluded = scope_for(args)
     if not paths:
         raise SystemExit("No .txt chapter files found.")
 
-    chapters = [analyse_chapter(p, normalize) for p in paths]
-    symbols, alnum = symbol_inventory(chapters, normalize)
-    unmeasured = unmeasured_chars(symbols)
+    chapters = [analyse_chapter(p, engine) for p in paths]
+    symbols, alnum = symbol_inventory(chapters, engine)
+    unmeasured = {s["char"] for s in symbols if s["status"] == "unmeasured"}
+    years, leftover_zero = kanji_years(chapters)
+    limits = [int(v) for v in settings["report_limits"]]
+    min_spoken = int(settings["min_spoken_chars"])
 
     all_sentences = [s for c in chapters for s in c["sentences"]]
     per_chapter = []
     for chapter in chapters:
-        lengths = [s["tts_len"] for s in chapter["sentences"]]
-        min_spoken = int(settings["min_spoken_chars"])
-        steps, usable = choose_length_steps(chapter["sentences"], unmeasured,
+        sents = chapter["sentences"]
+        lengths = [s["tts_len"] for s in sents]
+        steps, usable = choose_length_steps(sents, unmeasured,
                                             int(settings["length_steps"]), min_spoken)
-        multi_line = [s for s in chapter["sentences"] if (s["lines_spanned"] or 1) > 1]
-        longest = max(chapter["sentences"], key=lambda s: s["tts_len"], default=None)
-        longest_info = None
-        if longest:
-            longest_info = {
-                "tts_len": longest["tts_len"], "display_len": longest["display_len"],
-                "index": longest["index"], "text": longest["text"],
-                "excluded_because": exclusion_reasons(longest, unmeasured, min_spoken),
-            }
+        longest = max(sents, key=lambda s: s["tts_len"], default=None)
+        lps = chapter["lines_per_section"]
         per_chapter.append({
             "chapter": chapter["chapter"],
             "path": chapter["path"],
             "chars": chapter["chars"],
             "bom": chapter["bom"],
-            "sections": len(chapter["sections"]),
-            "lines": sum(s["lines"] for s in chapter["sections"]),
-            "heading_like_sections": [s["first_line"] for s in chapter["sections"]
-                                      if s["heading_like"]],
-            "lines_per_section": length_stats([s["lines"] for s in chapter["sections"]]),
-            "sentences_per_section": length_stats([s["sentences"] for s in chapter["sections"]]),
-            "sentence_tts_len": length_stats(lengths),
-            "sentence_display_len": length_stats([s["display_len"] for s in chapter["sentences"]]),
-            "over": over_counts(lengths),
-            "histogram": histogram(lengths),
-            "unterminated_sentences": sum(1 for s in chapter["sentences"] if not s["terminated"]),
-            "sentences_with_glued_lines": sum(1 for s in chapter["sentences"] if s["joined_lines"]),
-            "multi_line_sentences": len(multi_line),
-            "multi_line_tts_len": length_stats([s["tts_len"] for s in multi_line]),
-            "line_aware_tts_len": length_stats(chapter["line_aware_lengths"]),
-            "line_aware_over": over_counts(chapter["line_aware_lengths"]),
-            "glued_lines": chapter["glued_lines"],
-            "skipped_punct_only": chapter["skipped_punct_only"],
+            "sections": chapter["sections"],
+            "lines": sum(lps),
+            "lines_per_section": length_stats(lps),
+            "heading_like_lines": [s["text"] for s in sents if s["heading_like"]],
+            "skipped_units": chapter["skipped"],
             "drift": chapter["drift"],
+            "sentence_tts_len": length_stats(lengths),
+            "normal_mode_tts_len": length_stats(chapter["normal_lengths"]),
+            "histogram": histogram(lengths),
+            "split": [{k: v for k, v in row.items() if k != "stuck"}
+                      for row in split_table(sents, limits, engine)],
             "usable_sentences": len(usable),
-            "longest_overall": longest_info,
+            "longest_overall": None if not longest else {
+                "tts_len": longest["tts_len"], "index": longest["index"],
+                "text": longest["text"],
+                "excluded_because": exclusion_reasons(longest, unmeasured, min_spoken)},
             "length_steps": steps,
         })
 
     lengths = [s["tts_len"] for s in all_sentences]
     report = {
-        "version": 1,
+        "version": 2,
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "book": book,
         "scope": scope,
         "chapters_in_scope": [c["chapter"] for c in chapters],
+        "chapters_excluded": excluded,
+        "rules": "dynamic mode (text_pipeline.dynamic_sentences / split_for_length / "
+                 "prepare_tts_text_dynamic)",
         "irodori_normalizer": normalizer_path if normalize else None,
-        "length_measure": "tts_len = characters the engine receives "
-                          "(prepare_tts_text, then Irodori normalize_text)",
         "overall": {
             "sentences": len(all_sentences),
             "sentence_tts_len": length_stats(lengths),
-            "sentence_display_len": length_stats([s["display_len"] for s in all_sentences]),
-            "over": over_counts(lengths),
+            "normal_mode_tts_len": length_stats(
+                [v for c in chapters for v in c["normal_lengths"]]),
             "histogram": histogram(lengths),
             "drift": sum(c["drift"] for c in chapters),
-            "multi_line_sentences": sum(1 for s in all_sentences
-                                        if (s["lines_spanned"] or 1) > 1),
-            "line_aware_tts_len": length_stats(
-                [v for c in chapters for v in c["line_aware_lengths"]]),
-            "line_aware_over": over_counts(
-                [v for c in chapters for v in c["line_aware_lengths"]]),
+            "split": split_table(all_sentences, limits, engine),
         },
         "chapters": per_chapter,
-        "symbols": [{k: v for k, v in s.items()} for s in symbols],
+        "symbols": symbols,
+        "kanji_years": years,
+        "zero_not_in_a_year": leftover_zero,
         "latin_digit_runs": alnum,
-        "sentences": [{k: v for k, v in s.items()} for s in all_sentences],
+        "sentences": all_sentences,
     }
 
     out_dir = os.path.join(settings["work_root"], book, scope, "analysis")
@@ -642,185 +584,195 @@ def run(args, settings):
 
 # ------------------------------------------------------------ markdown
 
+STATS_HEAD = ("| | sentences | min | p25 | median | mean | p75 | p90 | p99 | max |\n"
+              "|---|---|---|---|---|---|---|---|---|---|")
+
+
 def stats_row(label, st):
     if not st.get("count"):
-        return f"| {label} | 0 | | | | | | | |"
+        return f"| {label} | 0 | | | | | | | | |"
     return (f"| {label} | {st['count']} | {st['min']} | {st['p25']} | {st['median']} | "
-            f"{st['mean']} | {st['p75']} | {st['p90']} | {st['max']} |")
-
-
-STATS_HEAD = ("| | sentences | min | p25 | median | mean | p75 | p90 | max |\n"
-              "|---|---|---|---|---|---|---|---|---|")
+            f"{st['mean']} | {st['p75']} | {st['p90']} | {st['p99']} | {st['max']} |")
 
 
 def bar_chart(hist, width=40):
     if not hist:
         return ""
     top = max(h["count"] for h in hist) or 1
-    lines = []
-    for h in hist:
-        bar = "█" * max(1 if h["count"] else 0, round(width * h["count"] / top))
-        lines.append(f"{h['from']:>4}-{h['to']:<4} {h['count']:>5}  {bar}")
+    lines = [f"{h['from']:>4}-{h['to']:<4} {h['count']:>5}  "
+             + "█" * max(1 if h["count"] else 0, round(width * h["count"] / top))
+             for h in hist]
     return "```\n" + "\n".join(lines) + "\n```"
 
 
-def md_escape(text):
+def esc(text):
     return (text or "").replace("|", "\\|")
 
 
 def render_markdown(r):
     o = []
     add = o.append
-    add(f"# Text analysis - {r['book']} ({r['scope']})\n")
-    add(f"Created {r['created']}. Chapters: {', '.join(r['chapters_in_scope'])}.\n")
-    add(f"Length measure: **{r['length_measure']}**. "
-        f"Irodori normaliser: `{r['irodori_normalizer'] or 'NOT FOUND - pipeline text only'}`.\n")
     ov = r["overall"]
-    add(f"Split check: **drift = {ov['drift']}** (paragraphs whose sentences do not "
-        f"rejoin to the paragraph; must be 0).\n")
+    add(f"# Text analysis - {r['book']} ({r['scope']})\n")
+    add(f"Created {r['created']}. Chapters: {', '.join(r['chapters_in_scope'])}."
+        + (f" Excluded: {', '.join(r['chapters_excluded'])}." if r["chapters_excluded"] else "")
+        + "\n")
+    add(f"Rules: **{r['rules']}**. Length = characters the ENGINE receives, after "
+        f"Irodori's normaliser (`{r['irodori_normalizer'] or 'NOT FOUND'}`).\n")
+    split_drift = sum(row["split_drift"] for row in ov["split"])
+    add(f"Checks: **drift = {ov['drift']}** (sentences rejoin to the lines), "
+        f"**split drift = {split_drift}** (cut pieces rejoin to their sentence). Both must be 0.\n")
 
-    add("## Sentence length, engine characters\n")
+    add("## Sentence length\n")
+    add("A line break ends a sentence, as do 。？……\n")
     add(STATS_HEAD)
-    add(stats_row("**all in scope**", ov["sentence_tts_len"]))
+    add(stats_row("**dynamic mode, all**", ov["sentence_tts_len"]))
     for c in r["chapters"]:
         add(stats_row(c["chapter"], c["sentence_tts_len"]))
+    add(stats_row("*normal mode today, all*", ov["normal_mode_tts_len"]))
     add("")
-    add("Reader-facing (display) length, for comparison:\n")
-    add(STATS_HEAD)
-    add(stats_row("**all in scope**", ov["sentence_display_len"]))
-    add("")
-    add("Sentences longer than N engine characters:\n")
-    add("| | " + " | ".join(f">{t}" for t in THRESHOLDS) + " |")
-    add("|---|" + "---|" * len(THRESHOLDS))
-    add("| **all** | " + " | ".join(str(ov["over"][str(t)]) for t in THRESHOLDS) + " |")
-    for c in r["chapters"]:
-        add(f"| {c['chapter']} | " + " | ".join(str(c["over"][str(t)]) for t in THRESHOLDS) + " |")
-    add("")
-    add("### Sentences that run across author lines\n")
-    add(f"**{ov['multi_line_sentences']} of {ov['sentences']}** sentences span more "
-        "than one of the author's lines. `split_paragraphs` joins lines and only "
-        "`。？……` end a sentence, so dialogue closed with `」` (or `！」`) and no "
-        "`。` is welded to the narration line after it. If a line break ALSO ended "
-        "a sentence, the lengths would be:\n")
-    add(STATS_HEAD)
-    add(stats_row("generator rule (today)", ov["sentence_tts_len"]))
-    add(stats_row("line break also ends", ov["line_aware_tts_len"]))
-    add("")
-    add("| | " + " | ".join(f">{t}" for t in THRESHOLDS) + " |")
-    add("|---|" + "---|" * len(THRESHOLDS))
-    add("| generator rule | " + " | ".join(str(ov["over"][str(t)]) for t in THRESHOLDS) + " |")
-    add("| line break also ends | " + " | ".join(
-        str(ov["line_aware_over"][str(t)]) for t in THRESHOLDS) + " |")
-    add("")
-    add("| chapter | multi-line sentences | their median length | their max |")
-    add("|---|---|---|---|")
-    for c in r["chapters"]:
-        st = c["multi_line_tts_len"]
-        add(f"| {c['chapter']} | {c['multi_line_sentences']} | {st.get('median', '')} | "
-            f"{st.get('max', '')} |")
-    add("")
-    add("Distribution, all in scope (10-character bins):\n")
     add(bar_chart(ov["histogram"]))
     add("")
 
+    add("## Long sentences after cutting\n")
+    add("For each candidate comfortable length L (the real one comes from the sweep): "
+        "sentences longer than L are cut after 、」）, before 「（ (0.7 s) or after "
+        "！!? (1.0 s). The set of cuts is chosen to fit L if at all possible, then with "
+        f"the fewest pieces, then the most even; no piece shorter than "
+        f"{tp.DYNAMIC_MIN_PIECE} engine characters.\n")
+    add("| L | sentences over L | pieces after cutting | 0.7 s cuts | 1.0 s cuts | "
+        "**still over L** | longest piece |")
+    add("|---|---|---|---|---|---|---|")
+    for row in ov["split"]:
+        add(f"| {row['limit']} | {row['sentences_over']} | {row['pieces_after_split']} | "
+            f"{row['comma_cuts']} | {row['sentence_cuts']} | **{row['still_over']}** | "
+            f"{row['longest_after_split']} |")
+    add("")
+    add("Still over L, per chapter:\n")
+    add("| chapter | " + " | ".join(f"L={row['limit']}" for row in ov["split"]) + " |")
+    add("|---|" + "---|" * len(ov["split"]))
+    for c in r["chapters"]:
+        add(f"| {c['chapter']} | " + " | ".join(
+            f"{row['still_over']} / {row['sentences_over']}" for row in c["split"]) + " |")
+    add("\n(still over / sentences over)\n")
+    # Longest L first, and each list shows only sentences not already shown
+    # at a longer L - otherwise every list opens with the same worst ten.
+    shown_before = set()
+    for row in sorted(ov["split"], key=lambda row: -row["limit"]):
+        fresh = [s for s in row["stuck"] if (s["chapter"], s["index"]) not in shown_before]
+        shown_before.update((s["chapter"], s["index"]) for s in row["stuck"])
+        if not row["stuck"]:
+            continue
+        add(f"### Cannot be brought under L={row['limit']} - {row['still_over']} "
+            f"(new at this L: {len(fresh)}, worst shown)\n")
+        for s in fresh[:8]:
+            shown = " ‖ ".join(esc(p) for p in s["pieces"])
+            add(f"- {s['chapter']} #{s['index']} - {s['tts_len']} chars, longest piece "
+                f"{s['worst_piece']}: {shown}")
+        if len(fresh) > 8:
+            add(f"- … {len(fresh) - 8} more in analysis.json")
+        add("")
+
     add("## Structure\n")
     add("| chapter | chars | BOM | sections | lines | lines/section median (max) | "
-        "sentences/section median (max) | heading-like sections | glued lines | unterminated | punct-only skipped |")
-    add("|---|---|---|---|---|---|---|---|---|---|---|")
+        "heading-like lines | skipped (punctuation or stripped only) |")
+    add("|---|---|---|---|---|---|---|---|")
     for c in r["chapters"]:
-        lps, sps = c["lines_per_section"], c["sentences_per_section"]
+        lps = c["lines_per_section"]
         add(f"| {c['chapter']} | {c['chars']} | {'yes' if c['bom'] else ''} | {c['sections']} | "
             f"{c['lines']} | {lps.get('median', 0)} ({lps.get('max', 0)}) | "
-            f"{sps.get('median', 0)} ({sps.get('max', 0)}) | {len(c['heading_like_sections'])} | "
-            f"{len(c['glued_lines'])} | {c['unterminated_sentences']} | {c['skipped_punct_only']} |")
+            f"{len(c['heading_like_lines'])} | {len(c['skipped_units'])} |")
     add("")
-    add("- **section** = text between blank lines (what `split_sections` splits on).\n"
-        "- **line** = a single-newline line inside a section. `split_paragraphs` joins "
-        "them, so they get no silence of their own today.\n"
-        "- **heading-like** = a section whose first line does not end on a terminator, "
-        "break point or closing bracket - chapter titles, locations, dates.\n"
-        "- **glued line** = such a line that is NOT the last in its section, so the "
-        "join welds it onto the next sentence and that sentence is longer than what "
-        "the author wrote.\n")
+    add("A **section** is text between blank lines (1.5 s before it). A **line** is one "
+        "author line; in dynamic mode it ends a sentence (1.0 s). **Heading-like** = a "
+        "line ending without punctuation - titles, locations, dates - now its own "
+        "sentence instead of being glued to the next one.\n")
     for c in r["chapters"]:
-        if c["heading_like_sections"] or c["glued_lines"]:
-            add(f"### {c['chapter']}\n")
-            if c["heading_like_sections"]:
-                add("Heading-like sections: " + " / ".join(
-                    f"`{md_escape(h)}`" for h in c["heading_like_sections"]) + "\n")
-            for g in c["glued_lines"][:12]:
-                add(f"- glued `{md_escape(g['line'])}` -> sentence of "
-                    f"{len(g['sentence'])} chars: {md_escape(g['sentence'][:70])}…")
-            if len(c["glued_lines"]) > 12:
-                add(f"- … {len(c['glued_lines']) - 12} more in analysis.json")
-            add("")
+        if c["heading_like_lines"]:
+            add(f"- {c['chapter']}: " + " / ".join(
+                f"`{esc(h)}`" for h in c["heading_like_lines"][:15])
+                + (f" … +{len(c['heading_like_lines']) - 15}"
+                   if len(c["heading_like_lines"]) > 15 else ""))
+    add("")
 
     add("## Length steps per chapter (candidate audition sentences)\n")
-    add("Spread evenly in length between the shortest and longest USABLE sentence. "
-        "Usable = enough spoken characters, one author line, no glued heading, has a "
-        "terminator, no unmeasured symbol, no latin letters/digits - so a bad take "
-        "can only be blamed on length.\n")
+    add("Evenly spread in length between the shortest and longest USABLE sentence. "
+        "Usable = at least the minimum spoken characters, not heading-like, no "
+        "unmeasured symbol, no latin letters or digits reaching the engine.\n")
     for c in r["chapters"]:
         add(f"### {c['chapter']} - {c['usable_sentences']} of "
             f"{c['sentence_tts_len'].get('count', 0)} sentences usable\n")
         lo = c["longest_overall"]
         if lo and lo["excluded_because"]:
-            add(f"Longest overall is {lo['tts_len']} chars (#{lo['index']}) but not usable: "
+            add(f"Longest overall is {lo['tts_len']} chars (#{lo['index']}), not usable: "
                 f"{'; '.join(lo['excluded_because'])}.\n")
         add("| step | target | engine chars | percentile | # | sentence |")
         add("|---|---|---|---|---|---|")
         for s in c["length_steps"]:
             add(f"| {s['step']} | {s['target_len']} | {s['tts_len']} | {s['percentile']}% | "
-                f"{s['sentence_index']} | {md_escape(s['text'])} |")
+                f"{s['sentence_index']} | {esc(s['text'])} |")
         add("")
 
     add("## Symbols\n")
-    add("`measured` only where CLAUDE.md records a pause probe. `engine` is what "
-        "Irodori's normaliser makes of the character in mid-sentence, AFTER the "
-        "pipeline. A deleted character is never heard, whatever it looks like.\n")
-    add("| char | code | count | pipeline | engine | status | note / examples |")
+    add("`engine` = what reaches Irodori's model mid-sentence, after the dynamic TTS "
+        "text rules AND Irodori's normaliser.\n")
+    add("| char | code | count | dynamic mode | engine | status | note / examples |")
     add("|---|---|---|---|---|---|---|")
     for s in r["symbols"]:
         shown = {" ": "(space)", "\u3000": "(IDSP)"}.get(s["char"], s["char"])
-        detail = s["note"] if s["status"] == "measured" else " · ".join(
-            md_escape(e) for e in s["examples"])
-        add(f"| {md_escape(shown)} | {s['codepoint']} | {s['count']} | "
-            f"{md_escape(s['pipeline_role'])} | {md_escape(s['engine_effect'])} | "
-            f"{s['status']} | {detail} |")
+        detail = s["note"] if s["status"] in ("measured", "judged by ear") else \
+            " · ".join(esc(e) for e in s["examples"])
+        add(f"| {esc(shown)} | {s['codepoint']} | {s['count']} | {esc(s['role'])} | "
+            f"{esc(s['engine_effect'])} | {s['status']} | {detail} |")
     add("")
+
+    add("## Kanji years\n")
+    add("| source | sent as | count |")
+    add("|---|---|---|")
+    for y in r["kanji_years"]:
+        add(f"| {y['from']} | {y['to']} | {y['count']} |")
+    add("")
+    left = r["zero_not_in_a_year"]
+    add(f"**{len(left)}** 〇 not inside a converted year - these still reach the "
+        "engine as ○:\n")
+    for e in left[:20]:
+        add(f"- {esc(e)}")
+    if len(left) > 20:
+        add(f"- … {len(left) - 20} more in analysis.json")
+    add("")
+
     add("## Latin letters and digit runs\n")
     add("Irodori's NFKC step turns full-width letters and digits into ascii. How a "
-        "seiyuu READS them (ＷＴＮ, 1923, Ｘ) is unmeasured.\n")
+        "seiyuu READS them is unmeasured.\n")
     add("| run | count | example |")
     add("|---|---|---|")
-    for run_entry in r["latin_digit_runs"][:40]:
-        add(f"| {md_escape(run_entry['run'])} | {run_entry['count']} | "
-            f"{md_escape(run_entry['examples'][0])} |")
-    if len(r["latin_digit_runs"]) > 40:
-        add(f"\n… {len(r['latin_digit_runs']) - 40} more distinct runs in analysis.json")
+    for e in r["latin_digit_runs"][:30]:
+        add(f"| {esc(e['run'])} | {e['count']} | {esc(e['examples'][0])} |")
+    if len(r["latin_digit_runs"]) > 30:
+        add(f"\n… {len(r['latin_digit_runs']) - 30} more distinct runs in analysis.json")
     add("")
     return "\n".join(o)
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description="Book profiler, stage 1: text analysis")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--book", help="folder of chapter .txt files - profile the whole book")
     group.add_argument("--chapter", action="append",
                        help="one chapter .txt; repeat for several - profile only these")
+    parser.add_argument("--exclude", action="append",
+                        help="with --book: a chapter to leave out (e.g. chapter_007); repeatable")
     parser.add_argument("--name", help="book name for the output folder "
                                        "(default: the folder name, or its parent when it is 'text')")
     args = parser.parse_args()
-    settings = load_settings()
-    report, out_dir = run(args, settings)
+    report, out_dir = run(args, load_settings())
     ov = report["overall"]
     st = ov["sentence_tts_len"]
     print(f"{report['book']} ({report['scope']}): {len(report['chapters'])} chapter(s), "
           f"{ov['sentences']} sentences, engine length min {st.get('min')} / "
-          f"median {st.get('median')} / max {st.get('max')}, drift {ov['drift']}")
-    print(f"unmeasured symbols reaching the engine: "
-          f"{sum(1 for s in report['symbols'] if s['status'] == 'unmeasured' and s['engine_receives'])}")
+          f"median {st.get('median')} / max {st.get('max')}, drift {ov['drift']}, "
+          f"split drift {sum(row['split_drift'] for row in ov['split'])}")
     print(f"written to {out_dir}")
 
 

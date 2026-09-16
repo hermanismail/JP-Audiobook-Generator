@@ -441,7 +441,7 @@ def _collapse_redundant_punctuation(text):
     return "".join(out)
 
 
-def _convert_brackets(text):
+def _convert_brackets(text, brackets=BRACKETS):
     """Removes every "「"/"」" for TTS (2026-09 v4 - Irodori-TTS turned out
     not to insert a natural pause reliably around a kept bracket, even with
     a "、" placed next to it - see prepare_tts_text()'s docstring). A
@@ -460,7 +460,7 @@ def _convert_brackets(text):
     n = len(text)
     out = []
     for i, ch in enumerate(text):
-        if ch not in BRACKETS:
+        if ch not in brackets:
             out.append(ch)
             continue
         prev_ch = text[i - 1] if i > 0 else None
@@ -607,6 +607,205 @@ def build_chunks(raw_text, soft_limit=SOFT_LIMIT, hard_limit=HARD_LIMIT):
         "sentences": sentences_by_paragraph,
     }
     return chunks, working_data
+
+
+# --- Dynamic profile mode -------------------------------------------------
+#
+# Everything below is ADDITIVE. build_chunks() and prepare_tts_text() - normal
+# mode, and what chapter-repair uses to recover a published chunk's TTS text -
+# are untouched by it. Dynamic mode (book-profiler, 2026-09-16) sends the TTS
+# one sentence at a time, each with parameters picked for its length, so it
+# needs a different notion of a sentence and of where a long one may be cut:
+#
+#   - a LINE BREAK ends a sentence. Normal mode joins an author's lines, and
+#     because dialogue in these books closes with 」 and no 。, a line of
+#     dialogue was welded to the narration after it: 910 of yojo-senki's
+#     7,020 sentences ran across lines, including its longest.
+#   - a sentence longer than the seiyuu's comfortable length is cut at a
+#     break point. Where the cut lands decides the silence inserted there:
+#       after 、 or a closing 」 ） )        -> "comma"    (0.7 s)
+#       before an opening 「 （ (           -> "comma"    (0.7 s)
+#       after ！ ! ?                       -> "sentence" (1.0 s)
+#     ！ stays a break point and NOT a terminator - see BREAK_CHARS for the
+#     measurement. When one cut is both ("！」"), the longer silence wins.
+
+DYNAMIC_COMMA_AFTER = COMMA + "」）)"
+DYNAMIC_SENTENCE_AFTER = "！!?"
+DYNAMIC_COMMA_BEFORE = "「（("
+DYNAMIC_SILENCE_KINDS = ("comma", "sentence", "section")
+
+# Stripped before TTS, never spoken (user decision 2026-09-16: yojo-senki's
+# "×××××××××××" is a redaction, not something to read).
+DYNAMIC_STRIP_RE = re.compile("[×]")
+
+# A year written in positional kanji digits - 二〇一三年, 一九二三年 - becomes
+# arabic digits for the TTS (user decision 2026-09-16). Irodori's normaliser
+# otherwise turns 〇 into the circle ○. Four digits only: 二三年 is "two or
+# three years", not the year 23. Mixed forms with 十 (二〇十三年) are left.
+KANJI_DIGITS = "〇一二三四五六七八九"
+KANJI_YEAR_RE = re.compile(
+    "(?<![" + KANJI_DIGITS + "十百千万])([" + KANJI_DIGITS + "]{4})(?=年)")
+DYNAMIC_BRACKETS = "「」（）()"
+
+
+def _kanji_year_to_arabic(match):
+    return "".join(str(KANJI_DIGITS.index(ch)) for ch in match.group(1))
+
+
+def prepare_tts_text_dynamic(text):
+    """Dynamic mode's version of prepare_tts_text(). Same steps, plus:
+    kanji years to arabic digits, × stripped, and parentheses treated like
+    「」 - removed at an edge or next to punctuation, otherwise a 、, so the
+    seiyuu voices the pause itself. The reader-facing text keeps all of it."""
+    text = KANJI_YEAR_RE.sub(_kanji_year_to_arabic, text)
+    text = DYNAMIC_STRIP_RE.sub("", text)
+    text = DASH_RUN_RE.sub(COMMA, text)
+    text = _convert_brackets(text, DYNAMIC_BRACKETS)
+    text = _collapse_redundant_punctuation(text)
+    return text
+
+
+def split_lines(section_text):
+    """A section's author lines, cleaned exactly as split_paragraphs()
+    cleans a paragraph - inline whitespace, invisibles, ── -> ─ - but NOT
+    joined. Empty lines are dropped."""
+    lines = []
+    for line in section_text.split("\n"):
+        line = INLINE_WHITESPACE_RE.sub("", line)
+        line = INVISIBLE_RE.sub("", line)
+        line = DASH_RUN_RE.sub(DASH, line)
+        if line.strip():
+            lines.append(line)
+    return lines
+
+
+def dynamic_sentences(raw_text):
+    """The chapter as dynamic mode sees it: a flat list of
+        {"section", "line", "sentence", "text", "gap_before"}
+    where a sentence ends at a terminator (TERMINATOR_RE) or at the end of
+    a line, and gap_before is "chapter_start" / "section" / "sentence".
+
+    A unit that is nothing but punctuation is folded onto the one before
+    it, as build_chunks() does, so it never becomes a silent request of its
+    own. Concatenating every "text" gives back every cleaned line in order
+    - nothing is added or lost."""
+    out = []
+    for sec_idx, section in enumerate(split_sections(raw_text), start=1):
+        for line_idx, line in enumerate(split_lines(section), start=1):
+            for sen_idx, unit in enumerate(split_sentences(line), start=1):
+                if out and PUNCT_ONLY_RE.fullmatch(unit):
+                    out[-1]["text"] += unit
+                    continue
+                if not out:
+                    gap = "chapter_start"
+                elif line_idx == 1 and sen_idx == 1:
+                    gap = "section"
+                else:
+                    gap = "sentence"
+                out.append({"section": sec_idx, "line": line_idx,
+                            "sentence": sen_idx, "text": unit, "gap_before": gap})
+    return out
+
+
+def dynamic_cut_points(text):
+    """{index: silence kind} for every place `text` may be cut. An index is
+    where the NEXT piece starts. Cuts at 0 or len(text) are not cuts."""
+    cuts = {}
+
+    def add(index, kind):
+        if 0 < index < len(text):
+            if cuts.get(index) != "sentence":
+                cuts[index] = kind
+
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in DYNAMIC_COMMA_BEFORE:
+            add(i, "comma")
+        if ch in DYNAMIC_COMMA_AFTER or ch in DYNAMIC_SENTENCE_AFTER:
+            # Take the whole run of marks and closers as one token, so the
+            # cut never lands between "！" and its "」".
+            j, strongest = i, "comma"
+            while j < n and (text[j] in DYNAMIC_COMMA_AFTER or
+                             text[j] in DYNAMIC_SENTENCE_AFTER or
+                             text[j] in CLOSING_BRACKETS):
+                if text[j] in DYNAMIC_SENTENCE_AFTER:
+                    strongest = "sentence"
+                j += 1
+            add(j, strongest)
+            i = j
+            continue
+        i += 1
+    return cuts
+
+
+DYNAMIC_MIN_PIECE = 5
+
+
+def split_for_length(text, limit, measure=len, min_piece=DYNAMIC_MIN_PIECE):
+    """Cuts one sentence into pieces no longer than `limit`, measured with
+    `measure` (the profiler passes the length the ENGINE receives).
+
+    Returns [(piece, gap_kind)], gap_kind being the silence BEFORE the
+    piece: None for the first (it keeps the sentence's own gap), then
+    "comma" or "sentence" per dynamic_cut_points().
+
+    Chooses the whole set of cuts at once, ranked by:
+      1. how far the longest piece is OVER the limit (0 when it all fits),
+      2. fewest pieces - no cut, and no silence, that is not needed,
+      3. the shortest longest piece - even pieces, not 40 + a stray "と。".
+    A greedy "latest cut that fits" was tried first and failed exactly
+    there: where nothing fitted it shaved off "だから、" and left a 93-char
+    remainder, and elsewhere it stranded a lone "と。" as a request of its
+    own. A piece still over the limit here means the text genuinely has no
+    better set of cuts - the caller reports it.
+
+    No piece may be shorter than `min_piece`: even the ranking above would
+    otherwise cut "だから、" off a 97-char sentence to bring its overflow
+    from 17 to 13 - a silence and a four-character request, for nothing."""
+    if measure(text) <= limit:
+        return [(text, None)]
+    cuts = dynamic_cut_points(text)
+    if not cuts:
+        return [(text, None)]
+    points = [0] + sorted(cuts) + [len(text)]
+    size = {}
+
+    def piece_len(i, j):
+        if (i, j) not in size:
+            size[(i, j)] = measure(text[points[i]:points[j]])
+        return size[(i, j)]
+
+    last = len(points) - 1
+    # best[j][p]: smallest possible longest piece covering text[:points[j]]
+    # in exactly p pieces, with the choice that achieved it.
+    best = [dict() for _ in points]
+    best[0][0] = (0, None)
+    for j in range(1, last + 1):
+        for i in range(j):
+            if piece_len(i, j) < min_piece:
+                continue
+            for p, (longest, _prev) in best[i].items():
+                candidate = max(longest, piece_len(i, j))
+                current = best[j].get(p + 1)
+                if current is None or candidate < current[0]:
+                    best[j][p + 1] = (candidate, i)
+
+    def rank(p):
+        longest = best[last][p][0]
+        return (max(0, longest - limit), p, longest)
+
+    if not best[last]:
+        return [(text, None)]
+    count = min(best[last], key=rank)
+    bounds, j, p = [], last, count
+    while j:
+        i = best[j][p][1]
+        bounds.append((i, j))
+        j, p = i, p - 1
+    bounds.reverse()
+    return [(text[points[i]:points[j]], None if i == 0 else cuts[points[i]])
+            for i, j in bounds]
 
 
 def chunk_filename(chunk, ext="txt"):
