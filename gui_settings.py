@@ -113,7 +113,24 @@ DEFAULT_SETTINGS = {
     # so the GPU is only occupied while translation is actually running.
     "llama_server_exe": r"C:\llama.cpp\llama-server.exe",
     "llama_model_path": r"C:\llama.cpp\models\vntl-llama3-8b-v2-hf-q5_k_m.gguf",
+    # Generation mode (2026-09-17) - see run_audiobook.py's matching
+    # defaults, which must be kept in step with these.
+    "generation_mode": "normal",
+    "dynamic": {
+        "profile_path": "",
+        "style": "scale_default",
+        "assign": "all",
+        "chapters": {},
+    },
 }
+
+
+def merge_dynamic_defaults(loaded):
+    """Kept identical to run_audiobook.merge_dynamic_defaults()."""
+    block = dict(DEFAULT_SETTINGS["dynamic"])
+    block["chapters"] = {}
+    block.update(loaded.get("dynamic") or {})
+    return block
 
 # ---------------------------------------------------------------------------
 # Design tokens (matches Documentation/mockup_GUI_20260817.png)
@@ -182,6 +199,7 @@ def load_settings():
 
     merged = dict(DEFAULT_SETTINGS)
     merged.update(loaded)
+    merged["dynamic"] = merge_dynamic_defaults(loaded)
     return merged
 
 
@@ -331,6 +349,12 @@ class SettingsApp(ctk.CTk):
                 pass  # non-fatal cosmetic failure
 
         self.settings = load_settings()
+
+        # Dynamic profile mode state. Held here, not in widget variables,
+        # because the chapter plan is a nested structure; carried through
+        # _collect_and_validate() so a save never drops it.
+        self.generation_mode = self.settings["generation_mode"]
+        self.dynamic_state = json.loads(json.dumps(self.settings["dynamic"]))
 
         self.vars = {
             "input_folder": ctk.StringVar(value=self.settings["input_folder"]),
@@ -1440,6 +1464,10 @@ class SettingsApp(ctk.CTk):
             "llama_server_url": self.vars["llama_server_url"].get().strip(),
             "llama_server_exe": self.vars["llama_server_exe"].get().strip(),
             "llama_model_path": self.vars["llama_model_path"].get().strip(),
+            # Not in the fixed key list = dropped on the next save (see
+            # CLAUDE.md), so the mode and its plan are always written back.
+            "generation_mode": self.generation_mode,
+            "dynamic": json.loads(json.dumps(self.dynamic_state)),
         }
 
         for key in ("input_folder", "output_folder", "temp_dir", "speaker_path",
@@ -1472,6 +1500,8 @@ class SettingsApp(ctk.CTk):
         hand-trimmed preset still loads cleanly."""
         merged = dict(DEFAULT_SETTINGS)
         merged.update(data)
+        merged["dynamic"] = merge_dynamic_defaults(data)
+        self.dynamic_state = json.loads(json.dumps(merged["dynamic"]))
 
         for key in ("input_folder", "output_folder", "temp_dir",
                     "speaker_path", "uv_project_dir"):
@@ -1533,9 +1563,11 @@ class SettingsApp(ctk.CTk):
             # Keep it filesystem-safe; book titles here are often Japanese.
             suggested = "".join(c for c in book if c not in '\\/:*?"<>|').strip() or "settings"
 
+        # The mode is in the name: the two modes' presets are not
+        # interchangeable, and Import refuses the other mode's file.
         path = filedialog.asksaveasfilename(
             title="Export Settings", defaultextension=".json",
-            initialfile=f"{suggested}.json",
+            initialfile=f"{suggested}_{self.generation_mode}.json",
             filetypes=[("Settings preset", "*.json"), ("All files", "*.*")])
         if not path:
             return
@@ -1578,6 +1610,15 @@ class SettingsApp(ctk.CTk):
         # still carries the single legacy key - run it through the same
         # migration settings.json goes through so old presets keep working.
         data = migrate_silence_settings(data)
+
+        # A file without the key predates dynamic mode, so it is a normal one.
+        file_mode = data.get("generation_mode", "normal")
+        if file_mode != self.generation_mode:
+            messagebox.showerror(
+                "Import Refused",
+                f"{path}\n\nThis preset is for {file_mode} mode, and the generator "
+                f"is in {self.generation_mode} mode. Switch mode first, then import.")
+            return
 
         known = set(DEFAULT_SETTINGS) & set(data)
         if not known:

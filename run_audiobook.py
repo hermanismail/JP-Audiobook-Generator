@@ -6,6 +6,7 @@ import glob
 import shutil
 
 import text_pipeline
+import dynamic_profile
 
 # --- Configuration ---
 # Settings are now stored in settings.json (same folder as this script)
@@ -51,7 +52,31 @@ DEFAULT_SETTINGS = {
     # so the GPU is only occupied while translation is actually running.
     "llama_server_exe": r"C:\llama.cpp\llama-server.exe",
     "llama_model_path": r"C:\llama.cpp\models\vntl-llama3-8b-v2-hf-q5_k_m.gguf",
+    # Generation mode (2026-09-17). "normal" renders from the settings above.
+    # "dynamic" renders sentence by sentence from book-profiler profiles -
+    # see dynamic_profile.py and process_chapter_dynamic(). Keep in step
+    # with gui_settings.DEFAULT_SETTINGS.
+    "generation_mode": "normal",
+    "dynamic": {
+        # The profile and style every chapter gets ("assign": "all"), or
+        # the default for chapters without their own entry ("custom").
+        "profile_path": "",
+        "style": "scale_default",
+        "assign": "all",
+        # "custom" only: {"chapter_001": {"enabled", "profile_path", "style"}}.
+        # A chapter absent from this dict, or with enabled false, is skipped.
+        "chapters": {},
+    },
 }
+
+
+def merge_dynamic_defaults(loaded):
+    """The "dynamic" block is a nested dict, so a plain update() would let an
+    older or hand-trimmed file drop its default keys wholesale."""
+    block = dict(DEFAULT_SETTINGS["dynamic"])
+    block["chapters"] = {}
+    block.update(loaded.get("dynamic") or {})
+    return block
 
 
 def load_settings():
@@ -74,6 +99,7 @@ def load_settings():
 
     merged = dict(DEFAULT_SETTINGS)
     merged.update(loaded)
+    merged["dynamic"] = merge_dynamic_defaults(loaded)
     return merged
 
 
@@ -585,6 +611,115 @@ def run_batch_worker(jobs_path, chunks):
               f"produced for this chapter.")
 
 
+def finish_chapter(chapter_base, work_dir, audio_files, silence_kind_before_wav,
+                   sync_chunk_texts, silence_wavs, after_sync=None):
+    """Steps 5-6 of a chapter, shared by normal and dynamic mode: concat
+    list -> stitched .m4a -> FLAC master -> sync.json -> auto-tag.
+
+    `silence_kind_before_wav[i]` names the key of `silence_wavs` to put in
+    front of `audio_files[i]` - sentence/paragraph/section in normal mode,
+    section/sentence/comma in dynamic mode. `after_sync(sync_data)` runs once
+    sync.json is written and before tagging, while the per-chunk wavs still
+    exist - dynamic mode writes render.json there.
+
+    Returns False if the stitch failed (nothing after it was written)."""
+    output_audio = os.path.join(OUTPUT_FOLDER, f"{chapter_base}.m4a")
+
+    concat_list_path = os.path.join(work_dir, "concat_list.txt")
+    with open(concat_list_path, "w", encoding="utf-8") as f:
+        for idx, audio_file in enumerate(audio_files):
+            kind = silence_kind_before_wav[idx]
+            f.write(f"file '{silence_wavs[kind]}'\n")
+            f.write(f"file '{os.path.abspath(audio_file)}'\n")
+
+    print(f"Stitching {chapter_base} into final .m4a...")
+    stitch = subprocess.run(aac_stitch_command(concat_list_path, output_audio),
+                            capture_output=True)
+    if stitch.returncode != 0 or not os.path.exists(output_audio):
+        # Without this a failed encode printed "Done!" anyway and went on to
+        # write a sync.json for audio that does not exist.
+        stderr = stitch.stderr.decode("utf-8", "replace").strip()
+        print(f"Error: ffmpeg failed to stitch {chapter_base} "
+              f"(exit code {stitch.returncode}):")
+        print("    " + (stderr[-600:].replace("\n", "\n    ")
+                        if stderr else "(no error output)"))
+        return False
+    print(f"Done! Saved to: {output_audio}")
+
+    # Step 5a: the lossless master, from the same concat list. A failure
+    # here must not cost the chapter - the .m4a, sync.json and the
+    # subtitles are all still correct without it, so it warns and carries
+    # on rather than returning.
+    if KEEP_FLAC_MASTER:
+        master_path = os.path.join(OUTPUT_FOLDER, f"{chapter_base}.flac")
+        master = subprocess.run(flac_master_command(concat_list_path, master_path),
+                                capture_output=True)
+        if master.returncode != 0 or not os.path.exists(master_path):
+            stderr = master.stderr.decode("utf-8", "replace").strip()
+            print(f"Warning: could not write the FLAC master (exit code "
+                  f"{master.returncode}). The chapter itself is fine.")
+            print("    " + (stderr[-400:].replace("\n", "\n    ")
+                            if stderr else "(no error output)"))
+        else:
+            size = os.path.getsize(master_path) / (1024 * 1024)
+            print(f"Master saved to: {master_path} ({size:.1f} MB)")
+            print("    Move it out of the output folder before publishing - "
+                  "the player has no use for it.")
+
+    # A regenerated chapter can leave an .mp3 from before the switch to AAC.
+    # The player prefers the .m4a so it is harmless there, but that .mp3 is
+    # no longer timed against the sync.json about to be written. Deleting
+    # finished work is left to the person, so just say so.
+    stale_mp3 = os.path.join(OUTPUT_FOLDER, f"{chapter_base}.mp3")
+    if os.path.exists(stale_mp3):
+        print(f"Note: {os.path.basename(stale_mp3)} from an earlier run is "
+              f"still in the output folder and no longer matches the new "
+              f"sync.json. The player uses the .m4a; delete the .mp3 before "
+              f"using it anywhere else.")
+
+    # Step 5b: Build and write sync.json - chunk start/end offsets (in
+    # seconds) into the just-stitched .m4a, for the Android player app (see
+    # android-player-phase0-spec.md). MUST run before Step 6's cleanup:
+    # build_sync_data() needs ffprobe access to the individual per-chunk
+    # wav files, which clean_temp_dir() deletes right afterwards.
+    sync_data = build_sync_data(audio_files, sync_chunk_texts, silence_kind_before_wav, silence_wavs)
+    sync_path = os.path.join(OUTPUT_FOLDER, f"{chapter_base}.sync.json")
+    with open(sync_path, "w", encoding="utf-8") as f:
+        json.dump(sync_data, f, ensure_ascii=False, indent=2)
+    print(f"Sync data saved to: {sync_path}")
+
+    if after_sync:
+        after_sync(sync_data)
+
+    # Step 6: Auto-tag step - runs the audio_metadata.py tagger from the GUI
+    # project's OWN lightweight uv venv (via `--project`), not this heavy
+    # Irodori-TTS venv, so mutagen never needs to be installed here. Runs
+    # right away, per chapter, so the file is fully usable (correct
+    # metadata/album art for Spotify/phone) the moment it lands in the
+    # output folder - no need to wait for the rest of the book to finish
+    # before copying chapters over. Only runs when "Auto-tag generated
+    # files" is turned on in the Metadata settings tab - otherwise the
+    # person applies tags manually afterwards via the GUI's "Apply Tags to
+    # Output Files" button.
+    if SETTINGS.get("auto_tag_generated_files", False):
+        print(f"Auto-tagging {os.path.basename(output_audio)}...")
+        try:
+            tag_result = subprocess.run(
+                ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python",
+                 os.path.join(SCRIPT_DIR, "audio_metadata.py"),
+                 "--chapter", chapter_base],
+                cwd=SCRIPT_DIR, capture_output=True, text=True,
+            )
+            if tag_result.stdout:
+                print(tag_result.stdout.strip())
+            if tag_result.returncode != 0:
+                print(f"Auto-tagging failed (exit code {tag_result.returncode}):")
+                print(tag_result.stderr.strip())
+        except Exception as e:
+            print(f"Auto-tagging failed to start: {e}")
+    return True
+
+
 def process_chapter(chapter_path):
     chapter_name = os.path.splitext(os.path.basename(chapter_path))
     print(f"\n>>> Processing: {chapter_name[0]}")
@@ -674,8 +809,6 @@ def process_chapter(chapter_path):
         print(f"Error: No audio parts generated for {chapter_name[0]}")
         return
 
-    output_audio = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.m4a")
-
     # The silence wavs are rendered once for the whole run, from the first
     # chapter's first TTS wav; later chapters hit the _SILENCE_WAVS cache
     # and skip both the probe and the render.
@@ -689,95 +822,11 @@ def process_chapter(chapter_path):
               f"files into {SILENCE_DIR}...")
         silence_wavs = get_silence_wavs(audio_format)
 
-    concat_list_path = os.path.join(work_dir, "concat_list.txt")
-    with open(concat_list_path, "w", encoding="utf-8") as f:
-        for idx, audio_file in enumerate(audio_files):
-            kind = silence_kind_before_wav[idx]
-            f.write(f"file '{silence_wavs[kind]}'\n")
-            f.write(f"file '{os.path.abspath(audio_file)}'\n")
-
-    print(f"Stitching {chapter_name[0]} into final .m4a...")
-    stitch = subprocess.run(aac_stitch_command(concat_list_path, output_audio),
-                            capture_output=True)
-    if stitch.returncode != 0 or not os.path.exists(output_audio):
-        # Without this a failed encode printed "Done!" anyway and went on to
-        # write a sync.json for audio that does not exist.
-        stderr = stitch.stderr.decode("utf-8", "replace").strip()
-        print(f"Error: ffmpeg failed to stitch {chapter_name[0]} "
-              f"(exit code {stitch.returncode}):")
-        print("    " + (stderr[-600:].replace("\n", "\n    ")
-                        if stderr else "(no error output)"))
+    # Steps 5-6 (stitch, FLAC master, sync.json, auto-tag) are shared with
+    # dynamic mode - see finish_chapter().
+    if not finish_chapter(chapter_name[0], work_dir, audio_files,
+                          silence_kind_before_wav, sync_chunk_texts, silence_wavs):
         return
-    print(f"Done! Saved to: {output_audio}")
-
-    # Step 5a: the lossless master, from the same concat list. A failure
-    # here must not cost the chapter - the .m4a, sync.json and the
-    # subtitles are all still correct without it, so it warns and carries
-    # on rather than returning.
-    if KEEP_FLAC_MASTER:
-        master_path = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.flac")
-        master = subprocess.run(flac_master_command(concat_list_path, master_path),
-                                capture_output=True)
-        if master.returncode != 0 or not os.path.exists(master_path):
-            stderr = master.stderr.decode("utf-8", "replace").strip()
-            print(f"Warning: could not write the FLAC master (exit code "
-                  f"{master.returncode}). The chapter itself is fine.")
-            print("    " + (stderr[-400:].replace("\n", "\n    ")
-                            if stderr else "(no error output)"))
-        else:
-            size = os.path.getsize(master_path) / (1024 * 1024)
-            print(f"Master saved to: {master_path} ({size:.1f} MB)")
-            print("    Move it out of the output folder before publishing - "
-                  "the player has no use for it.")
-
-    # A regenerated chapter can leave an .mp3 from before the switch to AAC.
-    # The player prefers the .m4a so it is harmless there, but that .mp3 is
-    # no longer timed against the sync.json about to be written. Deleting
-    # finished work is left to the person, so just say so.
-    stale_mp3 = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.mp3")
-    if os.path.exists(stale_mp3):
-        print(f"Note: {os.path.basename(stale_mp3)} from an earlier run is "
-              f"still in the output folder and no longer matches the new "
-              f"sync.json. The player uses the .m4a; delete the .mp3 before "
-              f"using it anywhere else.")
-
-    # Step 5b: Build and write sync.json - chunk start/end offsets (in
-    # seconds) into the just-stitched .m4a, for the Android player app (see
-    # android-player-phase0-spec.md). MUST run before Step 6's cleanup:
-    # build_sync_data() needs ffprobe access to the individual per-chunk
-    # wav files, which clean_temp_dir() deletes right afterwards.
-    sync_data = build_sync_data(audio_files, sync_chunk_texts, silence_kind_before_wav, silence_wavs)
-    sync_path = os.path.join(OUTPUT_FOLDER, f"{chapter_name[0]}.sync.json")
-    with open(sync_path, "w", encoding="utf-8") as f:
-        json.dump(sync_data, f, ensure_ascii=False, indent=2)
-    print(f"Sync data saved to: {sync_path}")
-
-    # Step 6: Auto-tag step - runs the audio_metadata.py tagger from the GUI
-    # project's OWN lightweight uv venv (via `--project`), not this heavy
-    # Irodori-TTS venv, so mutagen never needs to be installed here. Runs
-    # right away, per chapter, so the file is fully usable (correct
-    # metadata/album art for Spotify/phone) the moment it lands in the
-    # output folder - no need to wait for the rest of the book to finish
-    # before copying chapters over. Only runs when "Auto-tag generated
-    # files" is turned on in the Metadata settings tab - otherwise the
-    # person applies tags manually afterwards via the GUI's "Apply Tags to
-    # Output Files" button.
-    if SETTINGS.get("auto_tag_generated_files", False):
-        print(f"Auto-tagging {os.path.basename(output_audio)}...")
-        try:
-            tag_result = subprocess.run(
-                ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python",
-                 os.path.join(SCRIPT_DIR, "audio_metadata.py"),
-                 "--chapter", chapter_name[0]],
-                cwd=SCRIPT_DIR, capture_output=True, text=True,
-            )
-            if tag_result.stdout:
-                print(tag_result.stdout.strip())
-            if tag_result.returncode != 0:
-                print(f"Auto-tagging failed (exit code {tag_result.returncode}):")
-                print(tag_result.stderr.strip())
-        except Exception as e:
-            print(f"Auto-tagging failed to start: {e}")
 
     # Step 7: Cleanup temporary files for this chapter (unless disabled in
     # settings.json)
@@ -788,8 +837,278 @@ def process_chapter(chapter_path):
         print(f"Skipping temp cleanup (clean_temp_after_run is disabled). Files remain in {TEMP_DIR}")
 
 
+# ---------------------------------------------------------------------------
+# Dynamic profile mode (2026-09-17)
+# ---------------------------------------------------------------------------
+#
+# A chapter is rendered sentence by sentence from a book-profiler profile
+# instead of from the silence / chunk length / duration scale settings. All
+# of the text and recipe logic lives in dynamic_profile.py, shared with the
+# GUI and book-profiler; this section only plans the run, drives the same
+# irodori_batch.py worker and hands the result to finish_chapter().
+
+GENERATION_MODE = "dynamic" if SETTINGS.get("generation_mode") == "dynamic" else "normal"
+
+
+def resolve_dynamic_plan(chapter_files):
+    """{chapter_base: assignment or None} for every chapter file, where an
+    assignment is {"profile": loaded profile, "style": key}. None = skipped
+    (unticked in Customize). Raises dynamic_profile.ProfileError for any
+    profile that cannot be used - before a single second of GPU time."""
+    block = SETTINGS["dynamic"]
+    loaded = {}
+
+    def profile_at(path):
+        key = os.path.abspath(path) if path else path
+        if key not in loaded:
+            loaded[key] = dynamic_profile.load_profile(path)
+            ok, note = dynamic_profile.speaker_status(loaded[key])
+            if not ok:
+                raise dynamic_profile.ProfileError(f"{path}: {note}")
+        return loaded[key]
+
+    plan = {}
+    for chapter_file in chapter_files:
+        base = os.path.splitext(os.path.basename(chapter_file))[0]
+        if block.get("assign") == "custom":
+            entry = (block.get("chapters") or {}).get(base)
+            if not entry or not entry.get("enabled"):
+                plan[base] = None
+                continue
+            path, style = entry.get("profile_path"), entry.get("style")
+        else:
+            path, style = block.get("profile_path"), block.get("style")
+        style = style or dynamic_profile.DEFAULT_STYLE
+        dynamic_profile.split_style(style)
+        plan[base] = {"profile": profile_at(path), "style": style}
+    return plan
+
+
+def render_silence_set(audio_format, durations, folder):
+    """{kind: wav} for `durations` ({kind: seconds}), matched to the TTS
+    output's exact format like get_silence_wavs() - the concat demuxer does
+    no resampling. Per chapter in dynamic mode, since two chapters may use
+    profiles with different silences."""
+    os.makedirs(folder, exist_ok=True)
+    rate, channels = audio_format["sample_rate"], audio_format["channels"]
+    layout = channel_layout_for(channels)
+    out = {}
+    for kind, duration in durations.items():
+        path = os.path.abspath(os.path.join(folder, f"silence_{kind}.wav"))
+        base = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r={rate}:cl={layout}",
+                "-t", str(duration), "-ar", str(rate), "-ac", str(channels)]
+        result = subprocess.run(base + ["-acodec", audio_format["codec_name"],
+                                        "-sample_fmt", audio_format["sample_fmt"], path],
+                                capture_output=True)
+        if not os.path.exists(path):
+            subprocess.run(base + [path], capture_output=True)
+        if not os.path.exists(path):
+            raise RuntimeError(f"Failed to render {path}. ffmpeg said: "
+                               f"{result.stderr.decode('utf-8', 'replace').strip()}")
+        out[kind] = path
+    return out
+
+
+def run_batch_worker_dynamic(jobs_path, pieces):
+    """run_batch_worker() for dynamic mode: the same "Generating chunk i/N"
+    lines the GUI progress window parses, describing a sentence and its
+    request instead of a section/paragraph chunk. Returns {index: used seed}
+    for render.json."""
+    cmd = ["uv", "run", "--no-sync", "python", "-u", BATCH_SCRIPT_PATH, "--jobs", jobs_path]
+    try:
+        proc = subprocess.Popen(cmd, cwd=UV_PROJECT_DIR, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"Error: could not start the TTS worker ({e}).")
+        return {}
+
+    total = len(pieces)
+    seeds = {}
+    for raw_line in proc.stdout:
+        line = raw_line.rstrip()
+        if line.startswith("MODEL_LOADED "):
+            print(f"Model loaded in {line.split()[1]}s - reused for all "
+                  f"{total} sentence(s) of this chapter.")
+        elif line.startswith("CHUNK_START "):
+            i = int(line.split()[1])
+            p = pieces[i - 1]
+            request = p["request"]
+            asked = (f"x{request['duration_scale']}" if "duration_scale" in request
+                     else f"{request['seconds']}s")
+            print(f" Generating chunk {i}/{total} (sentence {p['sentence']}"
+                  f"{'.' + str(p['piece']) if p['piece'] > 1 else ''}, "
+                  f"{p['engine_len']} chars, {asked}, silence_{p['gap']} before)...")
+        elif line.startswith("CHUNK_DONE "):
+            parts = line.split()
+            if len(parts) > 2 and parts[2] != "None":
+                seeds[int(parts[1])] = int(parts[2])
+        elif line.startswith("CHUNK_FAIL "):
+            parts = line.split(" ", 2)
+            print(f"  ! chunk {parts[1]} failed: "
+                  f"{parts[2] if len(parts) > 2 else '(no message)'}")
+        elif line == "WATERMARK off":
+            print("SilentCipher watermarking is OFF for this run.")
+        elif line.startswith("BATCH_LOG "):
+            print(f"  Worker log: {line.split(' ', 1)[1]}")
+        elif line.startswith("BATCH_DONE "):
+            pass
+        elif line:
+            print(line)
+    code = proc.wait()
+    if code != 0:
+        print(f"Error: the TTS worker exited with code {code} - no audio was "
+              f"produced for this chapter.")
+    return seeds
+
+
+def wav_duration(path):
+    try:
+        import wave
+        with wave.open(path, "rb") as w:
+            return round(w.getnframes() / float(w.getframerate()), 3)
+    except Exception:
+        return get_audio_duration(path)
+
+
+def process_chapter_dynamic(chapter_path, assignment, engine):
+    """One chapter in dynamic profile mode. `assignment` comes from
+    resolve_dynamic_plan(); `engine` is dynamic_profile.make_engine()."""
+    base = os.path.splitext(os.path.basename(chapter_path))[0]
+    profile, style = assignment["profile"], assignment["style"]
+    print(f"\n>>> Processing: {base}")
+    print(f"Profile: {profile['_path']}")
+    print(f"  {profile.get('book')} / {dynamic_profile.nickname(profile)} / "
+          f"{dynamic_profile.STYLE_LABELS[style]}"
+          + ("" if base in (profile.get("chapters") or []) else
+             f"  - {base} was not among the profile's measured chapters"))
+
+    with open(chapter_path, "r", encoding="utf-8") as f:
+        raw_text = f.read()
+    pieces, skipped = dynamic_profile.plan_chapter(raw_text, profile, style, engine)
+    if not pieces:
+        print(f"Error: No sentences produced for {base} - is the file empty?")
+        return
+    cut = sum(1 for p in pieces if p["piece"] > 1)
+    beyond = sum(1 for p in pieces if p["beyond"])
+    print(f"Found {len(pieces)} request(s) from {len({p['sentence'] for p in pieces})} "
+          f"sentence(s); {cut} cut piece(s) past L={profile['comfortable_length']}, "
+          f"{beyond} longer than any measured band, {len(skipped)} skipped (nothing to read).")
+
+    work_dir = os.path.join(TEMP_DIR, base)
+    os.makedirs(work_dir, exist_ok=True)
+    jobs = []
+    for i, p in enumerate(pieces, start=1):
+        p["wav"] = os.path.join(work_dir, f"s{p['sentence']:04d}p{p['piece']:02d}.wav")
+        with open(p["wav"][:-4] + ".txt", "w", encoding="utf-8") as f:
+            f.write(p["tts_text"])
+        job = {"index": i, "text": p["tts_text"], "output_wav": p["wav"]}
+        job.update(p["request"])
+        jobs.append(job)
+
+    jobs_path = os.path.join(work_dir, "batch_jobs.json")
+    with open(jobs_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "uv_project_dir": UV_PROJECT_DIR,
+            "checkpoint": CHECKPOINT_ARGS[1],
+            "checkpoint_is_hf": CHECKPOINT_ARGS[0] == "--hf-checkpoint",
+            "speaker_path": profile["speaker_path"],
+            "duration_scale": 1.0,
+            "trim_tail": bool(profile.get("trim_tail", True)),
+            # A fresh draw for every sentence: a fixed seed made chapters
+            # worse (CLAUDE.md), and the profiler measured no benefit.
+            "seed": None,
+            "watermark": WATERMARK_AUDIO,
+            "jobs": jobs,
+        }, f, ensure_ascii=False, indent=2)
+
+    seeds = run_batch_worker_dynamic(jobs_path, pieces)
+
+    rendered = [p for p in pieces if os.path.exists(p["wav"])]
+    for i, p in enumerate(pieces, start=1):
+        p["used_seed"] = seeds.get(i)
+        if not os.path.exists(p["wav"]):
+            print(f"  ! chunk {i} produced no audio.")
+    if not rendered:
+        print(f"Error: No audio parts generated for {base}")
+        return
+
+    silence_wavs = render_silence_set(
+        probe_audio_format(rendered[0]["wav"]),
+        {kind: float(profile["silence"][kind]) for kind in dynamic_profile.SILENCE_KINDS},
+        os.path.join(work_dir, "_silence"))
+
+    def write_render_json(sync_data):
+        for index, p in enumerate(rendered):
+            p["sync_index"] = index
+        record = {
+            "version": 1,
+            "mode": "dynamic",
+            "chapter": base,
+            "rendered_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "checkpoint": MODEL_REF,
+            "watermark": WATERMARK_AUDIO,
+            "profile": {
+                "path": profile["_path"],
+                "version": profile.get("version"),
+                "book": profile.get("book"),
+                "scope": profile.get("scope"),
+                "chapters": profile.get("chapters"),
+                "created": profile.get("created"),
+                "speaker_path": profile["speaker_path"],
+                "speaker_stamp_at_profiling": profile.get("speaker_stamp"),
+                "speaker_stamp_at_render": dynamic_profile.speaker_stamp(profile["speaker_path"]),
+                "comfortable_length": profile["comfortable_length"],
+                "silence": profile["silence"],
+                "trim_tail": profile.get("trim_tail"),
+                "bands": profile["bands"],
+                "pace_targets": profile["pace_targets"],
+            },
+            "style": style,
+            "style_label": dynamic_profile.STYLE_LABELS[style],
+            "chapter_was_profiled": base in (profile.get("chapters") or []),
+            "sync_entries": len(sync_data["chunks"]),
+            "skipped_texts": skipped,
+            "pieces": [{
+                "sync_index": p.get("sync_index"),
+                "sentence": p["sentence"],
+                "piece": p["piece"],
+                "display_text": p["display_text"],
+                "tts_text": p["tts_text"],
+                "engine_len": p["engine_len"],
+                "band": p["band"],
+                "beyond_measured": p["beyond"],
+                "request": p["request"],
+                "used_seed": p["used_seed"],
+                "seconds": wav_duration(p["wav"]) if os.path.exists(p["wav"]) else None,
+                "gap_before": p["gap"],
+            } for p in pieces],
+        }
+        path = os.path.join(OUTPUT_FOLDER, f"{base}.render.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+        print(f"Render record saved to: {path}")
+
+    if not finish_chapter(base, work_dir, [p["wav"] for p in rendered],
+                          [p["gap"] for p in rendered],
+                          [p["display_text"] for p in rendered],
+                          silence_wavs, after_sync=write_render_json):
+        return
+
+    if CLEAN_TEMP_AFTER_RUN:
+        print(f"Cleaning up temporary files in {TEMP_DIR}...")
+        clean_temp_dir()
+    else:
+        print(f"Skipping temp cleanup (clean_temp_after_run is disabled). Files remain in {TEMP_DIR}")
+
+
 def snapshot_filename(when=None):
-    """`<bookname>_YYYYMMDD_HHMM.json`.
+    """`<bookname>_<mode>_YYYYMMDD_HHMM.json` - mode is `normal` or `dynamic`.
+
+    The two modes' settings are no longer interchangeable (dynamic mode
+    carries profiles and a chapter plan, normal mode silences and a scale),
+    so the mode is in the name to make a folder of snapshots readable at a
+    glance. The GUI's Import refuses a file of the other mode.
 
     The book name is the output folder's own name - "wall", "sputnik" - which
     is already how the library is organised, one folder per book, and keeps
@@ -799,10 +1118,11 @@ def snapshot_filename(when=None):
     name = os.path.basename(os.path.normpath(OUTPUT_FOLDER))
     safe = "".join(c for c in name if c not in '\\/:*?"<>|').strip()
     stamp = (when or datetime.datetime.now()).strftime("%Y%m%d_%H%M")
-    return f"{safe or 'settings'}_{stamp}.json"
+    mode = "dynamic" if SETTINGS.get("generation_mode") == "dynamic" else "normal"
+    return f"{safe or 'settings'}_{mode}_{stamp}.json"
 
 
-def write_settings_snapshot(chapter_count):
+def write_settings_snapshot(chapter_count, dynamic_plan=None):
     """Drops a copy of the settings this run is using into the output folder.
 
     The point is traceability after the fact: with this many tunables, the
@@ -825,6 +1145,18 @@ def write_settings_snapshot(chapter_count):
         "note": "Automatic snapshot of the settings used for this run. "
                 "Importable via the GUI's Import Settings button.",
     }
+    if dynamic_plan is not None:
+        # What each chapter was actually given, resolved - so the record
+        # survives the profile files being moved or rewritten later.
+        snapshot["_run"]["dynamic_plan"] = {
+            base: None if a is None else {
+                "profile_path": a["profile"]["_path"],
+                "book": a["profile"].get("book"),
+                "seiyuu": dynamic_profile.nickname(a["profile"]),
+                "style": a["style"],
+                "style_label": dynamic_profile.STYLE_LABELS[a["style"]],
+                "chapter_was_profiled": base in (a["profile"].get("chapters") or []),
+            } for base, a in dynamic_plan.items()}
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
@@ -851,6 +1183,39 @@ def main():
     if not chapter_files:
         print(f"No files found in {INPUT_FOLDER} matching 'chapter_*.txt'")
         return
+
+    # Dynamic profile mode: resolve and check every chapter's profile before
+    # any GPU time is spent, and drop the chapters left unticked in Customize.
+    dynamic_plan, engine = None, None
+    if GENERATION_MODE == "dynamic":
+        print("Mode: dynamic profile")
+        normalize, normalizer_path = dynamic_profile.load_irodori_normalizer(UV_PROJECT_DIR)
+        if normalize is None:
+            print(f"Error: Irodori's text normaliser was not found at {normalizer_path}. "
+                  f"Dynamic mode measures sentences in the characters the engine "
+                  f"receives and cannot run without it.")
+            return
+        engine = dynamic_profile.make_engine(normalize)
+        try:
+            dynamic_plan = resolve_dynamic_plan(chapter_files)
+        except dynamic_profile.ProfileError as e:
+            print(f"Error: {e}")
+            return
+        unticked = [b for b, a in dynamic_plan.items() if a is None]
+        if unticked:
+            print(f"Skipping {len(unticked)} chapter(s) not ticked in Customize: "
+                  + ", ".join(unticked))
+        chapter_files = [f for f in chapter_files
+                         if dynamic_plan[os.path.splitext(os.path.basename(f))[0]]]
+        if not chapter_files:
+            print("Nothing to generate - no chapter is ticked.")
+            return
+        for f in chapter_files:
+            base = os.path.splitext(os.path.basename(f))[0]
+            a = dynamic_plan[base]
+            print(f"  {base}: {os.path.basename(a['profile']['_path'])} "
+                  f"({a['profile'].get('book')} / {dynamic_profile.nickname(a['profile'])}) "
+                  f"- {dynamic_profile.STYLE_LABELS[a['style']]}")
 
     # Chapters whose audio already exists (.m4a, or an .mp3 from before the
     # switch to AAC - see CHAPTER_AUDIO_EXTS) are skipped unless the person
@@ -879,10 +1244,14 @@ def main():
 
     print(f"Found {len(chapter_files)} chapters, {len(pending)} to process.")
 
-    write_settings_snapshot(len(pending))
+    write_settings_snapshot(len(pending), dynamic_plan)
 
     for chapter_file in pending:
-        process_chapter(chapter_file)
+        if dynamic_plan is not None:
+            base = os.path.splitext(os.path.basename(chapter_file))[0]
+            process_chapter_dynamic(chapter_file, dynamic_plan[base], engine)
+        else:
+            process_chapter(chapter_file)
 
     print("\nAll chapters completed successfully!")
 
