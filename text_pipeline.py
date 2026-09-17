@@ -702,22 +702,64 @@ def split_lines(section_text):
     return lines
 
 
+# Marks that may NOT open a dynamic-mode sentence. Splitting on terminators
+# alone left 30 sentences across the 103 chapter files starting with one
+# (2026-09-17): "しかし……、なぜ？" became "しかし……" + "、なぜ？", and the
+# stray 、 made an audible glitch before なぜ; "スプートニク……？」" became
+# "…" + "？」"; a long "…………" run split mid-way. A leading 、 is DROPPED
+# (user decision: a sentence never opens on 、, in the reader text or the
+# TTS text); any other leading mark moves to the end of the sentence before
+# it on the same line, so nothing else is lost.
+LEADING_MARKS_RE = re.compile(
+    "^([、，,…？！?!]+[" + re.escape(CLOSING_BRACKETS) + "]*)")
+DROPPED_LEADING = "、，,"
+
+
 def dynamic_sentences(raw_text):
     """The chapter as dynamic mode sees it: a flat list of
-        {"section", "line", "sentence", "text", "gap_before"}
+        {"section", "line", "sentence", "text", "gap_before", "removed_before"}
     where a sentence ends at a terminator (TERMINATOR_RE) or at the end of
     a line, and gap_before is "chapter_start" / "section" / "sentence".
 
+    No sentence opens on a punctuation mark - see LEADING_MARKS_RE. A leading
+    、 is dropped and recorded in "removed_before" (or "removed_after" of the
+    sentence before, when nothing followed it); other leading marks join the
+    previous sentence on the same line.
+
     A unit that is nothing but punctuation is folded onto the one before
     it, as build_chunks() does, so it never becomes a silent request of its
-    own. Concatenating every "text" gives back every cleaned line in order
-    - nothing is added or lost."""
+    own. dynamic_source_text() of the result gives back every cleaned line
+    in order - nothing is added, and nothing lost but the dropped 、."""
     out = []
     for sec_idx, section in enumerate(split_sections(raw_text), start=1):
         for line_idx, line in enumerate(split_lines(section), start=1):
             for sen_idx, unit in enumerate(split_sentences(line), start=1):
+                removed = ""
+                lead = LEADING_MARKS_RE.match(unit)
+                if lead:
+                    head, rest = lead.group(1), unit[len(lead.group(1)):]
+                    kept = "".join(ch for ch in head if ch not in DROPPED_LEADING)
+                    removed = "".join(ch for ch in head if ch in DROPPED_LEADING)
+                    same_line = bool(out) and out[-1]["section"] == sec_idx \
+                        and out[-1]["line"] == line_idx
+                    if same_line:
+                        # The marks close the sentence before; the 、 goes.
+                        out[-1]["text"] += kept
+                        if not rest:
+                            out[-1]["removed_after"] += removed
+                            continue
+                        unit = rest
+                    else:
+                        # Nothing on this line to attach to: keep the marks,
+                        # still drop the 、.
+                        unit = kept + rest
+                        if not unit:
+                            if out:
+                                out[-1]["removed_after"] += removed
+                            continue
                 if out and PUNCT_ONLY_RE.fullmatch(unit):
                     out[-1]["text"] += unit
+                    out[-1]["removed_after"] += removed
                     continue
                 if not out:
                     gap = "chapter_start"
@@ -726,8 +768,17 @@ def dynamic_sentences(raw_text):
                 else:
                     gap = "sentence"
                 out.append({"section": sec_idx, "line": line_idx,
-                            "sentence": sen_idx, "text": unit, "gap_before": gap})
+                            "sentence": sen_idx, "text": unit, "gap_before": gap,
+                            "removed_before": removed, "removed_after": ""})
     return out
+
+
+def dynamic_source_text(units):
+    """What `units` were made from: every cleaned line, in order. The check
+    that dynamic_sentences() lost nothing but the 、 it dropped on purpose -
+    see LEADING_MARKS_RE for the one ordering assumption (a dropped 、 comes
+    after any mark it shared the sentence start with, as in "……、")."""
+    return "".join(u["removed_before"] + u["text"] + u["removed_after"] for u in units)
 
 
 def dynamic_cut_points(text):

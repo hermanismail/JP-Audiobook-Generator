@@ -1082,6 +1082,8 @@ def process_chapter_dynamic(chapter_path, assignment, engine):
                 "used_seed": p["used_seed"],
                 "seconds": wav_duration(p["wav"]) if os.path.exists(p["wav"]) else None,
                 "gap_before": p["gap"],
+                "removed_before": p["removed_before"],
+                "removed_after": p["removed_after"],
             } for p in pieces],
         }
         path = os.path.join(OUTPUT_FOLDER, f"{base}.render.json")

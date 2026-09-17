@@ -233,8 +233,9 @@ def analyse_chapter(path, engine):
     cleaned = "".join(line for lines in lines_per_section for line in lines)
 
     units = tp.dynamic_sentences(raw)
-    # Nothing added, nothing lost: every sentence rejoins to every line.
-    drift = 0 if "".join(u["text"] for u in units) == cleaned else 1
+    # Nothing added, nothing lost but the 、 dynamic_sentences drops on
+    # purpose (and records): every sentence rejoins to every line.
+    drift = 0 if tp.dynamic_source_text(units) == cleaned else 1
 
     sentences, skipped = [], []
     for unit in units:

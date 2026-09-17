@@ -226,7 +226,11 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section"):
     measure = lambda text: len(engine(text))
     limit = profile["comfortable_length"]
     out, skipped = [], []
-    for number, (text, gap_before) in enumerate(sentences, start=1):
+    for number, item in enumerate(sentences, start=1):
+        # (text, gap_before) or (text, gap_before, removed_before, removed_after)
+        text, gap_before = item[0], item[1]
+        removed_before = item[2] if len(item) > 2 else ""
+        removed_after = item[3] if len(item) > 3 else ""
         if not engine(text) or tp.PUNCT_ONLY_RE.fullmatch(engine(text)):
             skipped.append(text)
             continue
@@ -249,6 +253,11 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section"):
                 "band": f"{band['from_len']}-{band['to_len']}",
                 "beyond": beyond,
                 "request": request_for(profile, style_key, piece_len),
+                # The 、 text_pipeline dropped at this sentence's edges (see
+                # LEADING_MARKS_RE) - recorded, because the reader text no
+                # longer matches the book there.
+                "removed_before": removed_before if piece_number == 1 else "",
+                "removed_after": removed_after if piece_number == len(cuts) else "",
             })
     return out, skipped
 
@@ -256,4 +265,5 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section"):
 def plan_chapter(raw_text, profile, style_key, engine):
     """plan_pieces() over a whole chapter's text. Returns (pieces, skipped)."""
     units = tp.dynamic_sentences(raw_text)
-    return plan_pieces([(u["text"], u["gap_before"]) for u in units], profile, style_key, engine)
+    return plan_pieces([(u["text"], u["gap_before"], u["removed_before"], u["removed_after"])
+                        for u in units], profile, style_key, engine)
