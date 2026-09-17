@@ -69,6 +69,7 @@ for path in (GENERATOR_DIR, SCRIPT_DIR, AUDITION_DIR,
     if path not in sys.path:
         sys.path.insert(0, path)
 import text_pipeline as tp  # noqa: E402
+import dynamic_profile  # noqa: E402
 import analyze  # noqa: E402
 import sweep  # noqa: E402
 import recipe  # noqa: E402
@@ -142,57 +143,27 @@ def choose_passage(analysis, chapters, bands, settings):
     return best[1], best[2]
 
 
-def pieces_for(window, limit, engine):
-    """[(text, gap_kind)] for the passage: whole sentences unless one is
-    over L, gap_kind being the silence BEFORE the piece."""
-    measure = lambda text: len(engine(text))
-    out = []
-    for position, s in enumerate(window):
-        gap = None if position == 0 else s["gap_before"]
-        if limit and s["tts_len"] > limit:
-            for piece, kind in tp.split_for_length(s["text"], limit, measure):
-                out.append((piece, gap if kind is None else kind))
-        else:
-            out.append((s["text"], gap))
-    return out
-
-
 # ------------------------------------------------------------ recipes
 
-def pace_targets(scores, bands, settings):
-    """Median pace per style that THIS profile's scale bands produce over
-    every measured step - see the module docstring. A step's pace at a
-    scale is exact, not estimated: length is text x scale (the sweep
-    measured it), so one take's seconds / scale gives the unit."""
-    paces = {style: [] for style in STYLES}
-    for score in scores:
-        for row in score["rows"]:
-            if len(recipe.repair.normalise_for_compare(row["text"])) <= settings["word_span"]:
-                continue
-            take = row["takes"][0]
-            unit = take["seconds"] / take["scale"]
-            band, _past = recipe.lookup(bands, row["tts_len"])
-            for style in STYLES:
-                paces[style].append(row["tts_len"] / (unit * band[style]))
-    return {style: round(statistics.median(values), 2) for style, values in paces.items()}
+def sample_jobs(window, profile, engine, settings):
+    """{(method, style): [job params per piece]}.
 
-
-def sample_jobs(pieces, bands, targets, engine, settings):
-    """{(method, style): [job params per piece]}."""
-    ceiling = settings["ceiling_seconds"] - settings["ceiling_margin"]
+    The requests come from dynamic_profile.plan_pieces() - the SAME code the
+    generator's dynamic mode renders a chapter with - so what is heard here
+    is what a chapter would get. The passage's first piece has no silence
+    before it: a sample starts on speech."""
+    sentences = [(s["text"], "chapter_start" if i == 0 else s["gap_before"])
+                 for i, s in enumerate(window)]
     out = {}
     for method in METHODS:
         for style in STYLES:
+            pieces, _skipped = dynamic_profile.plan_pieces(
+                sentences, profile, f"{method}_{style}", engine, first_gap=None)
             rows = []
-            for index, (text, gap) in enumerate(pieces):
-                chars = len(engine(text))
-                row = {"piece": index + 1, "text": text, "gap": gap, "chars": chars,
-                       "seed": settings["seed_base"] + index + 1}
-                if method == "scale":
-                    band, _past = recipe.lookup(bands, chars)
-                    row["duration_scale"] = band[style]
-                else:
-                    row["seconds"] = round(min(ceiling, max(0.6, chars / targets[style])), 2)
+            for index, piece in enumerate(pieces):
+                row = {"piece": index + 1, "text": piece["display_text"], "gap": piece["gap"],
+                       "chars": piece["engine_len"], "seed": settings["seed_base"] + index + 1}
+                row.update(piece["request"])
                 rows.append(row)
             out[(method, style)] = rows
     return out
@@ -444,8 +415,11 @@ def main():
     speaker = os.path.abspath(args.speaker)
     base = os.path.join(settings["work_root"], args.book, args.scope)
     recipe_dir = os.path.join(base, "recipe", sweep.nickname_for(speaker))
-    with open(os.path.join(recipe_dir, f"profile_{args.profile}.json"), encoding="utf-8") as f:
-        profile = json.load(f)
+    try:
+        profile = dynamic_profile.load_profile(
+            os.path.join(recipe_dir, f"profile_{args.profile}.json"))
+    except dynamic_profile.ProfileError as e:
+        raise SystemExit(f"profile: {e}")
     with open(os.path.join(base, "analysis", "analysis.json"), encoding="utf-8") as f:
         analysis = json.load(f)
     settings.update({"silence_section": profile["silence"]["section"],
@@ -453,19 +427,13 @@ def main():
                      "silence_comma": profile["silence"]["comma"],
                      "trim_tail": profile["trim_tail"]})
 
-    scores = []
-    for name in profile["chapters"]:
-        path = os.path.join(sweep.chapter_dir(settings, args.book, args.scope, speaker, name),
-                            "score.json")
-        with open(path, encoding="utf-8") as f:
-            scores.append(json.load(f))
-    targets = pace_targets(scores, profile["bands"], settings)
+    targets = profile["pace_targets"]
 
-    normalize, _p = analyze.load_irodori_normalizer(settings["irodori_root"])
-    engine = analyze.make_engine(normalize)
+    normalize, _p = dynamic_profile.load_irodori_normalizer(settings["irodori_root"])
+    engine = dynamic_profile.make_engine(normalize)
     chapter, window = choose_passage(analysis, profile["chapters"], profile["bands"], settings)
-    pieces = pieces_for(window, profile["comfortable_length"], engine)
-    samples = sample_jobs(pieces, profile["bands"], targets, engine, settings)
+    samples = sample_jobs(window, profile, engine, settings)
+    pieces = samples[("scale", "default")]
 
     root = os.path.join(base, "listen", sweep.nickname_for(speaker), args.profile)
     os.makedirs(root, exist_ok=True)

@@ -65,6 +65,7 @@ import argparse
 import difflib
 import json
 import os
+import statistics
 import sys
 import time
 
@@ -74,6 +75,7 @@ for path in (GENERATOR_DIR, SCRIPT_DIR, os.path.join(GENERATOR_DIR, "chapter-rep
     if path not in sys.path:
         sys.path.insert(0, path)
 import text_pipeline as tp  # noqa: E402
+import dynamic_profile  # noqa: E402
 import analyze  # noqa: E402
 import sweep  # noqa: E402
 import repair  # noqa: E402
@@ -86,7 +88,8 @@ RECIPE_DEFAULTS = {
     "silence_sentence": 1.0,
     "silence_comma": 0.7,
 }
-PROFILE_VERSION = 1
+# The profile format is the generator's contract, so its version lives there.
+PROFILE_VERSION = dynamic_profile.PROFILE_VERSION
 
 
 def load_settings():
@@ -371,7 +374,29 @@ def render_pace_md(table, per_step):
 
 # ------------------------------------------------------------ output
 
-def profile(book, speaker, scope, chapters_in, bands, limit, settings, extra):
+def pace_targets(scores, bands, settings):
+    """The Even pace recipe's targets: the MEDIAN pace this profile's own
+    scale bands produce per style, over every judged step of `scores`.
+
+    So both recipes of one profile average the same speed and differ in
+    evenness only - which is what the 2026-09-17 listening test compared.
+    A step's pace at a scale is exact, not estimated: length is text x
+    scale (the sweep measured it), so one take's seconds / scale gives the
+    unit."""
+    paces = {style: [] for style in ("default", "slower", "faster")}
+    for score in scores:
+        for row in score["rows"]:
+            if len(repair.normalise_for_compare(row["text"])) <= settings["word_span"]:
+                continue
+            take = row["takes"][0]
+            unit = take["seconds"] / take["scale"]
+            band, _past = lookup(bands, row["tts_len"])
+            for style in paces:
+                paces[style].append(row["tts_len"] / (unit * band[style]))
+    return {style: round(statistics.median(values), 2) for style, values in paces.items()}
+
+
+def profile(book, speaker, scope, chapters_in, bands, limit, settings, extra, targets):
     return dict({
         "version": PROFILE_VERSION,
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -387,8 +412,11 @@ def profile(book, speaker, scope, chapters_in, bands, limit, settings, extra):
                     "sentence": settings["silence_sentence"],
                     "comma": settings["silence_comma"]},
         "comfortable_length": limit,
-        "styles": ["default", "slower", "faster"],
+        # Six recipes, both kept on every profile (decision 2026-09-17):
+        # scale_* from the bands, pace_* from pace_targets.
+        "styles": list(dynamic_profile.STYLE_KEYS),
         "bands": bands,
+        "pace_targets": targets,
     }, **extra)
 
 
@@ -512,21 +540,28 @@ def main():
 
     out_dir = os.path.join(base, "recipe", sweep.nickname_for(speaker))
     os.makedirs(out_dir, exist_ok=True)
+    score_by_chapter = {s["chapter"]: s for s in scores}
     for c in chapters:
         extra = {"steps": c["steps"],
                  "application": application(c["bands"], c["comfortable_length"],
                                             by_chapter.get(c["chapter"], []), engine)}
+        targets = pace_targets([score_by_chapter[c["chapter"]]], c["bands"], settings)
         with open(os.path.join(out_dir, f"profile_{c['chapter']}.json"), "w", encoding="utf-8") as f:
             json.dump(profile(args.book, speaker, "chapter", [c["chapter"]], c["bands"],
-                              c["comfortable_length"], settings, extra),
+                              c["comfortable_length"], settings, extra, targets),
                       f, ensure_ascii=False, indent=2)
+    book_targets = pace_targets(scores, book_bands, settings)
     with open(os.path.join(out_dir, "profile_book.json"), "w", encoding="utf-8") as f:
         json.dump(profile(args.book, speaker, "book", in_scope, book_bands, book_limit, settings,
-                          {"viable": viable, "application": apply_book, "chapter_costs": costs}),
+                          {"viable": viable, "application": apply_book, "chapter_costs": costs},
+                          book_targets),
                   f, ensure_ascii=False, indent=2)
     with open(os.path.join(out_dir, "recipe.md"), "w", encoding="utf-8") as f:
         f.write(render_md(args.book, speaker, chapters, book_bands, viable, book_limit,
                           apply_book, costs))
+        f.write(f"\nEven pace recipe (book): faster {book_targets['faster']} · default "
+                f"{book_targets['default']} · slower {book_targets['slower']} ch/s - the median "
+                f"pace the book bands give each style.\n")
         table, per_step = pace_view(scores, chapters, settings)
         f.write("\n" + render_pace_md(table, per_step))
     print(f"recipe for {len(chapters)} chapter(s): book recipe "
