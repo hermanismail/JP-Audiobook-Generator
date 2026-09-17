@@ -47,6 +47,7 @@ from tkinter import filedialog, messagebox
 
 from progress_window import ProgressWindow, default_log_path
 from subtitle_window import SubtitleWindow
+import dynamic_mode_ui
 from ui_common import (
     COLOR_BG, COLOR_CARD, COLOR_CARD_BORDER, COLOR_TITLE, COLOR_SUBTITLE,
     COLOR_ENTRY_BORDER, COLOR_ENTRY_TEXT, COLOR_ACCENT, COLOR_ACCENT_HOVER,
@@ -433,7 +434,33 @@ class SettingsApp(ctk.CTk):
         self._run_current_chapter_name = ""
         self._run_completed_chapters = 0
 
+        # Dynamic profile mode's General page state - see dynamic_mode_ui.py.
+        self.dynamic_chapters = []
+        self.input_parse_ok = False
+        self._parse_pending = None
+        self._customize_window = None
+        self._regenerate_switches = []
+        self._keep_temp_switches = []
+
         self._build_ui()
+        self._apply_mode(self.generation_mode)
+
+        # The mode is chosen in a pop-up at launch, the last one used
+        # preselected (decision 2026-09-17), and can be switched later from
+        # the sidebar. Scheduled rather than run here: CustomTkinter restores
+        # the window's state itself once it has set the Windows title bar
+        # colour, so a withdraw() inside __init__ was undone the wrong way -
+        # the main window stayed withdrawn after the choice was made.
+        self.after(0, self._choose_mode_at_launch)
+
+    def _choose_mode_at_launch(self):
+        self.withdraw()
+        dialog = dynamic_mode_ui.ModeDialog(self, self.generation_mode)
+        self.wait_window(dialog)
+        self._apply_mode(dialog.result)
+        self.deiconify()
+        self.lift()
+        self.focus_force()
 
     def _set_initial_geometry(self):
         """Size the window relative to the actual screen (CustomTkinter is
@@ -474,6 +501,15 @@ class SettingsApp(ctk.CTk):
         general_page.grid(row=0, column=0, sticky="nsew")
         self._build_general_page(general_page)
         self.pages["general"] = general_page
+
+        # Dynamic mode's General page: a separate page rather than a
+        # rearranged normal one, so normal mode's layout is untouched.
+        general_dynamic_page = ctk.CTkScrollableFrame(
+            content_container, fg_color="transparent",
+            scrollbar_button_color=COLOR_BG, scrollbar_button_hover_color="#D8D8DE")
+        general_dynamic_page.grid(row=0, column=0, sticky="nsew")
+        self._build_general_dynamic_page(general_dynamic_page)
+        self.pages["general_dynamic"] = general_dynamic_page
 
         metadata_page = ctk.CTkScrollableFrame(
             content_container, fg_color="transparent",
@@ -534,8 +570,24 @@ class SettingsApp(ctk.CTk):
         sidebar.grid(row=0, rowspan=2, column=0, sticky="nsw")
         sidebar.grid_propagate(False)
 
+        # Mode switcher, above the General tab (decision 2026-09-17).
+        mode_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
+        mode_frame.pack(fill="x", padx=12, pady=(20, 0))
+        ctk.CTkLabel(mode_frame, text="MODE", text_color=COLOR_SUBTITLE,
+                     font=ctk.CTkFont(size=10, weight="bold"), anchor="w").pack(fill="x")
+        self.mode_switcher = ctk.CTkSegmentedButton(
+            mode_frame, values=["Normal", "Dynamic"], height=30,
+            selected_color=COLOR_ACCENT, selected_hover_color=COLOR_ACCENT_HOVER,
+            # A segmented button has one text colour for both states, so the
+            # unselected segment must be dark enough to carry white text.
+            unselected_color="#A3A3AD", unselected_hover_color="#8E8E99",
+            text_color="white", font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda value: self._apply_mode(
+                "dynamic" if value == "Dynamic" else "normal"))
+        self.mode_switcher.pack(fill="x", pady=(4, 0))
+
         nav_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
-        nav_frame.pack(fill="x", padx=12, pady=(24, 0))
+        nav_frame.pack(fill="x", padx=12, pady=(18, 0))
 
         self._add_nav_button(nav_frame, "general", NAV_ICON_GENERAL, "General")
         self._add_nav_button(nav_frame, "metadata", NAV_ICON_METADATA, "Metadata")
@@ -568,8 +620,10 @@ class SettingsApp(ctk.CTk):
         # the selected page with grid() and unmapping the rest with
         # grid_remove() sidesteps z-order entirely - only one page is ever
         # actually placed in the grid at a time.
+        page_key = "general_dynamic" if key == "general" and \
+            self.generation_mode == "dynamic" else key
         for k, page in self.pages.items():
-            if k == key:
+            if k == page_key:
                 page.grid(row=0, column=0, sticky="nsew")
             else:
                 page.grid_remove()
@@ -614,6 +668,197 @@ class SettingsApp(ctk.CTk):
                             filetypes=[("SafeTensors", "*.safetensors"), ("All files", "*.*")])
         self._add_uv_row(paths_card)
 
+    # ---------- General page, dynamic profile mode ----------
+    def _build_general_dynamic_page(self, parent):
+        """Layout specified 2026-09-17: Input Folder and Profile Path grouped
+        first (Speaker Path becomes Profile Path - the seiyuu comes from the
+        profile), everything else in a second group below."""
+        self._page_header(
+            parent, "General Settings",
+            "Dynamic profile mode - each sentence is rendered with the recipe a "
+            "book-profiler profile measured for its length.")
+
+        source_card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16,
+                                   border_width=1, border_color=COLOR_CARD_BORDER)
+        source_card.pack(fill="x")
+
+        self._add_path_row(source_card, *ICON_INPUT, "Input Folder",
+                           "Folder containing input chapters", "input_folder", "folder")
+        self.input_status_label = ctk.CTkLabel(
+            source_card, text="", anchor="w", justify="left", wraplength=620,
+            font=ctk.CTkFont(size=12))
+        self.input_status_label.pack(fill="x", padx=(80, 22), pady=(0, 8))
+        self.vars["input_folder"].trace_add("write", lambda *_: self._schedule_input_parse())
+
+        row = self._row_shell(source_card)
+        IconBadge(row, *ICON_SPEAKER).pack(side="left", padx=(0, 14), anchor="n")
+        self._title_block(row, "Profile Path",
+                          "profile_*.json - the seiyuu and recipe",
+                          fixed_width=210, fixed_height=44).pack(side="left", anchor="n")
+        self.profile_panel = dynamic_mode_ui.ProfilePanel(
+            row, self.dynamic_state.get("profile_path", ""),
+            self.dynamic_state.get("style"), on_change=self._on_main_profile_changed)
+        self.profile_panel.pack(side="left", fill="x", expand=True)
+
+        assign_row = ctk.CTkFrame(source_card, fg_color="transparent")
+        assign_row.pack(fill="x", padx=(80, 22), pady=(4, 16))
+        self.assign_switcher = ctk.CTkSegmentedButton(
+            assign_row, values=["Assign profile for all chapters", "Customize"], height=32,
+            selected_color=COLOR_ACCENT, selected_hover_color=COLOR_ACCENT_HOVER,
+            unselected_color="#A3A3AD", unselected_hover_color="#8E8E99",
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._on_assign_changed)
+        self.assign_switcher.pack(side="left")
+        self.customize_button = ctk.CTkButton(
+            assign_row, text="Open Customize…", width=130, height=32, corner_radius=8,
+            fg_color="transparent", hover_color="#F1F0FC", border_width=1,
+            border_color=COLOR_ACCENT, text_color=COLOR_ACCENT,
+            command=self._open_customize)
+        self.customize_status_label = ctk.CTkLabel(
+            assign_row, text="", text_color=COLOR_SUBTITLE, font=ctk.CTkFont(size=12))
+
+        ctk.CTkLabel(parent, text="Output & Run", text_color=COLOR_TITLE,
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     anchor="w").pack(fill="x", pady=(20, 8))
+        run_card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16,
+                                border_width=1, border_color=COLOR_CARD_BORDER)
+        run_card.pack(fill="x")
+        self._add_path_row(run_card, *ICON_OUTPUT, "Output Folder",
+                           "Folder to save generated .m4a files", "output_folder", "folder")
+        self._add_regenerate_chapters_row(run_card)
+        self._add_path_row(run_card, *ICON_TEMP, "Temp Folder",
+                           "Folder for temporary files", "temp_dir", "folder")
+        self._add_toggle_row(run_card)
+        self._add_uv_row(run_card)
+
+        self._refresh_dynamic_widgets()
+
+    def _refresh_dynamic_widgets(self):
+        """Push self.dynamic_state into the dynamic General page's widgets -
+        after an import, a reset, or at build time."""
+        self.profile_panel.set_value(self.dynamic_state.get("profile_path", ""),
+                                     self.dynamic_state.get("style"))
+        self.assign_switcher.set("Customize" if self.dynamic_state.get("assign") == "custom"
+                                 else "Assign profile for all chapters")
+        self._on_assign_changed(self.assign_switcher.get(), open_window=False)
+        self._parse_input_now()
+
+    def _on_main_profile_changed(self, path, style):
+        self.dynamic_state["profile_path"] = path
+        self.dynamic_state["style"] = style
+
+    def _on_assign_changed(self, value, open_window=True):
+        custom = value == "Customize"
+        self.dynamic_state["assign"] = "custom" if custom else "all"
+        if custom:
+            self.customize_button.pack(side="left", padx=(12, 0))
+            self.customize_status_label.pack(side="left", padx=(12, 0))
+            self._update_customize_status()
+            if open_window:
+                self._open_customize()
+        else:
+            self.customize_button.pack_forget()
+            self.customize_status_label.pack_forget()
+
+    def _schedule_input_parse(self):
+        if self._parse_pending:
+            self.after_cancel(self._parse_pending)
+        self._parse_pending = self.after(400, self._parse_input_now)
+
+    def _parse_input_now(self):
+        self._parse_pending = None
+        ok, message, chapters = dynamic_mode_ui.parse_input_folder(
+            self.vars["input_folder"].get().strip())
+        self.input_parse_ok = ok
+        self.dynamic_chapters = chapters if ok else []
+        self.input_status_label.configure(
+            text=("✔  " if ok else "✖  ") + message,
+            text_color=dynamic_mode_ui.COLOR_OK if ok else dynamic_mode_ui.COLOR_ERROR)
+        if self.dynamic_state.get("assign") == "custom":
+            self._update_customize_status()
+
+    def _open_customize(self):
+        if not self.input_parse_ok:
+            messagebox.showerror(
+                "Choose the Input Folder First",
+                "Customize lists the chapters found in the Input Folder, and that "
+                "folder has not parsed successfully yet.")
+            return
+        if self._customize_window is not None and self._customize_window.winfo_exists():
+            self._customize_window.lift()
+            self._customize_window.focus_force()
+            return
+        self._customize_window = dynamic_mode_ui.CustomizeWindow(
+            self, self.dynamic_chapters, self.dynamic_state.setdefault("chapters", {}),
+            self.profile_panel.path, self.profile_panel.style,
+            on_change=self._update_customize_status)
+
+    def _update_customize_status(self):
+        ticked, ready, problems = dynamic_mode_ui.plan_status(
+            self.dynamic_chapters, self.dynamic_state.get("chapters") or {})
+        text = f"{len(ticked)} of {len(self.dynamic_chapters)} chapter(s) ticked, " \
+               f"{len(ready)} ready"
+        self.customize_status_label.configure(
+            text=text, text_color=dynamic_mode_ui.COLOR_ERROR
+            if (problems or not ticked) else COLOR_SUBTITLE)
+
+    # ---------- mode ----------
+    def _apply_mode(self, mode):
+        """Switch the whole window between normal and dynamic profile mode,
+        and remember the choice for the next launch."""
+        mode = "dynamic" if mode == "dynamic" else "normal"
+        self.generation_mode = mode
+        self.mode_switcher.set("Dynamic" if mode == "dynamic" else "Normal")
+        for widget, options in self._normal_only_advanced:
+            widget.pack_forget()
+        if mode == "normal":
+            for widget, options in self._normal_only_advanced:
+                widget.pack(before=self._advanced_anchor, **options)
+        else:
+            self._parse_input_now()
+        self.title("JP Audiobook Generator - Settings"
+                   + ("  ·  Dynamic profile mode" if mode == "dynamic" else ""))
+        self._show_page(self.current_page)
+        self._persist_mode(mode)
+
+    def _persist_mode(self, mode):
+        """Writes ONLY generation_mode into settings.json, so the next launch
+        preselects it even if nothing is run. Everything else on disk stays
+        as it was - the form's other edits still wait for Save & Run."""
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                on_disk = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            on_disk = dict(DEFAULT_SETTINGS)
+        if on_disk.get("generation_mode") == mode:
+            return
+        on_disk["generation_mode"] = mode
+        try:
+            save_settings(on_disk)
+        except OSError:
+            pass
+
+    def _validate_dynamic(self, data):
+        """Everything dynamic mode must have before a run may start. Returns
+        (error message or None, [chapter bases to render])."""
+        if not self.input_parse_ok:
+            return ("The Input Folder has not parsed successfully - choose the folder "
+                    "that holds the chapter_*.txt files.", [])
+        chapters = list(self.dynamic_chapters)
+        if data["dynamic"].get("assign") == "custom":
+            ticked, ready, problems = dynamic_mode_ui.plan_status(
+                chapters, data["dynamic"].get("chapters") or {})
+            if not ticked:
+                return ("Customize is selected but no chapter is ticked.", [])
+            if problems:
+                return ("These ticked chapters have no usable profile:\n\n"
+                        + "\n".join(problems[:10]), [])
+            return None, ticked
+        _profile, lines, ok = dynamic_mode_ui.check_profile(
+            data["dynamic"].get("profile_path", ""))
+        if not ok:
+            return ("The profile cannot be used:\n\n" + "\n".join(lines), [])
+        return None, chapters
+
     # ---------- Advanced page ----------
     def _build_advanced_page(self, parent):
         self._page_header(
@@ -641,9 +886,9 @@ class SettingsApp(ctk.CTk):
         # TTS tuning. Every speaker embedding responds differently to these,
         # so they are per-preset rather than fixed in run_audiobook.py -
         # export a preset per speaker/book and import it before a run.
-        ctk.CTkLabel(parent, text="TTS Tuning", text_color=COLOR_TITLE,
-                     font=ctk.CTkFont(size=15, weight="bold"),
-                     anchor="w").pack(fill="x", pady=(20, 8))
+        tts_label = ctk.CTkLabel(parent, text="TTS Tuning", text_color=COLOR_TITLE,
+                                 font=ctk.CTkFont(size=15, weight="bold"), anchor="w")
+        tts_label.pack(fill="x", pady=(20, 8))
         tts_card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16,
                                 border_width=1, border_color=COLOR_CARD_BORDER)
         tts_card.pack(fill="x")
@@ -652,9 +897,20 @@ class SettingsApp(ctk.CTk):
         self._add_no_trim_tail_row(tts_card)
         self._add_seed_row(tts_card)
 
-        ctk.CTkLabel(parent, text="Output Encoding", text_color=COLOR_TITLE,
-                     font=ctk.CTkFont(size=15, weight="bold"),
-                     anchor="w").pack(fill="x", pady=(20, 8))
+        encoding_label = ctk.CTkLabel(parent, text="Output Encoding", text_color=COLOR_TITLE,
+                                      font=ctk.CTkFont(size=15, weight="bold"), anchor="w")
+        encoding_label.pack(fill="x", pady=(20, 8))
+
+        # Hidden in dynamic mode, where the profile decides silences, length
+        # and the TTS request (decision 2026-09-17). Kept with their pack
+        # options so _apply_mode() can put them back in the same order.
+        self._advanced_page_header_subtitle = None
+        self._normal_only_advanced = [
+            (prefs_card, {"fill": "x"}),
+            (tts_label, {"fill": "x", "pady": (20, 8)}),
+            (tts_card, {"fill": "x"}),
+        ]
+        self._advanced_anchor = encoding_label
         encoding_card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16,
                                      border_width=1, border_color=COLOR_CARD_BORDER)
         encoding_card.pack(fill="x")
@@ -960,6 +1216,8 @@ class SettingsApp(ctk.CTk):
             switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
             font=ctk.CTkFont(size=12), command=self._on_regenerate_chapters_changed)
         self.regenerate_chapters_switch.pack(side="right")
+        # This row exists on both General pages (normal and dynamic).
+        self._regenerate_switches.append(self.regenerate_chapters_switch)
 
         text_frame = self._title_block(
             row, "Regenerate existing chapters",
@@ -971,9 +1229,10 @@ class SettingsApp(ctk.CTk):
         return "ON (overwrite)" if enabled else "OFF (skip existing)"
 
     def _on_regenerate_chapters_changed(self):
-        self.regenerate_chapters_switch.configure(
-            text=self._regenerate_chapters_text(
-                bool(self.regenerate_chapters_var.get())))
+        for switch in self._regenerate_switches:
+            switch.configure(
+                text=self._regenerate_chapters_text(
+                    bool(self.regenerate_chapters_var.get())))
 
     def _add_toggle_row(self, parent):
         row = self._row_shell(parent)
@@ -987,6 +1246,8 @@ class SettingsApp(ctk.CTk):
             switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
             font=ctk.CTkFont(size=12), command=self._on_toggle_changed)
         self.toggle.pack(side="right")
+        # This row exists on both General pages (normal and dynamic).
+        self._keep_temp_switches.append(self.toggle)
 
         text_frame = self._title_block(
             row, "Keep temp files after run",
@@ -998,7 +1259,8 @@ class SettingsApp(ctk.CTk):
         return "ON (temp files kept)" if keep_temp else "OFF (temp files cleared)"
 
     def _on_toggle_changed(self):
-        self.toggle.configure(text=self._toggle_text(bool(self.keep_temp_var.get())))
+        for switch in self._keep_temp_switches:
+            switch.configure(text=self._toggle_text(bool(self.keep_temp_var.get())))
 
     # ---------- Advanced page: TTS tuning rows ----------
     def _add_duration_scale_row(self, parent):
@@ -1470,8 +1732,12 @@ class SettingsApp(ctk.CTk):
             "dynamic": json.loads(json.dumps(self.dynamic_state)),
         }
 
-        for key in ("input_folder", "output_folder", "temp_dir", "speaker_path",
-                    "uv_project_dir"):
+        # Dynamic mode takes the seiyuu from each chapter's profile, so its
+        # (hidden) Speaker Path may be empty.
+        required = ("input_folder", "output_folder", "temp_dir", "uv_project_dir") \
+            if self.generation_mode == "dynamic" else \
+            ("input_folder", "output_folder", "temp_dir", "speaker_path", "uv_project_dir")
+        for key in required:
             if not data[key]:
                 messagebox.showerror("Missing Value", f"'{key}' cannot be empty.")
                 return None
@@ -1528,6 +1794,8 @@ class SettingsApp(ctk.CTk):
         self.auto_tag_var.set(1 if merged["auto_tag_generated_files"] else 0)
 
         self._refresh_switch_labels()
+        if hasattr(self, "profile_panel"):
+            self._refresh_dynamic_widgets()
 
     def _refresh_switch_labels(self):
         """Every switch carries its own state in its label text, so anything
@@ -1672,6 +1940,15 @@ class SettingsApp(ctk.CTk):
         # can show "Chapter 1 of N" from its very first line rather than
         # waiting to see what the subprocess reports.
         chapter_files = sorted(glob.glob(os.path.join(data["input_folder"], "chapter_*.txt")))
+        if self.generation_mode == "dynamic":
+            # Any error here blocks the run (decision 2026-09-17), and an
+            # unticked chapter is not counted - run_audiobook.py skips it.
+            error, chapters = self._validate_dynamic(data)
+            if error:
+                messagebox.showerror("Dynamic Profile Mode", error)
+                return
+            chapter_files = [os.path.join(data["input_folder"], f"{base}.txt")
+                             for base in chapters]
         if not chapter_files:
             messagebox.showerror(
                 "No Chapters Found",
