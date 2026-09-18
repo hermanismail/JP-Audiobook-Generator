@@ -8,6 +8,47 @@ because the divergences are the interesting part.
 
 Everything in this file describes code that exists today.
 
+## State of play (2026-09-18) - start here
+
+Everything below is merged to `main`. One generator, five separate tools:
+
+| folder | what | status |
+|---|---|---|
+| (root) | the generator: **normal** mode (chunks) and **dynamic profile** mode (sentence by sentence from a profile) | both in use; dynamic is how books are rendered now |
+| `book-profiler/` | measures a seiyuu against a book -> `profile_*.json` for dynamic mode; window with Profile + Clean up tabs | built, proven on yojo-senki x tanya |
+| `dynamic-repair/` | repairs Parts of dynamic chapters; editable TTS text + per-book `readings.json` | built, proven on copies; awaiting real use |
+| `chapter-repair/` | repairs pre-dynamic chapters | **frozen** - kept, not developed |
+| `seiyuu-audition/` | hear a seiyuu at given settings | stable |
+| `seiyuu-onboarder/` | train a new seiyuu | stable |
+
+The user is slowly re-rendering older books in dynamic mode.
+
+**Open threads, roughly in the order they were raised:**
+1. The **reader shows one sentence per `sync.json` entry** for dynamic
+   chapters. Accepted for now; grouping sentences for display is open
+   (player side, `F:\JPAudiobookPlayer`).
+2. **Readings at render time**: `readings.json` is written only by
+   `dynamic-repair` today. Applying it in the generator's dynamic mode would
+   prevent misread names instead of repairing them - agreed as the natural
+   next step, not built.
+3. The user's by-ear notes on tanya (unmeasured, 2026-09-17): sentences
+   ending `！`/`？` sound over-excited and sometimes unfinished; some 19-20
+   character sentences ending `。` at x1.5 cut short; a 9-character
+   sentence at x1.7 sounded like a different voice. Each is a hypothesis
+   until measured.
+4. The existing tanya profiling data sits in `F:\tmp\book-profiler`
+   (2 GB of takes); the user will decide where profiles live.
+5. The older ones listed under "Text, chunking and hallucination" below.
+
+**How the user works** (from the sessions that built all this): digest a
+request, summarise it back with the loose ends and decisions needed, and
+WAIT before building. Claims about model behaviour need a measurement. Git:
+feature branch, commit, then "merge to main and push", then "delete the
+branch"; every git call in a script gets its own check; the three
+`settings.json` files at root / `chapter-repair/` / `seiyuu-audition/` stay
+uncommitted and must survive branch switches. Exact-string edits, never
+`str.replace` patch scripts.
+
 ## What this project is
 
 A Windows desktop tool (Python + CustomTkinter) that turns Japanese chapter
@@ -227,6 +268,57 @@ is deliberate.
   the TTS batching section below.
 - `gui_settings.py` — CustomTkinter settings GUI. Three pages (General,
   Metadata, Advanced) plus a bottom bar with Import / Export / Save & Run.
+  A sidebar switch picks **normal** or **dynamic profile** mode - see the
+  next section. `dynamic_mode_ui.py` holds the dynamic-only widgets.
+- `dynamic_profile.py` — the profile contract shared by the generator, the
+  profiler and dynamic-repair: loading/validating `profile_*.json` (v2),
+  the six styles, `request_for()` (length -> duration scale or seconds),
+  `plan_pieces()` / `plan_chapter()`.
+
+## Dynamic profile mode — the generator's second mode (built 2026-09-17)
+
+Normal mode is the generator as it always was (chunks, your silences,
+chunk length, TTS tuning) - proven byte-identical after dynamic mode went
+in (stub-worker run of HEAD vs new over 3 real chapters: 2,347 files
+identical). Dynamic mode renders **sentence by sentence from a
+`book-profiler` profile**: each sentence gets the request its length band
+calls for with that seiyuu.
+
+- **Settings**: `generation_mode` (`normal`/`dynamic`) and a `dynamic`
+  block `{profile_path, style, assign: "all"|"custom", chapters: {base:
+  {enabled, profile_path, style}}}` in `settings.json`, merged by
+  `run_audiobook.merge_dynamic_defaults()`. The window opens in the last
+  mode used (a launch pop-up was built and REMOVED 2026-09-18 as redundant
+  with the switch - do not reintroduce it).
+- **GUI in dynamic mode**: General groups Input Folder + Profile Path
+  (Speaker Path becomes Profile Path); choosing the input folder parses it
+  (green count / red error that blocks Save & Run); under the profile, its
+  summary and the style selector. "Assign profile for all chapters" or
+  "Customize" (a window: tick, chapter, profile, style per row; unticked
+  rows skipped; a newly ticked row takes the last profile assigned).
+  Advanced shows only Output Encoding and Translation Subtitles.
+- **Six styles**: Natural (the profile's duration scales per band) and Even
+  pace (a fixed length per sentence from the profile's pace targets), each
+  default / slower / faster. By ear on yojo-senki: Natural default was the
+  most natural and cleanest; Even pace too flat.
+- **Text**: `text_pipeline.dynamic_sentences()` - a line break ends a
+  sentence; over-long sentences are cut with `split_for_length()` (0.7 s
+  after `、」）)`, 1.0 s after `！!?`); a sentence never opens on a
+  punctuation mark (a leading `、` is dropped from display and TTS, other
+  marks join the previous sentence). Silences: 1.5 s section (also before
+  a chapter's first sentence), 1.0 s sentence, 0.7 s comma.
+- **Output**: `process_chapter_dynamic()` -> the same `finish_chapter()`
+  tail as normal mode (stitch, FLAC master, `sync.json`, tags) plus
+  `<chapter>.render.json` - per `sync.json` entry the display and engine
+  text, request, band, used seed, duration and gap, and the profile block.
+  `dynamic-repair` depends on it. The settings snapshot is named
+  `<book>_<mode>_YYYYMMDD_HHMM.json` and carries `_run.dynamic_plan`;
+  Import refuses a snapshot of the other mode.
+- **Real render** (yojo-senki chapter_001 + chapter_007, 2026-09-17): the
+  user judged it a leap over unprofiled chapters; hallucination much
+  reduced, not gone - judged close to what this model and seiyuu allow.
+  Test output in `F:\AUDIOBOOK_TEST\yojo-senki-dynamic` (chapter_001 there
+  predates the leading-comma fix).
 - `subtitle_window.py` — the Subtitle Generation Tool window. Owns the worker
   thread, pause/resume, the llama-server lifecycle and its own log.
 - `progress_window.py`, `ui_common.py` — progress UI and shared design tokens.
@@ -555,19 +647,21 @@ changes what is said, not how long.
 
 ## `book-profiler/` — the fourth separate tool: a recipe per book and seiyuu
 
-Built 2026-09-16/17 on branch `book-profiler`. Pre-generation, like the
+Built 2026-09-16/18, merged to `main`. Pre-generation, like the
 audition tool, but it answers a different question: instead of one
 hand-picked `duration_scale` / chunk length for a whole book, what should
 each sentence get with THIS seiyuu, and does one recipe hold for the whole
-book? Its output is a profile the generator's planned **dynamic profile
-mode** will read (two modes on Advanced: normal = today, dynamic = a
-profile). A window (`app.py`, see below) drives the same CLI scripts.
+book? Its output is the profile the generator's **dynamic profile mode**
+reads (see above). A window (`app.py`, see below) drives the same CLI
+scripts.
 
 Imports, all deliberate and one-way: `text_pipeline` (sentences, cut rules,
 TTS text), `chapter-repair/repair.py` (`similarity()`,
 `run_streaming()`), and the generator's `irodori_batch.py` as the TTS.
-Own venv, own `settings.json` (gitignored). Output on F: under
-`F:\tmp\book-profiler\<book>\<scope>\`.
+Own venv, own `settings.json` (gitignored). Output under a root - the
+window's "profile folder", or `--work-root`, defaulting to `work_root` in
+`settings.json` (`F:\tmp\book-profiler`) - as `<root>\<book>\<scope>\`,
+with the profiles in `recipe\<seiyuu>\profile_*.json`.
 
 | stage | script | GPU | what it does |
 |---|---|---|---|
@@ -1201,11 +1295,11 @@ knobs:
 2. **`＊` censored names** (`Ｍ＊＊くん`, 58 lines in the library) make the
    model stumble — it renders TWO silences. What the text should say
    instead is a content decision, not a code one, so it was left alone.
-3. **Hallucination prevention does not exist in the generator yet.**
-   Everything in it is detection and repair, after the fact. The first
-   attempt at prevention is `book-profiler/`: it measures, per seiyuu,
-   which scale (or pace) keeps each sentence length clean, for dynamic
-   profile mode to apply at render time. Not wired into the generator yet.
+3. **Hallucination prevention now exists as dynamic profile mode**:
+   `book-profiler/` measures, per seiyuu, which scale (or pace) keeps each
+   sentence length clean, and the generator's dynamic mode applies it at
+   render time. Much reduced by ear, not eliminated - repair
+   (`dynamic-repair/`) is still needed.
 4. **Detection is a shortlist, never a verdict.** Whisper mishears (see the
    onboarder's `えへへ。`), so the UI always shows script, transcript and a
    play button together. Do not add an "auto-repair the worst N" button.
