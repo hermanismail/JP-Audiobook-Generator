@@ -219,3 +219,5 @@ __marimo__/
 # and the window remembers its last inputs in gui_state.json
 book-profiler/settings.json
 book-profiler/gui_state.json
+# dynamic-repair keeps its settings local, like book-profiler
+dynamic-repair/settings.json

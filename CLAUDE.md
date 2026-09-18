@@ -491,9 +491,67 @@ silence gaps preserved, text unchanged, `.srt` still mirroring
 `sync.json`, faststart, tags, cover, backup). It needs no GPU. Run it
 after touching `repair.py`.
 
-Still to do: teach `run_audiobook.py` to keep its own FLAC master at
-render time, which would make future chapters' masters genuinely
-lossless. Agreed 2026-09-14, deferred until this tool had been used.
+Since 2026-09-16 `run_audiobook.py` keeps its own FLAC master beside the
+`.m4a` (`keep_flac_master`, default on) - a genuinely lossless one, from
+the same wavs the encoder sees. `dynamic-repair/` splices into it.
+
+**chapter-repair is frozen (user decision 2026-09-18)** - kept for the
+pre-dynamic library, not developed further. New repair work goes into
+`dynamic-repair/`.
+
+## `dynamic-repair/` — repair for dynamic-profile chapters
+
+Built 2026-09-18. The user is re-rendering older books in dynamic mode;
+those chapters are better but not flawless. Separate tool, own venv, own
+`settings.json` (gitignored); it imports `chapter-repair/repair.py`
+one-way for the splice, encode, tag copy, time map and Whisper scan, and
+`dynamic_profile` for requests.
+
+**What makes it simpler than chapter-repair**: in a dynamic chapter one
+`sync.json` entry is ONE TTS request, and `<chapter>.render.json` records
+for each (by `sync_index` - a piece that produced no audio has none) the
+engine text, request (`duration_scale` or `seconds`), band, seed and gap,
+plus the profile block (bands, pace targets, silences, trim tail), style
+and seiyuu. So nothing is typed in: the speaker and every style's request
+come from the record.
+
+**User decisions (2026-09-18)**:
+- **One folder the user fills with COPIES**; the tool parses it (green /
+  red per chapter) and works IN PLACE with NO backups. Required per
+  chapter: `.flac`, `.m4a`, `.sync.json`, `.render.json`; optional `.srt`
+  and `.translation.json` (both re-timed); per book `readings.json`.
+- **Find by Time (`7:06`, `1:07:06`) or Part (`68`)**, as the reader shows
+  them. The reader's Part is `sync.json` position + 1 (`idx + 1` in the
+  player's `updateChapterPill`); chapter-repair showed the 0-based index,
+  one off from the reader.
+- **The TTS text is editable** (dynamic only) so a name or rare kanji is
+  read right; `sync.json`, `.srt` and translations keep the book's
+  wording. The request stays keyed to the ORIGINAL text - band, and for
+  an even-pace style the length (meaning and speaking time unchanged).
+- **All six styles or a custom scale** per take.
+- **`readings.json`, per book, in the folder**: never created by the
+  generator; created by the first applied repair that uses a reading,
+  appended after. Opening a Part pre-fills known readings; "Known
+  readings" lists Parts still holding one.
+
+**`translation.json` carries its own `start`/`end` per chunk** (copied
+from `sync.json`), so it must be re-timed with the `.srt` - otherwise a
+later re-emit of the `.srt` would bring back the old times.
+
+**Proven on copies (`F:\tmp\dynamic-repair-test\proof.py`, 42 checks,
+two real takes and a real Whisper scan)**: audio before and after a
+repaired Part sample-identical to the original, the take in the FLAC
+sample-exact, every 0.7/1.0/1.5 s gap preserved, FLAC ends where
+`sync.json` ends, `.srt` and `translation.json` mirror `sync.json` with
+text untouched, `render.json` updated with a `repairs` history and every
+other Part untouched, `readings.json` created on the first reading only,
+faststart and tags kept, a second repair on top of the first. The scan
+found `此方側へ` heard as `コナタ側は` - the readings use case - and one
+false alarm (Whisper writes `二〇一三年` as digits).
+
+A take's length is fixed by text x scale, so re-rendering a Part in the
+style it already had gives the same length (+0.000 s) - a fresh seed
+changes what is said, not how long.
 
 ## `book-profiler/` — the fourth separate tool: a recipe per book and seiyuu
 
