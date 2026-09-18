@@ -118,6 +118,59 @@ def save_settings(data):
         json.dump(merge_setting_defaults(data), f, ensure_ascii=False, indent=2)
 
 
+def add_run_options(parser, takes=False):
+    """Per-run overrides the GUI passes (2026-09-18). Absent, settings.json
+    applies exactly as before, so a CLI user sees no change.
+
+    --work-root is the GUI's "profile root": everything a run writes lands
+    under it, so it has to reach every stage or they would disagree about
+    where the analysis, the takes and the recipe are."""
+    parser.add_argument("--work-root", help="output root (default: work_root in settings.json)")
+    if takes:
+        parser.add_argument("--arms", help="comma list, e.g. 'random' or 'seeded,random'")
+        parser.add_argument("--takes", type=int, help="takes per arm per scale")
+
+
+def apply_run_options(settings, args):
+    if getattr(args, "work_root", None):
+        settings["work_root"] = os.path.abspath(args.work_root)
+    if getattr(args, "arms", None):
+        arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+        unknown = [a for a in arms if a not in ("seeded", "random")]
+        if unknown or not arms:
+            raise SystemExit(f"--arms: unknown arm(s) {unknown or args.arms}")
+        settings["arms"] = arms
+    if getattr(args, "takes", None):
+        settings["takes"] = int(args.takes)
+    # The seeded arm has one fixed seed per take; more takes than seeds
+    # would index past the list mid-sweep.
+    if "seeded" in settings.get("arms", ()) and \
+            settings.get("takes", 0) > len(settings.get("fixed_seeds", ())):
+        raise SystemExit(f"the seeded arm has {len(settings['fixed_seeds'])} fixed seeds - "
+                         f"takes cannot exceed that")
+    return settings
+
+
+# A chapter whose sweep audio was deleted by the GUI's Clean-up tab. Resume
+# treats a missing wav as "not rendered yet", so without this a rerun would
+# quietly re-render the whole chapter with fresh random draws.
+CLEANED_MARKER = "cleaned.json"
+
+
+def cleaned_note(chapter_root):
+    """None, or why this chapter's takes must not be touched again."""
+    path = os.path.join(chapter_root, CLEANED_MARKER)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            when = json.load(f).get("cleaned", "?")
+    except (OSError, ValueError):
+        when = "?"
+    return (f"its audio was cleaned up on {when} - the measurements are kept, but the "
+            f"takes are gone. To measure again, profile into a fresh folder.")
+
+
 # ------------------------------------------------------------ the engine side
 
 def load_irodori_normalizer(irodori_root):
@@ -512,22 +565,34 @@ def scope_for(args):
         folder = os.path.abspath(args.book)
         skip = {os.path.splitext(e)[0] for e in (args.exclude or [])}
         paths = []
-        for n in sorted(os.listdir(folder)):
-            if not n.lower().endswith(".txt"):
+        for path in chapter_files(folder):
+            base = os.path.splitext(os.path.basename(path))[0]
+            if base in skip:
+                excluded.append(base)
                 continue
-            if os.path.splitext(n)[0] in skip:
-                excluded.append(os.path.splitext(n)[0])
-                continue
-            paths.append(os.path.join(folder, n))
+            paths.append(path)
         book_dir, scope = folder, "book"
     else:
         paths = [os.path.abspath(p) for p in args.chapter]
         book_dir = os.path.dirname(paths[0])
         scope = "+".join(os.path.splitext(os.path.basename(p))[0] for p in paths)
+    return args.name or book_name(book_dir), scope, paths, excluded
+
+
+def book_name(book_dir):
+    """The folder name, or its parent's when it is called `text`
+    (F:\\AUDIOBOOK-FINAL\\yojo-senki\\text -> yojo-senki)."""
+    book_dir = os.path.abspath(book_dir)
     name = os.path.basename(book_dir)
     if name.lower() == "text":
         name = os.path.basename(os.path.dirname(book_dir))
-    return args.name or name, scope, paths, excluded
+    return name
+
+
+def chapter_files(book_dir):
+    """What --book profiles: every .txt in the folder, sorted."""
+    return [os.path.join(book_dir, n) for n in sorted(os.listdir(book_dir))
+            if n.lower().endswith(".txt")]
 
 
 def run(args, settings):
@@ -798,8 +863,9 @@ def main():
                         help="with --book: a chapter to leave out (e.g. chapter_007); repeatable")
     parser.add_argument("--name", help="book name for the output folder "
                                        "(default: the folder name, or its parent when it is 'text')")
+    add_run_options(parser)
     args = parser.parse_args()
-    report, out_dir = run(args, load_settings())
+    report, out_dir = run(args, apply_run_options(load_settings(), args))
     ov = report["overall"]
     st = ov["sentence_tts_len"]
     print(f"{report['book']} ({report['scope']}): {len(report['chapters'])} chapter(s), "

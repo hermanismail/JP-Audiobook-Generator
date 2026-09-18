@@ -280,10 +280,16 @@ def main():
     parser.add_argument("--scope", default="book")
     parser.add_argument("--chapter", required=True)
     parser.add_argument("--speaker", required=True)
+    sweep.analyze.add_run_options(parser, takes=True)
     args = parser.parse_args()
 
-    settings = load_settings()
+    settings = sweep.analyze.apply_run_options(load_settings(), args)
     speaker = os.path.abspath(args.speaker)
+    # Scoring reads the wavs; a cleaned chapter's score.json is final.
+    cleaned = sweep.analyze.cleaned_note(sweep.chapter_dir(settings, args.book, args.scope,
+                                                           speaker, args.chapter))
+    if cleaned:
+        raise SystemExit(f"{args.chapter}: {cleaned}")
     analysis_path = os.path.join(settings["work_root"], args.book, args.scope,
                                  "analysis", "analysis.json")
     with open(analysis_path, "r", encoding="utf-8") as f:

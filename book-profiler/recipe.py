@@ -492,9 +492,10 @@ def main():
     parser.add_argument("--scope", default="book")
     parser.add_argument("--speaker", required=True)
     parser.add_argument("--chapter", action="append")
+    analyze.add_run_options(parser)
     args = parser.parse_args()
 
-    settings = load_settings()
+    settings = analyze.apply_run_options(load_settings(), args)
     speaker = os.path.abspath(args.speaker)
     base = os.path.join(settings["work_root"], args.book, args.scope)
     with open(os.path.join(base, "analysis", "analysis.json"), "r", encoding="utf-8") as f:

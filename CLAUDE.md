@@ -503,7 +503,7 @@ hand-picked `duration_scale` / chunk length for a whole book, what should
 each sentence get with THIS seiyuu, and does one recipe hold for the whole
 book? Its output is a profile the generator's planned **dynamic profile
 mode** will read (two modes on Advanced: normal = today, dynamic = a
-profile). CLI only for now; the GUI comes after the listening test.
+profile). A window (`app.py`, see below) drives the same CLI scripts.
 
 Imports, all deliberate and one-way: `text_pipeline` (sentences, cut rules,
 TTS text), `chapter-repair/repair.py` (`similarity()`,
@@ -567,10 +567,57 @@ The 1–32 band is set by two short sentences with hard readings
 - **The 30 s ceiling hardly matters once line breaks end sentences**: the
   longest take in the whole sweep was under 26 s at scale 1.8.
 
-**Still open**: the listening test (stage 5 - default / slower / faster,
-scale recipe and pace recipe, rendered sentence by sentence with the
-dynamic silences), then the generator's dynamic mode (stage 6), and how the
-reader groups one-sentence `sync.json` entries for display.
+**Still open**: how the reader groups one-sentence `sync.json` entries for
+display.
+
+### The window (`app.py` + `profiler_runner.py`, 2026-09-18)
+
+For a user who queues a book and leaves. Asks ONLY for the book folder, the
+seiyuu (one for all chapters, or Customize: tick chapters, pair each with a
+seiyuu) and a profile folder; every measured parameter stays fixed in
+`settings.json`. The window remembers its inputs in `gui_state.json`
+(gitignored). Run = analyse the whole book, then per chapter sweep + score,
+then `recipe.py` per seiyuu over every scored chapter under the root.
+
+- **It runs the CLI scripts as child processes** with `--work-root`
+  (and `--arms`/`--takes` for sweep and score) - one code path, and a
+  window run can be resumed or inspected from a terminal.
+- **Unattended rules** (user decisions): a failing stage is retried once,
+  then the chapter is skipped and the queue carries on; the PC is held
+  awake (`SetThreadExecutionState`, per thread - set on the runner
+  thread); a busy GPU WARNS, never refuses; Stop is `taskkill /T /F` on
+  the stage, which took the TTS worker with it and returned VRAM to the
+  1.35 GB desktop baseline (tested mid-sweep).
+- **Seed tick box**: unticked = random x 6 takes, ticked = 3 fixed + 3
+  random (tanya's method). Six takes either way, because rebuilding
+  tanya's recipe from its 3 random takes alone made 3 of 6 chapters LESS
+  cautious (chapter_001's shortest band x1.5/1.7 -> x1.1/1.5). The seed
+  is not the variable; the number of chances to catch a hallucination is.
+- **The chapter set cannot change the measurements**: each chapter's
+  length steps come from its own sentences (verified: yojo-senki analysed
+  with and without chapter_007 gives identical steps for 001-006). So
+  the window always analyses the whole book, scope `book`.
+- **"Measured" means no take marker is newer than `score.json`** - not
+  "score.json newer than sweep.json": a `--report-only` sweep rewrites
+  sweep.json without rendering (tanya's chapter_001 is like that).
+- **Listening test is optional**, one button per profile, all six samples;
+  the Results window opens as its own `listen.py --window-only` process.
+
+**Clean up tab** - per seiyuu per book, PERMANENT (no Recycle Bin, user
+decision: gigabytes piling up there is worse than no undo). Deletes only
+`.wav` files of chapters that are scored AND in that seiyuu's book profile,
+plus its listening-test audio; keeps markers, transcripts, `score.json`,
+recipe, profiles. `cleaned.json` goes down FIRST in each chapter, and
+`sweep.py`/`score.py` refuse a cleaned chapter - resume reads a missing wav
+as "not rendered", so without the marker a rerun would silently re-render
+it with fresh draws. Re-profiling = a fresh folder. Tested on a copy: 19
+checks, every non-wav file byte-identical, recipe rebuilt from the kept
+`score.json` with identical bands.
+
+A module-path trap: `profiler_runner` puts `seiyuu-audition/` on
+`sys.path`, so `import app` from anywhere that imported it finds the
+AUDITION tool's `app.py`. The window runs as `__main__` and is unaffected;
+a test harness must load it by file path.
 
 ## Conventions worth not breaking
 
@@ -975,6 +1022,17 @@ GPU job.
 a sweep key like `batch_script` written into `settings.json` was silently
 ignored. `analyze.merged_settings(defaults)` is the fix; a new script must
 use it.
+
+**A reader that stops reading deadlocks the whole chain.** In the book
+profiler's first real test, the log callback raised (a cp1252 stdout could
+not print Whisper's `█` progress bar); the read loop died, its `finally`
+called `wait()`, `score.py` then blocked writing to the unread pipe and
+Whisper blocked behind it - 2.5 hours of a "running" test with the GPU in
+P8 and 39 of 54 transcripts written in the first 14 seconds. Anything that
+pumps a child's output must keep reading whatever the callback does, and
+kill the tree if the loop exits early (`profiler_runner.Run._stage`).
+"Running for hours" with an idle GPU is a hang, not slowness - check file
+timestamps before believing a progress estimate.
 
 **`chapter-repair/sandbox_test.py` needs `PYTHONUTF8=1` from a piped
 shell.** It prints `→` and decodes ffprobe's Japanese tags with the locale

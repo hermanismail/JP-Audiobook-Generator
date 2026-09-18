@@ -215,5 +215,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# book-profiler keeps its settings local, like the other tools' settings.json
+# book-profiler keeps its settings local, like the other tools' settings.json,
+# and the window remembers its last inputs in gui_state.json
 book-profiler/settings.json
+book-profiler/gui_state.json

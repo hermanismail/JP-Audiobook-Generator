@@ -409,9 +409,10 @@ def main():
                         help="'book' or a chapter name - which profile_*.json to listen to")
     parser.add_argument("--window-only", action="store_true")
     parser.add_argument("--no-window", action="store_true")
+    analyze.add_run_options(parser)
     args = parser.parse_args()
 
-    settings = load_settings()
+    settings = analyze.apply_run_options(load_settings(), args)
     speaker = os.path.abspath(args.speaker)
     base = os.path.join(settings["work_root"], args.book, args.scope)
     recipe_dir = os.path.join(base, "recipe", sweep.nickname_for(speaker))
