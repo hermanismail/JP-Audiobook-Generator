@@ -443,24 +443,10 @@ class SettingsApp(ctk.CTk):
         self._keep_temp_switches = []
 
         self._build_ui()
+        # Opens in the mode used last; the sidebar switch changes it. A
+        # launch pop-up asking the same question was removed 2026-09-18 as
+        # redundant with the switch.
         self._apply_mode(self.generation_mode)
-
-        # The mode is chosen in a pop-up at launch, the last one used
-        # preselected (decision 2026-09-17), and can be switched later from
-        # the sidebar. Scheduled rather than run here: CustomTkinter restores
-        # the window's state itself once it has set the Windows title bar
-        # colour, so a withdraw() inside __init__ was undone the wrong way -
-        # the main window stayed withdrawn after the choice was made.
-        self.after(0, self._choose_mode_at_launch)
-
-    def _choose_mode_at_launch(self):
-        self.withdraw()
-        dialog = dynamic_mode_ui.ModeDialog(self, self.generation_mode)
-        self.wait_window(dialog)
-        self._apply_mode(dialog.result)
-        self.deiconify()
-        self.lift()
-        self.focus_force()
 
     def _set_initial_geometry(self):
         """Size the window relative to the actual screen (CustomTkinter is

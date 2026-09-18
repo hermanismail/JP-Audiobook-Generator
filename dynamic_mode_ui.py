@@ -5,7 +5,6 @@ The pieces of the settings GUI that exist only for dynamic profile mode
 (2026-09-17). Kept out of gui_settings.py so normal mode's code stays as it
 was; gui_settings.py wires these in.
 
-    ModeDialog          the pop-up at launch: normal or dynamic profile
     parse_input_folder  what "choose an Input Folder" checks in dynamic mode
     ProfilePanel        Profile Path + summary + style selector
     CustomizeWindow     one row per chapter: tick, profile, style
@@ -33,7 +32,6 @@ COLOR_OK = "#1E8B4E"
 COLOR_ERROR = "#C4453C"
 COLOR_WARN = "#B7791F"
 COLOR_DISABLED = "#B8B8C0"
-MODE_LABELS = {"normal": "Normal", "dynamic": "Dynamic profile"}
 STYLE_BY_LABEL = {label: key for key, label in dynamic_profile.STYLE_LABELS.items()}
 
 
@@ -90,86 +88,6 @@ def check_profile(path):
         return None, [f"Not usable: {e}"], False
     ok, _note = dynamic_profile.speaker_status(profile)
     return profile, dynamic_profile.summary_lines(profile), ok
-
-
-# ------------------------------------------------------------ mode pop-up
-
-class ModeDialog(ctk.CTkToplevel):
-    """Modal choice between the two modes, the last one used preselected.
-    `self.result` is the chosen mode, or the preselected one if the window
-    is closed without choosing."""
-
-    def __init__(self, master, current):
-        super().__init__(master)
-        self.title("JP Audiobook Generator")
-        self.configure(fg_color=COLOR_BG)
-        self.resizable(False, False)
-        self.result = current
-        self.choice = ctk.StringVar(value=current)
-        self.protocol("WM_DELETE_WINDOW", self._close)
-
-        ctk.CTkLabel(self, text="Choose generation mode", text_color=COLOR_TITLE,
-                     font=ctk.CTkFont(size=20, weight="bold")).pack(padx=28, pady=(24, 4),
-                                                                    anchor="w")
-        ctk.CTkLabel(self, text=f"Last used: {MODE_LABELS[current]}. You can switch any "
-                                f"time from the sidebar.",
-                     text_color=COLOR_SUBTITLE, font=ctk.CTkFont(size=12)).pack(
-            padx=28, pady=(0, 16), anchor="w")
-
-        self._cards = {}
-        for mode, title, body in (
-                ("normal", "Normal",
-                 "Chunked rendering with your own silences, chunk length and TTS "
-                 "tuning - the generator as it has always worked."),
-                ("dynamic", "Dynamic profile",
-                 "Sentence-by-sentence rendering from a book-profiler profile: "
-                 "each sentence gets the duration scale (or pace) measured for "
-                 "its length with that seiyuu.")):
-            card = ctk.CTkFrame(self, fg_color=COLOR_CARD, corner_radius=12, border_width=2,
-                                border_color=COLOR_CARD_BORDER)
-            card.pack(fill="x", padx=28, pady=6)
-            radio = ctk.CTkRadioButton(card, text=title, variable=self.choice, value=mode,
-                                       font=ctk.CTkFont(size=14, weight="bold"),
-                                       text_color=COLOR_TITLE, fg_color=COLOR_ACCENT,
-                                       command=self._refresh)
-            radio.pack(anchor="w", padx=16, pady=(12, 2))
-            label = ctk.CTkLabel(card, text=body, text_color=COLOR_SUBTITLE, justify="left",
-                                 wraplength=420, font=ctk.CTkFont(size=12), anchor="w")
-            label.pack(anchor="w", padx=(44, 16), pady=(0, 12))
-            for widget in (card, label):
-                widget.bind("<Button-1>", lambda _e, m=mode: (self.choice.set(m), self._refresh()))
-            self._cards[mode] = card
-
-        ctk.CTkButton(self, text="Continue", width=130, height=38, corner_radius=8,
-                      fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-                      command=self._continue).pack(anchor="e", padx=28, pady=(14, 22))
-        self.bind("<Return>", lambda _e: self._continue())
-        self._refresh()
-        self.after(50, self._center)
-
-    def _center(self):
-        self.update_idletasks()
-        w, h = self.winfo_width(), self.winfo_height()
-        x = (self.winfo_screenwidth() - w) // 2
-        y = (self.winfo_screenheight() - h) // 3
-        self.geometry(f"+{x}+{y}")
-        self.lift()
-        self.focus_force()
-        self.grab_set()
-
-    def _refresh(self):
-        for mode, card in self._cards.items():
-            card.configure(border_color=COLOR_ACCENT if self.choice.get() == mode
-                           else COLOR_CARD_BORDER)
-
-    def _continue(self):
-        self.result = self.choice.get()
-        self.grab_release()
-        self.destroy()
-
-    def _close(self):
-        self.grab_release()
-        self.destroy()
 
 
 # ------------------------------------------------------------ profile panel
