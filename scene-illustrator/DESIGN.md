@@ -37,6 +37,7 @@ needed" at the end).
 | 19 | **At most 4 scenes per chapter.** Image 4 trails until the next chapter's first image. | **D** 09-19 |
 | 20 | Scene count by **bands** of chapter length / median, not rounding. | **D** 09-19 |
 | 21 | **Places follow the same rule** as characters: drawn once = no reference. | **D** 09-19 |
+| 22 | **Every book is monochrome. No switch**: reference images are converted to greyscale before use and every output to greyscale on save (M5). | **D** 09-20 |
 
 ### Measured (2026-09-18), not assumed
 
@@ -162,8 +163,9 @@ whole book (§5), so:
   reference is approved in Stage B.
 
 A **book style note** is part of every prompt, set once per book: e.g.
-"pure black-and-white manga ink, hatching, no colour". This targets the
-stray-colour fault.
+"black-and-white manga ink, hatching". It sets the drawing style only;
+colour is removed in code, since the prompt cannot stop it (M5, decision
+22).
 
 **Output**: `refs/characters/<id>.png`, `refs/places/<id>.png`,
 `refs.json` (which image, which prompt, which seed).
@@ -363,9 +365,9 @@ same scene), no gain, ~2x slower to encode. Decision 13 (English) stands.
 **M5 — "pure monochrome, no colour" does NOT stop colour** when the
 description names one (orange trousers, red hair, pink shirt came out in
 colour), and a coloured reference image leaks its colour into scenes.
-Fix is deterministic, not a prompt: a per-book **monochrome switch** that
-converts reference images to greyscale before use and every output to
-greyscale on save.
+Fix is deterministic, not a prompt: reference images are converted to
+greyscale before use and every output to greyscale on save — for every
+book, no switch (decision 22).
 
 **M4 — anchor -> `sync.json`: 52 of 52 matched** against the published
 (normal-mode) After Dark, by searching the anchor's FIRST sentence inside
