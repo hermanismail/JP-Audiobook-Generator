@@ -191,7 +191,7 @@ proposal:
 
 No fixed threshold: the baseline is the **median chapter length of the
 book**, measured over all its chapters. Bands of `chapter / median`
-(edges PROPOSED, awaiting your confirmation), **capped at 4**:
+(edges confirmed 09-19), **capped at 4**:
 
 | chapter / median | scenes |
 |---|---|
@@ -325,14 +325,59 @@ Engines (installed outside the repo, per the F: rule):
 | M4 | Anchor -> `sync.json` match rate on a real published chapter (normal and dynamic mode) | Stage D automation level. |
 | M5 | Does a "pure monochrome" style note stop the colour leaks? | Style consistency. |
 
+### Results of step (a), 2026-09-19
+
+Files: `F:\tmp\scene-illustrator\after-dark\measure\`.
+
+**M1 — references per request: 5 fit.** Peak VRAM ~7.0-7.4 GB whatever
+the count; time grows instead: 1-2 refs ~17-26 s, 3 refs ~26 s, 5 refs
+~60 s. Identity: with its own reference Kaoru matched her sheet in both
+seeds (without one she was a different woman); a place reference carried
+the bar's layout (record shelves, counter) into the scene. The 5-ref
+crowded room kept all four women recognisable but composed as a small,
+cluttered wide shot. Rule for the tool: **cap at 5 references** (style +
+up to 4), warn above 3.
+
+**Time per image depends on the prompt, not the take**: the first image
+of a NEW prompt costs ~26 s (the text encoder is swapped back onto the
+full card), further takes of the same prompt ~10 s. So draw all takes of
+one scene together; a scene of 3 takes ~45 s (2 refs) to ~2 min (5 refs).
+
+**M2 — Japanese prompt: works as well as English** (same identities,
+same scene), no gain, ~2x slower to encode. Decision 13 (English) stands.
+
+**M3 — scene proposals (Qwen3.5-9B, all 18 chapters, 4.4 min):**
+- Every chapter got exactly its band count (52).
+- **Choices are good**: the visual key moments (Takahashi at Mari's
+  table, Kaoru bursting in, room 404, the bar, the kitten, Korogi's
+  brand, the swings, the station goodbye, Mari into Eri's bed).
+- **6 of 52 anchors not verbatim** (the model glued sentences together)
+  -> code must snap each anchor to the closest real sentence and flag it.
+- **Poor spread**: scenes cluster at chapter starts and ends (ch.13:
+  0.00 / 0.89 / 0.99). -> ask ONE scene per slice of the chapter
+  (N calls, each given only its slice), which forces the spread.
+- Cast/place slips ~1 in 8: e.g. room 404 exit scene missing Mari and
+  Kaoru, the taxi driver left out, a truck scene given Mari + Takahashi,
+  invented extras ("waving goodbye at dawn"). Caught in proposal review.
+
+**M5 — "pure monochrome, no colour" does NOT stop colour** when the
+description names one (orange trousers, red hair, pink shirt came out in
+colour), and a coloured reference image leaks its colour into scenes.
+Fix is deterministic, not a prompt: a per-book **monochrome switch** that
+converts reference images to greyscale before use and every output to
+greyscale on save.
+
+**Also seen**: body build is weakly followed (Kaoru "big, 175 cm,
+ex-wrestler" drawn slim in every sheet); "windowless" rooms got windows.
+Reference sheets need the re-prompt loop Stage B already has; negative
+details ("no windows") are unreliable.
+
 ---
 
 ## 10. Decisions needed from you
 
-Two rounds of decisions are recorded in §1. Still open:
-
-1. **Band edges** in §5a (0.35 / 0.75 / 1.5 x median) — confirm or give
-   your own.
+All decisions so far are recorded in §1 and §5a (band edges confirmed
+09-19). Nothing open.
 
 Build order (decided): (a) M1-M3 measurements; (b) Stage A + cast review
 screen; (c) Stage B reference sheet; (d) Stage C proposals + gallery;
