@@ -367,6 +367,15 @@ Fix is deterministic, not a prompt: a per-book **monochrome switch** that
 converts reference images to greyscale before use and every output to
 greyscale on save.
 
+**M4 — anchor -> `sync.json`: 52 of 52 matched** against the published
+(normal-mode) After Dark, by searching the anchor's FIRST sentence inside
+the concatenated entries — including the 6 non-verbatim anchors, whose
+first sentence was real. In normal mode an entry holds several sentences,
+so the image switches at the start of the entry containing the anchor,
+sometimes one sentence early; in dynamic chapters an entry is one
+sentence, so it is exact. Stage D needs no fuzzy matching in the common
+case; keep it only as the fallback.
+
 **Also seen**: body build is weakly followed (Kaoru "big, 175 cm,
 ex-wrestler" drawn slim in every sheet); "windowless" rooms got windows.
 Reference sheets need the re-prompt loop Stage B already has; negative
