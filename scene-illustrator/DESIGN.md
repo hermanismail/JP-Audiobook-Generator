@@ -25,6 +25,18 @@ needed" at the end).
 | 7 | Player changes (web client first, Android frozen) come after this tool, via a handover prompt to a session in `F:\JPAudiobookPlayer`. | **D** 09-18 |
 | 8 | No automatic physical-logic check for now; you judge each image. A checklist library may come later. | **D** 09-18 |
 | 9 | Work files under `F:\tmp\scene-illustrator\<book>\`. | **D** 09-18 |
+| 10 | Images are **PNG, 832x1216 portrait**. | **D** 09-19 |
+| 11 | **3 takes** per scene by default. | **D** 09-19 |
+| 12 | **Several references per character** (outfits / states) — in the first build. | **D** 09-19 |
+| 13 | Image prompts in **English**. | **D** 09-19 |
+| 14 | **One style image per book.** | **D** 09-19 |
+| 15 | A character drawn in **more than one** scene is main and must have a reference; otherwise minor (see §4a). | **D** 09-19 |
+| 16 | Scenes per chapter scale with chapter length against the book's **median** chapter: median = 3 scenes, shorter = fewer, longer = more (see §5a). | **D** 09-19 |
+| 17 | Build order: measurements, then A, B, C, D, then the player handover. | **D** 09-19 |
+| 18 | A character or place drawn **only once in the whole book** is drawn without a reference. | **D** 09-19 |
+| 19 | **At most 4 scenes per chapter.** Image 4 trails until the next chapter's first image. | **D** 09-19 |
+| 20 | Scene count by **bands** of chapter length / median, not rounding. | **D** 09-19 |
+| 21 | **Places follow the same rule** as characters: drawn once = no reference. | **D** 09-19 |
 
 ### Measured (2026-09-18), not assumed
 
@@ -101,9 +113,9 @@ drop.
   suggestions you accept one by one. Never applied automatically.
 - **Delete** an entry (noise: someone only talked about).
 - **Edit** the canonical name, add a note, add a detail by hand.
-- **Priority**: mark an entry as *main* (gets a reference image) or
-  *minor* (described in prompts only, no reference). Default: main =
-  appears in 3+ chapters.
+- **Main / minor** is not decided here — it depends on how often a
+  character is DRAWN, which is only known after scene proposals (§4a).
+  You may pre-mark someone main here to force a reference.
 
 **Output**: `bible.json` — the merged, accepted cast and places. Nothing
 downstream reads the raw lists.
@@ -129,8 +141,25 @@ For each *main* character and each key place:
    locks it.
 
 A character can hold **more than one reference** (e.g. Eri awake / asleep
-in pyjamas, Kaoru with and without her knit cap). Optional; proposed
-because clothes change within books.
+in pyjamas, Kaoru with and without her knit cap). Each variant has a
+short label; a scene names the variant it uses, the proposal picks one
+and you can change it.
+
+### 4a. Main and minor characters (decided 09-19)
+
+A character is **main** when it is drawn in **more than one** scene of
+the book; a main character must have an approved reference before any of
+its scenes are drawn. **Minor** = drawn in exactly one scene of the whole
+book, and drawn there **without a reference**, from the prompt alone —
+consistency cannot matter for someone seen once. **Places follow the
+same rule.** The count comes from the approved scene proposals across the
+whole book (§5), so:
+
+- Stage B first draws references for anyone pre-marked main or already
+  in 2+ proposals;
+- if editing proposals later puts a minor character into a second scene,
+  it is **promoted**: the tool flags it and its scenes wait until its
+  reference is approved in Stage B.
 
 A **book style note** is part of every prompt, set once per book: e.g.
 "pure black-and-white manga ink, hatching, no colour". This targets the
@@ -146,8 +175,9 @@ stray-colour fault.
 ### C1. Proposals (LLM)
 
 Per chapter, the LLM receives the chapter text plus the list of bible
-names and proposes **4 scenes spread across the chapter** (roughly one
-per quarter, never two in the same passage). Each proposal:
+names and proposes **its scene count (§5a) spread across the chapter**
+(one per equal slice of the text, never two in the same passage). Each
+proposal:
 
 - **anchor**: the exact sentence where the scene starts, copied from the
   text (checked by code to exist verbatim; if not, the tool finds the
@@ -157,9 +187,25 @@ per quarter, never two in the same passage). Each proposal:
 - **prompt**: English, built from the description + the cast's and
   place's accepted details + the book style note.
 
-Short chapters may get fewer (ch.8 of After Dark is 1,700 characters and
-has one scene). Chapters where nothing is drawable (dialogue only) are
-allowed fewer.
+### 5a. How many scenes per chapter (decided 09-19)
+
+No fixed threshold: the baseline is the **median chapter length of the
+book**, measured over all its chapters. Bands of `chapter / median`
+(edges PROPOSED, awaiting your confirmation), **capped at 4**:
+
+| chapter / median | scenes |
+|---|---|
+| under 0.35 | 1 |
+| 0.35 - 0.75 | 2 |
+| 0.75 - 1.5 | 3 (the median chapter) |
+| over 1.5 | 4 (cap) |
+
+After Dark (median 6,083 chars): ch.8 (1,698, 0.28) 1; ch.2, 4, 7, 14
+(0.45-0.70) 2; ch.5, 6, 10-13, 16-18 (0.81-1.47) 3; ch.1, 3, 9, 15
+(1.53-2.23) 4 — **52 images** for the book. In a chapter with more than
+4 drawable moments, image 4 simply trails until the next chapter's first
+image. You can change a chapter's count in the proposal review; the LLM
+may also propose fewer when a chapter has nothing drawable.
 
 **Proposal review** (before any drawing, because drawing is where time
 goes): per chapter a list of 4 cards. You can edit the text, change the
@@ -177,7 +223,7 @@ side, the prompt editable under them. Per take: Pick, or re-roll.
 Per scene: edit prompt -> draw N more. Picked = approved. Nothing is
 exported until you approve.
 
-Speed: 18 chapters x 4 scenes x 3 takes = ~216 images, ~40 min of GPU.
+Speed: After Dark's 52 scenes x 3 takes = 156 images, ~26 min of GPU.
 
 ---
 
@@ -198,7 +244,7 @@ Speed: 18 chapters x 4 scenes x 3 takes = ~216 images, ~40 min of GPU.
    image keeps showing (player side). Starts must increase and stay
    inside the chapter's duration.
 4. **Export** into the output folder, per chapter:
-   - `chapter_<N>_img_<i>.png`, i = 1..4 in time order — the name the
+   - `chapter_<N>_img_<i>.png`, i = 1..n in time order — the name the
      player already reads;
    - `chapter_<N>.images.json`:
 
@@ -283,25 +329,12 @@ Engines (installed outside the repo, per the F: rule):
 
 ## 10. Decisions needed from you
 
-1. **Image format and size.** PNG ~1.8 MB each at 832x1216 (portrait).
-   JPEG q90 would be ~300-500 KB — 72 images per book on R2 either way.
-   Portrait 832x1216 suits zen mode's side column; confirm, or give the
-   shape you use today.
-2. **Takes per scene**: default 3? (Each take ~10 s.)
-3. **Multiple references per character** (outfits/states): wanted now,
-   or later?
-4. **Who writes prompts' language**: keep English (proposed) unless M2
-   shows Japanese works better?
-5. **Style image**: one per book (proposed), or allow one per character?
-6. **Minor characters**: no reference, described in prompt only
-   (proposed) — OK?
-7. **Chapters with fewer than 4 drawable scenes**: allow 1-3 (proposed),
-   or always 4?
-8. **Build order**, proposed:
-   (a) M1-M3 measurements;
-   (b) Stage A + cast review screen;
-   (c) Stage B reference sheet;
-   (d) Stage C proposals + gallery;
-   (e) Stage D timing + export;
-   (f) handover prompt for the player's web client.
-   Each on its own feature branch, merged when you have used it.
+Two rounds of decisions are recorded in §1. Still open:
+
+1. **Band edges** in §5a (0.35 / 0.75 / 1.5 x median) — confirm or give
+   your own.
+
+Build order (decided): (a) M1-M3 measurements; (b) Stage A + cast review
+screen; (c) Stage B reference sheet; (d) Stage C proposals + gallery;
+(e) Stage D timing + export; (f) handover prompt for the player's web
+client. Each on its own feature branch, merged when you have used it.
