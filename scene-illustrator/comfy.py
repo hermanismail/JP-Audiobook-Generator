@@ -1,17 +1,23 @@
 """
 comfy.py
 --------
-The image engine: FLUX.2 [klein] 4B in the separate ComfyUI install at
-F:\\ComfyUI, driven over its HTTP API.
+The image engines, both in the separate ComfyUI install at F:\\ComfyUI and
+driven over its HTTP API. v2 uses two, because each is clearly better at one
+job (measured 2026-09-20, DESIGN.md v2):
 
-Measured 2026-09-19 on the 4060 (see DESIGN.md §9):
-  - up to 5 reference images fit; VRAM stays ~7.0-7.4 GB, TIME grows
-    (1-3 refs ~17-26 s, 5 refs ~60 s), so MAX_REFS is 5;
-  - the first image of a NEW prompt costs ~26 s (the text encoder is
-    swapped back in), further takes of the same prompt ~10 s - draw all
-    takes of one prompt in one run;
-  - a prompt cannot keep colour out, so every reference and every output
-    is converted to greyscale here (decision 22).
+  DRAW  FLUX.2 klein 9B (GGUF)  - draws a chapter's samples from a prompt,
+        with the style sample attached. 4 steps, ~30 s a take.
+  EDIT  FLUX.1 Kontext dev (GGUF) - changes one thing in an existing image and
+        leaves the rest alone. 20 steps, ~165 s a take. It ignores a style
+        image: it inherits the style of the image it edits.
+
+Only one is on the card at a time; ComfyUI unloads the other by itself.
+
+Also measured and relied on here:
+  - up to 5 reference images fit in 8 GB; time grows with the count, VRAM
+    does not;
+  - a prompt cannot keep colour out, so every reference and every output is
+    converted to greyscale (v2 decision v5).
 """
 
 import json
@@ -29,12 +35,14 @@ from PIL import Image
 
 MAX_REFS = 5
 WIDTH, HEIGHT = 832, 1216
-STEPS = 4
+DRAW_STEPS = 4
+EDIT_STEPS = 20
+EDIT_GUIDANCE = 2.5
 
 
 class ManagedComfy:
-    """Starts ComfyUI only if nothing listens on the port, and only ever
-    stops a server it started. Killed as a tree so VRAM comes back."""
+    """Starts ComfyUI only if nothing listens on the port, and only ever stops
+    a server it started. Killed as a tree so VRAM comes back."""
 
     def __init__(self, settings, log):
         self.s = settings
@@ -81,24 +89,34 @@ class ManagedComfy:
         self.proc = None
         return False
 
-    # ------------------------------------------------------------ drawing
+    # ------------------------------------------------------------ helpers
     def input_dir(self):
         return os.path.join(self.s["comfy_root"], "input")
 
     def put_reference(self, path, name):
         """Copy a reference into ComfyUI/input as greyscale; return its name."""
-        dst = os.path.join(self.input_dir(), name)
-        os.makedirs(self.input_dir(), exist_ok=True)
-        to_greyscale(path, dst)
+        to_greyscale(path, os.path.join(self.input_dir(), name))
         return name
 
-    def graph(self, prompt, refs, seed, prefix):
+    def check_models(self, mode):
+        """Say plainly which file is missing rather than failing inside a graph."""
+        root = self.s["comfy_root"]
+        needed = ([("unet", self.s["draw_unet"]), ("text_encoders", self.s["draw_clip"]),
+                   ("vae", self.s["draw_vae"])] if mode == "draw" else
+                  [("unet", self.s["edit_unet"]), ("text_encoders", self.s["edit_clip_l"]),
+                   ("text_encoders", self.s["edit_clip_t5"]), ("vae", self.s["edit_vae"])])
+        missing = [n for sub, n in needed if not os.path.isfile(os.path.join(root, "models", sub, n))]
+        if missing:
+            raise RuntimeError(f"{mode} model files missing from {root}\\models: " + ", ".join(missing))
+
+    # ------------------------------------------------------------- graphs
+    def draw_graph(self, prompt, refs, seed, prefix, width, height):
+        """FLUX.2 klein 9B: reference latents, 4 steps, cfg 1."""
         g = {
-            "1": {"class_type": "UNETLoader",
-                  "inputs": {"unet_name": self.s["flux_unet"], "weight_dtype": "default"}},
+            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": self.s["draw_unet"]}},
             "2": {"class_type": "CLIPLoader",
-                  "inputs": {"clip_name": self.s["flux_clip"], "type": "flux2", "device": "default"}},
-            "3": {"class_type": "VAELoader", "inputs": {"vae_name": self.s["flux_vae"]}},
+                  "inputs": {"clip_name": self.s["draw_clip"], "type": "flux2", "device": "default"}},
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": self.s["draw_vae"]}},
             "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
             "8": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["7", 0]}},
         }
@@ -117,8 +135,8 @@ class ManagedComfy:
             "11": {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": pos, "negative": neg, "cfg": 1.0}},
             "12": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
             "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
-            "14": {"class_type": "Flux2Scheduler", "inputs": {"steps": STEPS, "width": WIDTH, "height": HEIGHT}},
-            "15": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": WIDTH, "height": HEIGHT, "batch_size": 1}},
+            "14": {"class_type": "Flux2Scheduler", "inputs": {"steps": DRAW_STEPS, "width": width, "height": height}},
+            "15": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
             "16": {"class_type": "SamplerCustomAdvanced",
                    "inputs": {"noise": ["12", 0], "guider": ["11", 0], "sampler": ["13", 0],
                               "sigmas": ["14", 0], "latent_image": ["15", 0]}},
@@ -127,13 +145,46 @@ class ManagedComfy:
         })
         return g
 
-    def draw(self, prompt, refs, seed, out_path, on_progress=None):
-        """One image, saved greyscale at out_path. Returns seconds taken.
+    def edit_graph(self, prompt, refs, seed, prefix, width, height):
+        """FLUX.1 Kontext dev: the image(s) to work from, 20 steps, guidance 2.5."""
+        g = {
+            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": self.s["edit_unet"]}},
+            "2": {"class_type": "DualCLIPLoader",
+                  "inputs": {"clip_name1": self.s["edit_clip_l"], "clip_name2": self.s["edit_clip_t5"],
+                             "type": "flux", "device": "default"}},
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": self.s["edit_vae"]}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+            "9": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["7", 0], "guidance": EDIT_GUIDANCE}},
+            "8": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["7", 0]}},
+        }
+        pos = ["9", 0]
+        for i, ref in enumerate(refs[:MAX_REFS]):
+            b = 110 + 10 * i
+            g[str(b)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+            g[str(b + 1)] = {"class_type": "FluxKontextImageScale", "inputs": {"image": [str(b), 0]}}
+            g[str(b + 2)] = {"class_type": "VAEEncode", "inputs": {"pixels": [str(b + 1), 0], "vae": ["3", 0]}}
+            g[str(b + 3)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": pos, "latent": [str(b + 2), 0]}}
+            pos = [str(b + 3), 0]
+        g.update({
+            "15": {"class_type": "EmptySD3LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+            "16": {"class_type": "KSampler",
+                   "inputs": {"model": ["1", 0], "positive": pos, "negative": ["8", 0], "latent_image": ["15", 0],
+                              "seed": seed, "steps": EDIT_STEPS, "cfg": 1.0, "sampler_name": "euler",
+                              "scheduler": "simple", "denoise": 1.0}},
+            "17": {"class_type": "VAEDecode", "inputs": {"samples": ["16", 0], "vae": ["3", 0]}},
+            "18": {"class_type": "SaveImage", "inputs": {"images": ["17", 0], "filename_prefix": prefix}},
+        })
+        return g
 
-        Progress comes from ComfyUI's own WebSocket: `on_progress(value, max)`
-        for the sampler's steps, and (0, 0) when a node starts, since loading
-        the text encoder is silent and is most of a first take's time."""
+    # ------------------------------------------------------------ drawing
+    def run(self, mode, prompt, refs, seed, out_path, on_progress=None,
+            width=WIDTH, height=HEIGHT):
+        """One image through `mode` ("draw" or "edit"), saved greyscale at
+        out_path. Returns seconds taken. Progress comes from ComfyUI's own
+        WebSocket: on_progress(value, max) per sampler step, and (0, 0) when a
+        node starts, since loading a model reports nothing."""
         t0 = time.time()
+        graph = self.draw_graph if mode == "draw" else self.edit_graph
         prefix = "scene-illustrator/tmp"
         client_id = uuid.uuid4().hex
         ws = None
@@ -144,7 +195,7 @@ class ManagedComfy:
                 ws.settimeout(1.0)
             except (OSError, websocket.WebSocketException):
                 ws = None
-        body = json.dumps({"prompt": self.graph(prompt, refs, seed, prefix),
+        body = json.dumps({"prompt": graph(prompt, refs, seed, prefix, width, height),
                            "client_id": client_id}).encode()
         req = urllib.request.Request(self.url + "/prompt", body, {"Content-Type": "application/json"})
         try:
@@ -166,7 +217,7 @@ class ManagedComfy:
                         if data.get("type") == "progress":
                             on_progress(payload.get("value", 0), payload.get("max", 1))
                         elif data.get("type") == "executing" and payload.get("node") not in (None, node):
-                            node = payload["node"]     # a new node: still working, no percentage
+                            node = payload["node"]
                             on_progress(0, 0)
                 except websocket.WebSocketTimeoutException:
                     pass
@@ -184,7 +235,7 @@ class ManagedComfy:
         status = record["status"].get("status_str")
         if status != "success":
             raise RuntimeError(f"ComfyUI job {status}: {json.dumps(record['status'])[:400]}")
-        images = [im for node in record.get("outputs", {}).values() for im in node.get("images", [])]
+        images = [im for node_out in record.get("outputs", {}).values() for im in node_out.get("images", [])]
         if not images:
             raise RuntimeError("ComfyUI produced no image")
         src = os.path.join(self.s["comfy_root"], "output", images[0]["subfolder"], images[0]["filename"])
@@ -194,9 +245,11 @@ class ManagedComfy:
 
 
 def to_greyscale(src, dst):
-    """Every book is monochrome (decision 22): a prompt cannot keep colour
-    out, so it is removed here, on the way in and on the way out."""
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    """Every book is monochrome: a prompt cannot keep colour out, so it is
+    removed here, on the way in and on the way out."""
+    folder = os.path.dirname(dst)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
     with Image.open(src) as im:
         im.convert("L").save(dst, "PNG")
 

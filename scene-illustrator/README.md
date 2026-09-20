@@ -1,10 +1,7 @@
 # Scene Illustrator
 
-Zen-mode images per chapter. The full design, every decision and every
-measurement behind it: [DESIGN.md](DESIGN.md).
-
-**Built so far: Stage A** (read the book, curate the cast and places),
-**Stage B** (reference sheets) and **Stage C** (scenes).
+One zen-mode image per chapter. Every decision and every measurement behind
+it: [DESIGN.md](DESIGN.md) (v2 at the top; v1 is kept below as history).
 
 ## Run
 
@@ -14,83 +11,66 @@ measurement behind it: [DESIGN.md](DESIGN.md).
 
 or run `Create-Shortcut.ps1` once for a desktop / taskbar shortcut.
 
-Needs, outside this folder: `C:\llama.cpp\llama-server.exe` and
-`F:\models\llm\Qwen3.5-9B-Q4_K_M.gguf` (paths in `settings.json`, created
-on first save; defaults in `illustrator.py`). Work files go to
-`F:\tmp\scene-illustrator\<book>\`.
+Needs, outside this folder (paths in `settings.json`, defaults in
+`illustrator.py`):
+
+| for | what |
+|---|---|
+| reading | `C:\llama.cpp\llama-server.exe` + `F:\models\llm\Qwen3.5-9B-Q4_K_M.gguf` |
+| drawing | `F:\ComfyUI` with `flux-2-klein-9b-Q4_K_M.gguf`, `qwen_3_8b_fp8mixed.safetensors`, `flux2-vae.safetensors` |
+| editing | the same ComfyUI with `flux1-kontext-dev-Q4_K_M.gguf`, `clip_l.safetensors`, `t5xxl_fp8_e4m3fn_scaled.safetensors`, `ae.safetensors` |
+
+Both GGUF models load through the **ComfyUI-GGUF** custom node. Only one
+engine is on the card at a time. Work files go to
+`F:\tmp\scene-illustrator\<book>\`; `style_ink.png` beside this README is the
+book's drawing style and is always attached when drawing.
 
 ## 1 Read
 
-Choose the book's chapter text folder (`chapter_*.txt`); the book name is
-taken from the folder. **Read book** starts llama-server, reads every
-chapter in pieces of up to 7,000 characters, and stops the server again —
-about 12 minutes for After Dark. Stop kills the whole tree, so VRAM comes
-back. Finished pieces are kept: Read again only does what is missing or
-failed.
+Choose the chapter text folder (`chapter_*.txt`). **Read book** reads the
+**first 25% of each chapter** and returns, per chapter, a drawable moment, the
+sentence it happens in, and an image prompt - plus a **character roster** that
+records where each character reappears, because a character met in chapter 1
+is recognised again in chapter 9 (and a second pass re-checks every chapter
+against the finished roster). About 7 s a chapter.
 
-## 2 Cast & places
+The roster is listed on the left; the log on the right. Stop kills the whole
+tree, so VRAM comes back.
 
-Every name the model found, one entry per exact name. For each entry:
+## 2 Chapters
 
-- **every detail with the sentence it came from**, found in the text by
-  code (the model's own quote is only the search key). Untick a detail
-  the sentence does not support — about 1 in 5 on After Dark (e.g.
-  "wearing red socks" from レッドソックスの帽子). Orange = closest
-  sentence, red = no sentence found;
-- **Merge ticked** pools entries that are one person or place
-  (若い男 + タカハシ + 高橋 -> 高橋テツヤ); **Delete ticked** removes noise
-  (上田麗奈 from the narrator credit); rename, note, add a detail by hand;
-- **Pre-mark as main** forces a reference image. Otherwise main/minor is
-  decided from the scene proposals (Stage C): drawn more than once = main;
-- **Suggest merges** asks the model; each suggestion is accepted or
-  dismissed by you, never applied on its own.
+One image per chapter, in two stages.
 
-Every change is saved to `bible.json` at once. Your choices always win:
-a re-read adds new names and new details (marked NEW) but never undoes a
-merge, a deletion, a rename or an unticked detail.
+**Samples.** The prompt is assembled in code - the style note, the
+minimal-background rule, then the subject the model wrote - and is yours to
+edit; **Reset prompt** starts again from the reading. **anchor** is either
+"draw fresh" or another chapter's finished image, attached so a character
+carries over. **Draw samples** makes 3 takes with klein 9B (~30 s each).
+Pick one with **Use this**: it becomes the *working image*.
 
-## 3 References
+**Fine-tune.** Say what should **change** and who must **keep** as they are,
+and **Apply edit** runs Kontext (3 takes, ~3 min each). It changes that one
+thing and leaves the rest of the drawing alone. Both fields matter: an
+instruction that does not restate what stays put the cap on the wrong person
+in testing (DESIGN.md v2, M6). Each round is listed; **Use** takes a round's
+image as the new working image, **Back to before** returns to what it started
+from. **Promote** makes the working image the chapter image.
 
-One drawing per character and place, so they look the same in every scene.
+**Export image** writes `chapter_<N>_img_1.png` into the book's output folder,
+which is what the player reads. **Clear history** deletes every sample and
+take of that chapter except the final and working images.
 
-- **Style image**: one per book, the drawing whose style the book follows.
-  It is copied to `refs\style.png` in greyscale and attached to every
-  request. **Style note** is the wording added to every prompt.
-- The **prompt** is assembled in code from the details you kept, and is
-  yours to edit. **Rebuild prompt** starts again from the current details.
-- **Draw** makes N takes (3 by default) through ComfyUI, which the tool
-  starts and stops; ~40 s for the first take of a prompt, ~12 s after
-  that. **Choose** locks one as the reference; Delete throws a take away.
-- **Add variant** gives the same character a second reference for a
-  different look (asleep in pyjamas, in a green tracksuit), each with its
-  own label, prompt and chosen image.
-- ★ marks entries pre-marked main in tab 2. Everything is greyscale, in
-  and out: a prompt cannot keep colour away (DESIGN.md §9, M5).
+Everything is saved as you go, to `chapters.json`; takes live in
+`chapters\<chapter>\samples\` and `...\edits\`. Takes drawn outside the window
+(the CLI) are picked up when the book is opened.
 
-Saved in `refs.json`. Images live in `refs\<kind>\<id>\v<n>\`.
+## CLI
 
-## 4 Scenes
+The window runs these; they also work on their own:
 
-**Propose scenes** asks the model for the scenes of the selected chapter,
-or of the whole book with the tick box. How many a chapter gets comes from
-its length against the book's median chapter: under 0.35x = 1, under
-0.75x = 2, up to 1.5x = 3, above = 4 (After Dark: 52 scenes). The chapter
-is cut into that many slices and one scene is taken from each, which is
-what spreads them out - asked for four scenes at once, the model bunches
-them at the start and end of the chapter (DESIGN.md §9, M3).
-
-Per scene: the **anchor** sentence (where the image will appear in Stage
-D) with its position in the chapter, the **cast and place**, and the
-**prompt**, editable like everywhere else.
-
-- **Anchor** opens every sentence of the chapter, filterable, to move the
-  scene somewhere else; scenes re-sort by position.
-- **Cast & place** ticks who is in the picture; entries with a chosen
-  reference come first and are marked, since those are the ones that stay
-  consistent.
-- **Draw** attaches the style image plus the chosen reference of every
-  cast member and the place - 5 references is the measured ceiling, and
-  the line above says how many are attached and warns when extras would
-  be dropped. Choose one take per scene.
-
-Saved in `scenes.json`; images in `scenes\<chapter>\s<n>\`.
+```
+uv run python illustrator.py read  --book after-dark --text F:\...\chapter-text
+uv run python illustrator.py draw  --book after-dark --chapter chapter_001 --count 3
+uv run python illustrator.py edit  --book after-dark --chapter chapter_001 \
+      --base <png> --instruction-file <txt> --count 3
+```

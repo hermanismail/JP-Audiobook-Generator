@@ -1,4 +1,124 @@
-# Scene Illustrator — design (draft for review, 2026-09-19)
+# Scene Illustrator — v2 design (2026-09-20)
+
+**v2 replaces tabs 2-4.** v1 (cast bible -> reference sheets -> 4 scenes per
+chapter) is kept below as history, because its measurements still hold and
+its plumbing is reused. v1 was paused after chapter_001 scene 2 could not be
+drawn acceptably in several rounds of 8 takes.
+
+## What changed and why
+
+| v1 | v2 | why |
+|---|---|---|
+| 4 scenes per chapter | **1 image per chapter** | prove one first; cost and time |
+| Reference sheet per character and place | **no cast bible, no reference sheets** | see whether chaining alone holds a character together |
+| Every scene drawn from references | **draw once, then EDIT** the same image by instruction | measured: editing preserves what is right and fixes one thing |
+| Busy scene with a room full of props | **minimal background**: two people, a table, the rest empty white paper | measured: this, not the art style, was what broke the drawings |
+| One model (klein 4B) | **klein 9B draws, Kontext dev edits** | each is clearly better at one of the two jobs |
+| Timing sidecar (Stage D) | **dropped** - the player already shows one image per chapter | nothing to time |
+
+## Decisions (user, 2026-09-20)
+
+| # | Decision |
+|---|---|
+| v1 | Keep tab 1 (Read); replace tabs 2-4; same tool, same folder |
+| v2 | No cast/places bible and no reference sheets for now |
+| v3 | Image stays PNG 832x1216 portrait |
+| v4 | The style sample is **permanent, shipped with the tool** (`style_ink.png`), attached to every drawing request; it supplies drawing style only |
+| v5 | Everything greyscale, as before |
+| v6 | Reading: per chapter, the **first 25%**, and characters cross-checked against earlier chapters, then a second pass over the whole book, so a character's reappearances are known |
+| v7 | The prompt is written by the local LLM (Qwen3.5-9B) |
+| v8 | The image shows **a drawable moment from that first 25%** |
+| v9 | **3 samples** per chapter to choose from |
+| v10 | A chosen sample is either promoted to the chapter image, or promoted to **working image** and fine-tuned by instruction, repeatedly |
+| v11 | Anchoring: draw fresh, or attach the finished image of **one** other chapter; a fine-tune may attach up to two generated images |
+| v12 | Fine-tune by **instruction only** (no mask UI yet) |
+| v13 | 3 takes per fine-tune round |
+| v14 | Keep the fine-tune history, with a button to delete it once the chapter image is final |
+| v15 | **Mixing two samples per character is dropped** - measured impossible on three models (see below). The edit chain replaces it |
+
+## Measured for v2 (2026-09-20)
+
+Files: `F:\tmp\scene-illustrator\v2\`.
+
+**M8 - minimal background is the fix.** The same moment that failed in v1
+came out clean at the first attempt with "only the two people, a table and a
+cup; the rest is empty white paper", in the pencil-sketch style AND in the
+book's own ink style. Correct hands, correct book, both characters right. The
+art style was never the problem; the crowded background was.
+
+**M6 - editing by instruction works, and targeting has a rule.** Three
+phrasings of "put a cap on the seated girl":
+
+| phrasing | klein 4B | klein 9B | Kontext |
+|---|---|---|---|
+| "Change ONLY the seated girl... **the standing man must stay exactly as he is, bare-headed**... everything else identical" | correct | correct | correct |
+| "Add a cap to the person sitting. Do not add a hat to the person standing." | both got caps | correct | correct |
+| "Same drawing, except the girl with glasses now wears a cap." | collapsed to a portrait | - | - |
+
+So an instruction must say what changes **and** restate that the others stay
+as they are. The tool builds that phrasing; the user does not have to know it.
+Removal ("remove the coffee cup") worked first time on every model.
+
+**M7 - mixing by naming sources is impossible here.** "The man from image 2,
+the girl from image 3", five phrasings across klein 4B, klein 9B and Kontext
+(chained references and the documented side-by-side stitch): every attempt
+returned one source's people, or a blend. Reference conditioning has no
+per-character addressing. Dropped for good.
+
+**The pipeline test** (klein 9B draws with the ink sample -> Kontext edits):
+cap added correctly, cup removed correctly, and the two chained (cap, then cup
+removed from the capped image) both held. Preservation is very good - coat,
+jacket patches, book and shading survive. **Drift is in the background
+geometry** (the table's perspective, the shadow under the cup) and the faces
+get slightly cleaner each pass, so the original take is always kept.
+
+**Kontext ignores the style image** - it inherits style from the image it
+edits. The style sample therefore only matters at the drawing step.
+
+| | klein 4B | klein 9B | Kontext dev |
+|---|---|---|---|
+| new prompt / repeat take | 38 s / 10 s | 71 s / **30 s** | 80-110 s |
+| one edit | 34 s | 65 s | **155-185 s** |
+| peak VRAM | 7.7 GB | 7.2 GB | 7.5 GB |
+| draws a scene from scratch | good | **best** | poor (it edits instead) |
+| edits by instruction | works, strict phrasing | works | **best preservation** |
+
+A chapter therefore costs ~2 min for 3 samples and ~2.5-3 min per fine-tune
+round.
+
+## v2 shape
+
+```
+1 Read      per chapter: first 25% -> a drawable moment + a prompt, and a
+            character roster that says where each character reappears
+            (local LLM, Qwen3.5-9B)
+2 Chapters  per chapter: the prompt (editable) -> 3 samples (klein 9B,
+            style sample attached, optionally one other chapter's final
+            image as an anchor) -> choose one
+              -> promote to chapter image, or
+              -> make it the working image and fine-tune it by instruction
+                 (Kontext, 3 takes per round, chain kept, revert allowed)
+            -> promote -> export as chapter_<N>_img_1.png
+```
+
+Models: `flux-2-klein-9b-Q4_K_M.gguf` + `qwen_3_8b_fp8mixed` + `flux2-vae`
+for drawing; `flux1-kontext-dev-Q4_K_M.gguf` + `clip_l` + `t5xxl_fp8` +
+`ae.safetensors` for editing. Both through ComfyUI-GGUF, one on the card at a
+time.
+
+## Still open in v2
+
+1. **Does chaining alone keep a character consistent across chapters?** The
+   whole reason the bible was dropped. Unmeasured; the first real book will
+   answer it.
+2. **Drift over a long edit chain** - how many rounds before the picture
+   degrades. Unmeasured.
+3. **Per-character mixing** is impossible with these models (M7). If a take
+   has two different good halves, the only route is the edit chain.
+
+---
+
+# Scene Illustrator — v1 design (history, 2026-09-19)
 
 A separate tool that makes the zen-mode images for a book: it reads the
 book, builds a cast-and-places reference sheet with you, proposes four
