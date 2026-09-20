@@ -496,8 +496,38 @@ def refs_path(root):
 
 
 def load_refs(root):
-    return read_json(refs_path(root)) or {"version": 1, "style_image": "", "style_note": DEFAULT_STYLE_NOTE,
+    refs = read_json(refs_path(root)) or {"version": 1, "style_image": "", "style_note": DEFAULT_STYLE_NOTE,
                                           "characters": {}, "places": {}}
+    if rehome_samples(refs):
+        save_refs(root, refs)
+    return refs
+
+
+def rehome_samples(refs):
+    """A take belongs to the entry whose folder it was written into. Moves
+    any sample listed under the wrong entry back where it belongs - the
+    window used to append a finished job's takes to whatever was selected
+    at the time (fixed 2026-09-20), and this repairs files written then."""
+    moved = 0
+    for kind in KINDS:
+        for entry_id, record in list(refs[kind].items()):
+            for index, variant in enumerate(record["variants"]):
+                for path in list(variant["samples"]):
+                    parts = os.path.normpath(path).split(os.sep)
+                    if len(parts) < 3 or parts[-3] == entry_id:
+                        continue
+                    owner, folder = parts[-3], parts[-2]
+                    target_index = int(folder[1:]) - 1 if folder[1:].isdigit() else 0
+                    variant["samples"].remove(path)
+                    if variant["chosen"] == path:
+                        variant["chosen"] = ""
+                    variants = refs[kind].setdefault(owner, {"variants": []})["variants"]
+                    while len(variants) <= target_index:
+                        variants.append({"label": "", "prompt": "", "samples": [], "chosen": ""})
+                    if path not in variants[target_index]["samples"]:
+                        variants[target_index]["samples"].append(path)
+                    moved += 1
+    return moved
 
 
 def save_refs(root, refs):

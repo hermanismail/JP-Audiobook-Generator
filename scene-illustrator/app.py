@@ -98,6 +98,7 @@ class App(ctk.CTk):
         self.ref_variant = 0
         self._thumbs = []               # CTkImage refs, or Tk drops them
         self._drawn = []                # SAMPLE paths of the running job
+        self._draw_target = None        # (kind, entry id, variant) that job is for
         self.kind = "characters"
         self.current = None            # selected entry id
         self.selected = set()          # ids ticked for merge / delete
@@ -787,17 +788,23 @@ class App(ctk.CTk):
         self.takes_var.set(str(count))
         self.settings["takes"] = count
         self._drawn = []
+        # remember WHICH variant this job is for: the selection may change
+        # while it draws, and the takes belong to the entry that asked
+        self._draw_target = (self.ref_kind, e["id"], self.ref_variant)
         self.log_line(f"-- drawing {count} for {e['name']} ({v['label'] or 'default'})")
         self._run_child(["draw", "--book", self.book_var.get().strip(), "--kind", self.ref_kind,
                          "--id", e["id"], "--variant", str(self.ref_variant), "--count", str(count)],
                         self._draw_done)
 
     def _draw_done(self, _code):
-        if self._drawn:
-            variants = il.variants_of(self.refs, self.ref_kind, self.ref_entry)
-            variants[self.ref_variant]["samples"] += self._drawn
-            il.save_refs(self.root(), self.refs)
+        if self._drawn and self._draw_target:
+            kind, entry_id, index = self._draw_target
+            variants = il.variants_of(self.refs, kind, entry_id)
+            if index < len(variants):
+                variants[index]["samples"] += self._drawn
+                il.save_refs(self.root(), self.refs)
         self._drawn = []
+        self._draw_target = None
         self.render_ref_list()
         self.render_ref_entry()
 
