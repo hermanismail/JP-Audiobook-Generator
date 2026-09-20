@@ -378,6 +378,19 @@ sometimes one sentence early; in dynamic chapters an entry is one
 sentence, so it is exact. Stage D needs no fuzzy matching in the common
 case; keep it only as the fallback.
 
+### Observation from real use of Stage B (user, 2026-09-20) — nothing changed yet
+
+Getting a decent reference took a lot of takes and prompt rewriting. The
+prompt built from the kept details is **too fine-grained**: it pools every
+way the book states a fact ("bright blonde hair cut short like
+well-maintained grass, short blonde hair, has blonde hair and...") and the
+user spent real time cutting it down. But **cutting too much loses the
+context** and the model draws something generic. So neither "all kept
+details" nor "a short line" is right. Ideas, none tried: merge
+near-duplicate details when building the prompt; order them (build, face,
+hair, clothes, carried items) and cap each group; or have the LLM
+condense the kept details into one description the user then edits.
+
 **Also seen**: body build is weakly followed (Kaoru "big, 175 cm,
 ex-wrestler" drawn slim in every sheet); "windowless" rooms got windows.
 Reference sheets need the re-prompt loop Stage B already has; negative
