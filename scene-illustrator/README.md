@@ -3,7 +3,8 @@
 Zen-mode images per chapter. The full design, every decision and every
 measurement behind it: [DESIGN.md](DESIGN.md).
 
-**Built so far: Stage A** — read the book, curate the cast and places.
+**Built so far: Stage A** (read the book, curate the cast and places) and
+**Stage B** (reference sheets).
 
 ## Run
 
@@ -47,3 +48,23 @@ Every name the model found, one entry per exact name. For each entry:
 Every change is saved to `bible.json` at once. Your choices always win:
 a re-read adds new names and new details (marked NEW) but never undoes a
 merge, a deletion, a rename or an unticked detail.
+
+## 3 References
+
+One drawing per character and place, so they look the same in every scene.
+
+- **Style image**: one per book, the drawing whose style the book follows.
+  It is copied to `refs\style.png` in greyscale and attached to every
+  request. **Style note** is the wording added to every prompt.
+- The **prompt** is assembled in code from the details you kept, and is
+  yours to edit. **Rebuild prompt** starts again from the current details.
+- **Draw** makes N takes (3 by default) through ComfyUI, which the tool
+  starts and stops; ~40 s for the first take of a prompt, ~12 s after
+  that. **Choose** locks one as the reference; Delete throws a take away.
+- **Add variant** gives the same character a second reference for a
+  different look (asleep in pyjamas, in a green tracksuit), each with its
+  own label, prompt and chosen image.
+- ★ marks entries pre-marked main in tab 2. Everything is greyscale, in
+  and out: a prompt cannot keep colour away (DESIGN.md §9, M5).
+
+Saved in `refs.json`. Images live in `refs\<kind>\<id>\v<n>\`.

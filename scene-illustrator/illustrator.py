@@ -45,6 +45,12 @@ DEFAULT_SETTINGS = {
     "llm_ctx": 24576,
     "work_root": r"F:\tmp\scene-illustrator",
     "piece_chars": 7000,
+    "comfy_root": r"F:\ComfyUI",
+    "comfy_port": 8188,
+    "flux_unet": "flux-2-klein-4b-fp8.safetensors",
+    "flux_clip": "qwen_3_4b.safetensors",
+    "flux_vae": "flux2-vae.safetensors",
+    "takes": 3,
     "last_book": "",
     "last_text_folder": "",
 }
@@ -477,6 +483,126 @@ def add_detail(entry, text):
                              "chapter": 0, "piece": "", "key": key, "keep": True})
 
 
+# --------------------------------------------------- Stage B: references
+DEFAULT_STYLE_NOTE = ("Black and white manga illustration, detailed ink linework and "
+                      "cross-hatching, same art style as the reference image.")
+CHARACTER_FRAME = ("Full body character reference, standing, neutral pose, facing slightly left, "
+                   "plain white background.")
+PLACE_FRAME = "Establishing shot of the place, no people in the picture."
+
+
+def refs_path(root):
+    return os.path.join(root, "refs.json")
+
+
+def load_refs(root):
+    refs = read_json(refs_path(root)) or {"version": 1, "style_image": "", "style_note": DEFAULT_STYLE_NOTE,
+                                          "characters": {}, "places": {}}
+    if rehome_samples(refs):
+        save_refs(root, refs)
+    return refs
+
+
+def rehome_samples(refs):
+    """A take belongs to the entry whose folder it was written into. Moves
+    any sample listed under the wrong entry back where it belongs - the
+    window used to append a finished job's takes to whatever was selected
+    at the time (fixed 2026-09-20), and this repairs files written then."""
+    moved = 0
+    for kind in KINDS:
+        for entry_id, record in list(refs[kind].items()):
+            for index, variant in enumerate(record["variants"]):
+                for path in list(variant["samples"]):
+                    parts = os.path.normpath(path).split(os.sep)
+                    if len(parts) < 3 or parts[-3] == entry_id:
+                        continue
+                    owner, folder = parts[-3], parts[-2]
+                    target_index = int(folder[1:]) - 1 if folder[1:].isdigit() else 0
+                    variant["samples"].remove(path)
+                    if variant["chosen"] == path:
+                        variant["chosen"] = ""
+                    variants = refs[kind].setdefault(owner, {"variants": []})["variants"]
+                    while len(variants) <= target_index:
+                        variants.append({"label": "", "prompt": "", "samples": [], "chosen": ""})
+                    if path not in variants[target_index]["samples"]:
+                        variants[target_index]["samples"].append(path)
+                    moved += 1
+    return moved
+
+
+def save_refs(root, refs):
+    write_json(refs_path(root), refs)
+
+
+def style_image_path(root):
+    return os.path.join(root, "refs", "style.png")
+
+
+def build_prompt(entry, kind, style_note, variant_label=""):
+    """The first prompt for a reference sheet, from the details the user kept.
+    Assembled in code (not by the LLM): predictable, instant, and the user
+    edits it anyway."""
+    facts = [d["text"].strip().rstrip(".") for d in entry["details"] if d["keep"]]
+    frame = CHARACTER_FRAME if kind == "characters" else PLACE_FRAME
+    who = ""
+    if kind == "characters":
+        roles = [r for r in entry.get("roles", []) if r]
+        who = f"{roles[0]}. " if roles else ""
+    bits = [style_note, frame, who + (", ".join(facts) + "." if facts else "")]
+    if variant_label:
+        bits.append(variant_label.strip().rstrip(".") + ".")
+    return " ".join(b for b in bits if b.strip())
+
+
+def variants_of(refs, kind, entry_id):
+    return refs[kind].setdefault(entry_id, {"variants": []})["variants"]
+
+
+def add_variant(refs, kind, entry, label, style_note):
+    v = {"label": label, "prompt": build_prompt(entry, kind, style_note, label),
+         "samples": [], "chosen": ""}
+    variants_of(refs, kind, entry["id"]).append(v)
+    return v
+
+
+def sample_dir(root, kind, entry_id, variant_index):
+    return os.path.join(root, "refs", kind, entry_id, f"v{variant_index + 1}")
+
+
+def next_sample_path(root, kind, entry_id, variant_index):
+    folder = sample_dir(root, kind, entry_id, variant_index)
+    os.makedirs(folder, exist_ok=True)
+    n = 1
+    while os.path.exists(os.path.join(folder, f"sample_{n:03d}.png")):
+        n += 1
+    return os.path.join(folder, f"sample_{n:03d}.png")
+
+
+def run_draw(settings, book, kind, entry_id, variant_index, count, log):
+    """Draw `count` samples for one reference variant. The GUI owns refs.json,
+    so this prints SAMPLE lines and never writes it."""
+    import random
+    import comfy
+
+    root = book_dir(settings, book)
+    refs = load_refs(root)
+    variant = variants_of(refs, kind, entry_id)[variant_index]
+    style = style_image_path(root)
+    with comfy.ManagedComfy(settings, log) as engine:
+        ref_names = []
+        if os.path.isfile(style):
+            ref_names.append(engine.put_reference(style, f"si_{book}_style.png"))
+        else:
+            log("SERVER no style image set - drawing without one")
+        for i in range(count):
+            out = next_sample_path(root, kind, entry_id, variant_index)
+            log(f"TAKE {i + 1}/{count} start")
+            secs = engine.draw(variant["prompt"], ref_names, random.randrange(2 ** 48), out,
+                               on_progress=lambda v, m: log(f"PROGRESS {v} {m}"))
+            log(f"SAMPLE {i + 1}/{count} {out} {secs}s")
+    log("DONE drew " + str(count))
+
+
 # ------------------------------------------------------- suggest merges
 SUGGEST = """Below is a numbered list of {kind} from one Japanese novel, each with the chapters it
 appears in and a short note. Some entries may be the SAME {kind_one} under different names (full
@@ -524,6 +650,12 @@ def main():
     r.add_argument("--text", required=True)
     s = sub.add_parser("suggest")
     s.add_argument("--book", required=True)
+    d = sub.add_parser("draw")
+    d.add_argument("--book", required=True)
+    d.add_argument("--kind", required=True, choices=KINDS)
+    d.add_argument("--id", required=True)
+    d.add_argument("--variant", type=int, default=0)
+    d.add_argument("--count", type=int, default=3)
     args = ap.parse_args()
 
     def log(line):
@@ -533,6 +665,9 @@ def main():
     try:
         if args.cmd == "read":
             sys.exit(0 if run_read(settings, args.book, args.text, log) else 2)
+        if args.cmd == "draw":
+            run_draw(settings, args.book, args.kind, args.id, args.variant, args.count, log)
+            return
         run_suggest(settings, args.book, log)
     except (RuntimeError, ModelFailed) as e:
         log(f"DONE error: {e}")
