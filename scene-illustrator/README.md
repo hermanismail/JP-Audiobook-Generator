@@ -3,8 +3,8 @@
 Zen-mode images per chapter. The full design, every decision and every
 measurement behind it: [DESIGN.md](DESIGN.md).
 
-**Built so far: Stage A** (read the book, curate the cast and places) and
-**Stage B** (reference sheets).
+**Built so far: Stage A** (read the book, curate the cast and places),
+**Stage B** (reference sheets) and **Stage C** (scenes).
 
 ## Run
 
@@ -68,3 +68,29 @@ One drawing per character and place, so they look the same in every scene.
   and out: a prompt cannot keep colour away (DESIGN.md §9, M5).
 
 Saved in `refs.json`. Images live in `refs\<kind>\<id>\v<n>\`.
+
+## 4 Scenes
+
+**Propose scenes** asks the model for the scenes of the selected chapter,
+or of the whole book with the tick box. How many a chapter gets comes from
+its length against the book's median chapter: under 0.35x = 1, under
+0.75x = 2, up to 1.5x = 3, above = 4 (After Dark: 52 scenes). The chapter
+is cut into that many slices and one scene is taken from each, which is
+what spreads them out - asked for four scenes at once, the model bunches
+them at the start and end of the chapter (DESIGN.md §9, M3).
+
+Per scene: the **anchor** sentence (where the image will appear in Stage
+D) with its position in the chapter, the **cast and place**, and the
+**prompt**, editable like everywhere else.
+
+- **Anchor** opens every sentence of the chapter, filterable, to move the
+  scene somewhere else; scenes re-sort by position.
+- **Cast & place** ticks who is in the picture; entries with a chosen
+  reference come first and are marked, since those are the ones that stay
+  consistent.
+- **Draw** attaches the style image plus the chosen reference of every
+  cast member and the place - 5 references is the measured ceiling, and
+  the line above says how many are attached and warns when extras would
+  be dropped. Choose one take per scene.
+
+Saved in `scenes.json`; images in `scenes\<chapter>\s<n>\`.

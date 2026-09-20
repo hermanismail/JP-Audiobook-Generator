@@ -391,6 +391,25 @@ near-duplicate details when building the prompt; order them (build, face,
 hair, clothes, carried items) and cap each group; or have the LLM
 condense the kept details into one description the user then edits.
 
+### Stage C on a real chapter, and the pause (user, 2026-09-20)
+
+Work on this workflow is **PAUSED here.** The platform (read -> curate ->
+references -> propose -> draw -> choose) is judged good enough; the
+**prompt building and the fine-tuning of what comes back are not**.
+
+What happened on after-dark chapter_001: scene #1 (Takahashi standing at
+Mari's table) came out usable. Scene #2 (the pair eating, a waitress
+pouring coffee) did not, in **8 takes per round over several rounds**:
+faces and hands come out wrong, objects land in the wrong place, and
+details of one character bleed into another. Chapter_003 scene 1 (two
+characters in Denny's) had worked, so the difficulty rises sharply with
+the number of people and props in one picture.
+
+Conclusion recorded: **FLUX.2 klein 4B follows several character
+references only loosely.** More takes do not fix it. The next attempt
+should change the prompt (see the Stage B observation above) or the
+engine, not the amount of drawing.
+
 **Also seen**: body build is weakly followed (Kaoru "big, 175 cm,
 ex-wrestler" drawn slim in every sheet); "windowless" rooms got windows.
 Reference sheets need the re-prompt loop Stage B already has; negative
