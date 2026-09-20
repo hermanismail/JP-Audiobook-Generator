@@ -108,6 +108,7 @@ class App(ctk.CTk):
         self._last_secs = 0.0
         self._take_done = False
         self._starting = 0.0            # clicked Draw, engine not drawing yet
+        self._picked = set()            # takes ticked for bulk delete
         self.kind = "characters"
         self.current = None            # selected entry id
         self.selected = set()          # ids ticked for merge / delete
@@ -297,6 +298,15 @@ class App(ctk.CTk):
         self.draw_bar = ctk.CTkProgressBar(status, progress_color=ACCENT, height=8)
         self.draw_bar.set(0)
         self.draw_bar.pack(fill="x", pady=(4, 0))
+        picks = ctk.CTkFrame(right, fg_color="transparent")
+        picks.pack(fill="x", padx=14, pady=(2, 0))
+        button(picks, "Select all", self.select_all_samples, width=90, height=28).pack(side="left")
+        button(picks, "Select none", self.select_no_samples, width=96, height=28).pack(side="left", padx=6)
+        self.delete_picked_btn = button(picks, "Delete selected", self.delete_picked_samples, width=130,
+                                        height=28, danger=True)
+        self.delete_picked_btn.pack(side="left")
+        self.picked_label = ctk.CTkLabel(picks, text="", text_color=SUBTITLE, font=ctk.CTkFont(size=12))
+        self.picked_label.pack(side="left", padx=10)
         self.gallery = ctk.CTkScrollableFrame(right, fg_color=CARD, orientation="horizontal", height=290)
         self.gallery.pack(fill="both", expand=True, padx=8, pady=(0, 10))
 
@@ -692,6 +702,7 @@ class App(ctk.CTk):
         self.save_prompt()
         self.ref_entry = entry_id
         self.ref_variant = 0
+        self._picked = set()
         self.render_ref_list()
         self.render_ref_entry()
 
@@ -723,6 +734,8 @@ class App(ctk.CTk):
         if not e:
             self.ref_title.configure(text="Select a character or place")
             self.ref_info.configure(text="")
+            self._picked = set()
+            self.update_picked_label()
             return
         kept = sum(d["keep"] for d in e["details"])
         self.ref_title.configure(text=f"{e['name']}   ({kept} details kept)")
@@ -738,8 +751,10 @@ class App(ctk.CTk):
         style_set = os.path.isfile(il.style_image_path(self.root()))
         self.ref_info.configure(text="" if style_set else "no style image set",
                                 text_color=SUBTITLE if style_set else WARN)
+        self._picked &= set(v["samples"])
         for path in v["samples"]:
             self._sample_card(v, path)
+        self.update_picked_label()
 
     def _sample_card(self, variant, path):
         if not os.path.isfile(path):
@@ -751,8 +766,15 @@ class App(ctk.CTk):
         with Image.open(path) as im:
             image = ctk.CTkImage(light_image=im.copy(), size=THUMB)
         self._thumbs.append(image)
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=6, pady=(4, 0))
+        picked = ctk.BooleanVar(value=path in self._picked)
+        ctk.CTkCheckBox(top, text="", width=24, variable=picked, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                        command=lambda: self.pick_sample(path, picked.get())).pack(side="left")
+        ctk.CTkLabel(top, text=os.path.basename(path)[7:-4], text_color=SUBTITLE,
+                     font=ctk.CTkFont(size=11)).pack(side="left")
         thumb = ctk.CTkLabel(card, image=image, text="", cursor="hand2")
-        thumb.pack(padx=6, pady=(6, 2))
+        thumb.pack(padx=6, pady=(2, 2))
         thumb.bind("<Button-1>", lambda _e, p=path: ImageViewer(self, p))
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=6, pady=(0, 6))
@@ -764,27 +786,63 @@ class App(ctk.CTk):
         button(row, "Delete", lambda: self.delete_sample(variant, path), width=68, height=26,
                danger=True).pack(side="right")
 
+    def pick_sample(self, path, picked):
+        (self._picked.add if picked else self._picked.discard)(path)
+        self.update_picked_label()
+
+    def update_picked_label(self):
+        n = len(self._picked)
+        self.picked_label.configure(text=f"{n} selected" if n else "")
+        self.delete_picked_btn.configure(state="normal" if n else "disabled")
+
+    def select_all_samples(self):
+        v = self.current_variant()
+        if v:
+            self._picked = {p for p in v["samples"] if os.path.isfile(p)}
+            self.render_ref_entry()
+
+    def select_no_samples(self):
+        self._picked = set()
+        self.render_ref_entry()
+
+    def delete_picked_samples(self):
+        v = self.current_variant()
+        if not v or not self._picked:
+            return
+        paths = [p for p in v["samples"] if p in self._picked]
+        warn = "\n\nOne of them is the chosen reference." if v["chosen"] in paths else ""
+        if not messagebox.askyesno("Delete takes", f"Delete {len(paths)} take(s)?{warn}"):
+            return
+        for path in paths:
+            self.delete_sample(v, path, refresh=False)
+        self._picked = set()
+        self.render_ref_list()
+        self.render_ref_entry()
+
     def choose_sample(self, variant, path):
         variant["chosen"] = path
         il.save_refs(self.root(), self.refs)
         self.render_ref_list()
         self.render_ref_entry()
 
-    def delete_sample(self, variant, path):
+    def delete_sample(self, variant, path, refresh=True):
         variant["samples"] = [p for p in variant["samples"] if p != path]
         if variant["chosen"] == path:
             variant["chosen"] = ""
+        self._picked.discard(path)
         il.save_refs(self.root(), self.refs)
         try:
             os.remove(path)
         except OSError:
             pass
-        self.render_ref_list()
-        self.render_ref_entry()
+        if refresh:
+            self.render_ref_list()
+            self.render_ref_entry()
 
     def select_variant(self, index):
         self.save_prompt()
         self.ref_variant = index
+        self._picked = set()
         self.render_ref_entry()
 
     def add_variant(self):
