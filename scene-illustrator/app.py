@@ -107,6 +107,7 @@ class App(ctk.CTk):
         self._step = (0, 0)             # sampler step from ComfyUI's WebSocket
         self._last_secs = 0.0
         self._take_done = False
+        self._starting = 0.0            # clicked Draw, engine not drawing yet
         self.kind = "characters"
         self.current = None            # selected entry id
         self.selected = set()          # ids ticked for merge / delete
@@ -391,6 +392,10 @@ class App(ctk.CTk):
                         self.progress.set(int(m.group(1)) / int(m.group(2)))
                         self.status_var.set(f"reading {m.group(3)}")
                     elif t:
+                        if self._starting:
+                            self._starting = 0.0
+                            self.draw_bar.stop()
+                            self.draw_bar.configure(mode="determinate")
                         self._take = (int(t.group(1)), int(t.group(2)))
                         self._take_started = time.time()
                         self._step = (0, 0)
@@ -409,8 +414,9 @@ class App(ctk.CTk):
                         self.update_draw_status(done=True)
                     elif value.startswith("SERVER"):
                         self.status_var.set(value.split(" ", 1)[1])
-                        if self._take:
-                            self.draw_status.configure(text=value.split(" ", 1)[1])
+                        # only while starting: never overwrite "take N/N done"
+                        if self._starting:
+                            self.draw_status.configure(text=value.split(" ", 1)[1], text_color=ENTRY_TEXT)
                     elif value.startswith("SUGGEST"):
                         self.status_var.set(value.split(" ", 1)[1])
                 else:
@@ -423,7 +429,7 @@ class App(ctk.CTk):
                     on_done(code)
         except queue.Empty:
             pass
-        if self._take and not self._take_done:
+        if self._starting or (self._take and not self._take_done):
             self.update_draw_status()   # keep the elapsed seconds moving
         self.after(120, self._drain)
 
@@ -830,6 +836,17 @@ class App(ctk.CTk):
         # remember WHICH variant this job is for: the selection may change
         # while it draws, and the takes belong to the entry that asked
         self._draw_target = (self.ref_kind, e["id"], self.ref_variant)
+        # answer the click NOW: the engine may take half a minute to start,
+        # and a dead bar reads as "did my click land?" (user report 09-20)
+        self._take = None
+        self._take_done = False
+        self._step = (0, 0)
+        self._starting = time.time()
+        self.draw_status.configure(text=f"starting to draw {count} take(s)…", text_color=ENTRY_TEXT)
+        self.draw_bar.configure(mode="indeterminate")
+        self.draw_bar.set(0)
+        self.draw_bar.start()
+        self.update_idletasks()
         self.log_line(f"-- drawing {count} for {e['name']} ({v['label'] or 'default'})")
         self._run_child(["draw", "--book", self.book_var.get().strip(), "--kind", self.ref_kind,
                          "--id", e["id"], "--variant", str(self.ref_variant), "--count", str(count)],
@@ -840,8 +857,13 @@ class App(ctk.CTk):
         Loading the text encoder reports nothing, so that stretch shows as
         'preparing' with the elapsed seconds instead of a fake percentage."""
         if not self._take:
-            self.draw_status.configure(text="")
-            self.draw_bar.set(0)
+            if self._starting:      # engine starting: keep the bar alive
+                self.draw_status.configure(
+                    text=f"starting to draw…   ·   {time.time() - self._starting:.0f}s",
+                    text_color=ENTRY_TEXT)
+            else:
+                self.draw_status.configure(text="")
+                self.draw_bar.set(0)
             return
         i, n = self._take
         step, steps = self._step
@@ -871,6 +893,12 @@ class App(ctk.CTk):
         self._drawn = []
         self._draw_target = None
         self._take = None
+        self._starting = 0.0
+        self.draw_bar.stop()
+        self.draw_bar.configure(mode="determinate")
+        if _code != 0:
+            self.draw_status.configure(text="stopped", text_color=WARN)
+            self.draw_bar.set(0)
         self.render_ref_list()
         self.render_ref_entry()
 
