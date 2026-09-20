@@ -23,7 +23,7 @@ import time
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageTk
 
 import comfy
 import illustrator as il
@@ -901,12 +901,29 @@ class MergeDialog(ctk.CTkToplevel):
         row.pack(pady=(4, 16))
         button(row, "Merge", self.ok, primary=True).pack(side="left", padx=6)
         button(row, "Cancel", self.destroy).pack(side="left")
+        bring_to_front(self)
         self.grab_set()
         self.wait_window()
 
     def ok(self):
         self.result = self.var.get().strip()
         self.destroy()
+
+
+def bring_to_front(window):
+    """CustomTkinter finishes placing a Toplevel a moment after it is made,
+    which leaves it BEHIND the main window (user report 2026-09-20). Lift it
+    again once that is done."""
+    def lift():
+        try:
+            window.lift()
+            window.focus_force()
+            window.attributes("-topmost", True)
+            window.after(400, lambda: window.attributes("-topmost", False))
+        except Exception:
+            pass
+    window.after(60, lift)
+    window.after(300, lift)
 
 
 class ImageViewer(ctk.CTkToplevel):
@@ -943,6 +960,7 @@ class ImageViewer(ctk.CTkToplevel):
         self.canvas.bind("<MouseWheel>", lambda e: self.step(1 if e.delta > 0 else -1))
         self.bind("<Escape>", lambda _e: self.destroy())
         self.after(60, self.render)
+        bring_to_front(self)
 
     def current_zoom(self):
         if self.zoom:
@@ -952,10 +970,16 @@ class ImageViewer(ctk.CTkToplevel):
         return min(cw / self.image.width, ch / self.image.height)
 
     def step(self, direction):
+        """Next zoom strictly above / below the current one. Comparing by
+        index broke after 1:1, where the list held 1.0 twice and 'next'
+        landed on the same value (user report 2026-09-20)."""
         z = self.current_zoom()
-        options = sorted(self.ZOOMS + [z])
-        i = options.index(z)
-        self.set_zoom(options[max(0, min(len(options) - 1, i + direction))])
+        if direction > 0:
+            nxt = [v for v in self.ZOOMS if v > z * 1.001]
+            self.set_zoom(nxt[0] if nxt else self.ZOOMS[-1])
+        else:
+            prv = [v for v in self.ZOOMS if v < z * 0.999]
+            self.set_zoom(prv[-1] if prv else self.ZOOMS[0])
 
     def set_zoom(self, value):
         self.zoom = value
@@ -966,14 +990,18 @@ class ImageViewer(ctk.CTkToplevel):
         self.render()
 
     def render(self):
+        """The image is drawn INTO the canvas, not placed as a widget on top
+        of it: a widget swallowed the mouse, so drag-to-pan and wheel zoom
+        never reached the canvas (user report 2026-09-20)."""
         z = self.current_zoom()
         w, h = max(int(self.image.width * z), 1), max(int(self.image.height * z), 1)
-        self._photo = ctk.CTkImage(light_image=self.image.copy(), size=(w, h))
+        resample = Image.LANCZOS if z <= 1 else Image.NEAREST
+        self._photo = ImageTk.PhotoImage(self.image.resize((w, h), resample))
         self.canvas.delete("all")
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-        self._label = ctk.CTkLabel(self.canvas, image=self._photo, text="")
-        self.canvas.create_window(max(w, cw) // 2, max(h, ch) // 2, window=self._label)
+        self.canvas.create_image(max((cw - w) // 2, 0), max((ch - h) // 2, 0), anchor="nw", image=self._photo)
         self.canvas.configure(scrollregion=(0, 0, max(w, cw), max(h, ch)))
+        self.canvas.configure(cursor="fleur" if (w > cw or h > ch) else "")
         self.zoom_label.configure(text=f"{z * 100:.0f}%" + ("  (fit)" if self.zoom is None else ""))
 
 
@@ -998,6 +1026,7 @@ class VariantDialog(ctk.CTkToplevel):
         row.pack(pady=(0, 16))
         button(row, "Add", self.ok, primary=True).pack(side="left", padx=6)
         button(row, "Cancel", self.destroy).pack(side="left")
+        bring_to_front(self)
         self.grab_set()
         field.focus_set()
         self.wait_window()
@@ -1041,6 +1070,7 @@ class SuggestionWindow(ctk.CTkToplevel):
                 button(row, "Dismiss", card.destroy, width=90).pack(side="left", padx=6)
         if not any_:
             ctk.CTkLabel(frame, text="No suggestions.", text_color=SUBTITLE).pack(pady=20)
+        bring_to_front(self)
 
     def accept(self, kind, ids, name, card):
         # an earlier accept may already have merged some of these away
