@@ -835,7 +835,12 @@ class App(ctk.CTk):
         for i, step in steps:
             row = ctk.CTkFrame(self.chain_frame, fg_color=CARD, corner_radius=6)
             row.pack(fill="x", padx=4, pady=2)
-            mark = "  ✓" if step.get("chosen") else ""
+            if step.get("chosen"):
+                mark = "  ✓"
+            elif not step.get("takes"):
+                mark = "   (no takes kept)"
+            else:
+                mark = ""
             ctk.CTkLabel(row, text=f"{i}. {step['change']}{mark}", anchor="w", justify="left",
                          wraplength=560, text_color=TITLE, font=ctk.CTkFont(size=11)).pack(
                 side="left", fill="x", expand=True, padx=6, pady=3)
@@ -919,15 +924,15 @@ class App(ctk.CTk):
         self._run_child(args, self._draw_done)
 
     def _draw_done(self, _code):
+        base = self._target[1] if self._target else ""
         if self._drawn and self._target:
-            _, base, _index = self._target
             record = self.chapters["chapters"].setdefault(base, il.new_chapter())
             record["samples"] += self._drawn
             self.save()
+            self.log_line(f"-- {len(self._drawn)} sample(s) added to {base}")
         self._drawn = []
         self._target = None
-        self.render_chapter_list()
-        self.render_chapter()
+        self._show_result(base, "Samples")
 
     def start_edit(self):
         record = self.entry()
@@ -965,18 +970,32 @@ class App(ctk.CTk):
                          "--count", str(count)], self._edit_done)
 
     def _edit_done(self, _code):
+        base = self._target[1] if self._target else ""
         if self._target and self._target[0] == "edit":
             _, base, index = self._target
             record = self.chapters["chapters"].get(base)
             if record and index < len(record["chain"]):
                 if self._drawn:
                     record["chain"][index]["takes"] += self._drawn
+                    self.log_line(f"-- {len(self._drawn)} take(s) added to {base}")
                 elif not record["chain"][index]["takes"]:
                     record["chain"].pop(index)      # nothing drawn: drop the empty round
                 self.save()
         self._drawn = []
         self._target = None
         self.change_var.set("")
+        self._show_result(base, "Fine-tune")
+
+    def _show_result(self, base, stage):
+        """Put the finished chapter back on screen. A draw or an edit takes
+        minutes, and whatever was selected when it ended used to be what got
+        redrawn - so results looked like they had vanished (user report
+        2026-09-21)."""
+        if base and base != self.chapter:
+            self.chapter = base
+            self.log_line(f"-- showing {base} again")
+        if base:
+            self.stage.set(stage)
         self.render_chapter_list()
         self.render_chapter()
 
