@@ -29,6 +29,7 @@ import json
 import os
 import re
 import socket
+import statistics
 import subprocess
 import sys
 import time
@@ -603,6 +604,214 @@ def run_draw(settings, book, kind, entry_id, variant_index, count, log):
     log("DONE drew " + str(count))
 
 
+# ------------------------------------------------------ Stage C: scenes
+SCENE_BANDS = ((0.35, 1), (0.75, 2), (1.5, 3))      # chapter / median -> scenes
+SCENE_CAP = 4                                        # decision 19
+
+
+def scene_count(chars, median):
+    """How many scenes a chapter gets (decisions 16, 19, 20): bands of its
+    length against the book's median chapter, capped at 4."""
+    ratio = chars / median if median else 1.0
+    for edge, count in SCENE_BANDS:
+        if ratio < edge:
+            return count
+    return SCENE_CAP
+
+
+def chapter_lengths(text_folder):
+    return {os.path.splitext(os.path.basename(p))[0]: len(read_text(p)) for p in chapter_files(text_folder)}
+
+
+def scene_plan(text_folder):
+    """{chapter: (length, scenes)} for the whole book."""
+    lengths = chapter_lengths(text_folder)
+    median = statistics.median(lengths.values()) if lengths else 1
+    return {base: (n, scene_count(n, median)) for base, n in lengths.items()}, median
+
+
+PROPOSE = """You are choosing ONE illustration for this part of a chapter of a Japanese novel.
+Pick the most VISUAL moment in it: people doing something in a place, or a striking place.
+Avoid pure dialogue with nothing to see.
+Characters (id: description):
+{chars}
+Places (id: description):
+{places}
+Return JSON only:
+{{"anchor":"","seen":"","cast":[],"place":"","prompt":""}}
+- "anchor": ONE sentence copied EXACTLY, character for character, from the text below, where the
+  moment begins. Copy a single sentence, never join two.
+- "seen": one or two English sentences describing the picture.
+- "cast": ids of the characters IN the picture (only ids from the list above; [] if nobody).
+- "place": one place id from the list, or "" if none fits.
+- "prompt": an English image prompt: who is in it, what they are doing, where, camera angle and
+  light. Refer to people by their description, not their name. Keep it under 60 words. No text,
+  letters or signs in the picture."""
+
+
+def scenes_path(root):
+    return os.path.join(root, "scenes.json")
+
+
+def load_scenes(root):
+    return read_json(scenes_path(root)) or {"version": 1, "chapters": {}}
+
+
+def save_scenes(root, scenes):
+    write_json(scenes_path(root), scenes)
+
+
+def describe_entries(bible, kind, limit=6):
+    lines = []
+    for e in bible[kind]:
+        facts = [d["text"] for d in e["details"] if d["keep"]][:limit]
+        lines.append(f"{e['id']}: {e['name']} - " + ("; ".join(facts) if facts else "no description"))
+    return "\n".join(lines)
+
+
+def slices_of(text, n):
+    """The chapter cut into n parts at paragraph boundaries, so one scene per
+    part forces the spread the model does not manage on its own (M3)."""
+    lines = text.splitlines(keepends=True)
+    target = max(len(text) // n, 1)
+    parts, buf = [], ""
+    for line in lines:
+        buf += line
+        if len(parts) < n - 1 and len(buf) >= target:
+            parts.append(buf)
+            buf = ""
+    parts.append(buf)
+    while len(parts) < n:
+        parts.append("")
+    return parts[:n]
+
+
+def snap_anchor(anchor, chapter_text):
+    """The model glues sentences together now and then (6 of 52 in M3), so
+    the anchor is snapped to a real sentence of the chapter."""
+    sents = sentences(chapter_text)
+    key = norm(first_sentence_of(anchor))
+    if not key:
+        return "", "none"
+    for s in sents:
+        if key and key in norm(s):
+            return s, "exact"
+    best, score = "", 0.0
+    for s in sents:
+        r = difflib.SequenceMatcher(None, key, norm(s)).ratio()
+        if r > score:
+            best, score = s, r
+    return (best, "fuzzy") if score >= 0.5 else ("", "none")
+
+
+def first_sentence_of(text):
+    m = re.search(r"^.*?[。？！…!?]", (text or "").strip())
+    return m.group(0) if m else (text or "").strip()
+
+
+def position_of(anchor, chapter_text):
+    """Where in the chapter the scene sits, 0..1 - used to order scenes."""
+    flat = norm(chapter_text)
+    at = flat.find(norm(anchor))
+    return round(at / len(flat), 4) if at >= 0 and flat else 1.0
+
+
+def run_propose(settings, book, text_folder, only_chapter, log):
+    root = book_dir(settings, book)
+    bible = load_bible(root)
+    scenes = load_scenes(root)
+    plan, _median = scene_plan(text_folder)
+    chars = describe_entries(bible, "characters")
+    places = describe_entries(bible, "places")
+    todo = [b for b in plan if not only_chapter or b == only_chapter]
+    known = {e["id"] for kind in KINDS for e in bible[kind]}
+    with ManagedLlamaServer(settings, log) as server:
+        for base in todo:
+            path = os.path.join(text_folder, base + ".txt")
+            text = read_text(path)
+            n = plan[base][1]
+            proposals = []
+            for i, part in enumerate(slices_of(text, n), 1):
+                if not part.strip():
+                    continue
+                t0 = time.time()
+                try:
+                    raw = chat(server.url, PROPOSE.format(chars=chars, places=places), part, 1200)
+                except ModelFailed as e:
+                    log(f"SCENE {base} {i}/{n} failed {e}")
+                    continue
+                anchor, match = snap_anchor(raw.get("anchor", ""), text)
+                cast = [c for c in raw.get("cast") or [] if c in known]
+                place = raw.get("place") if raw.get("place") in known else ""
+                proposals.append({"anchor": anchor, "anchor_match": match,
+                                  "seen": str(raw.get("seen") or ""), "cast": cast, "place": place,
+                                  "prompt": str(raw.get("prompt") or ""),
+                                  "position": position_of(anchor, text),
+                                  "samples": [], "chosen": ""})
+                log(f"SCENE {base} {i}/{n} ok {time.time() - t0:.1f}s {match} @{proposals[-1]['position']}")
+            proposals.sort(key=lambda s: s["position"])
+            scenes["chapters"][base] = {"count": n, "scenes": proposals}
+            save_scenes(root, scenes)
+    log(f"DONE proposed {sum(len(scenes['chapters'][b]['scenes']) for b in todo)} scenes")
+
+
+def scene_dir(root, base, index):
+    return os.path.join(root, "scenes", base, f"s{index + 1}")
+
+
+def next_scene_sample(root, base, index):
+    folder = scene_dir(root, base, index)
+    os.makedirs(folder, exist_ok=True)
+    n = 1
+    while os.path.exists(os.path.join(folder, f"take_{n:03d}.png")):
+        n += 1
+    return os.path.join(folder, f"take_{n:03d}.png")
+
+
+def scene_references(refs, scene):
+    """The chosen reference of every cast member, then the place. The style
+    image is added by the caller and 5 is the measured ceiling (M1)."""
+    out = []
+    for kind, ids in (("characters", scene.get("cast") or []), ("places", [scene.get("place")] if scene.get("place") else [])):
+        for entry_id in ids:
+            for variant in refs.get(kind, {}).get(entry_id, {}).get("variants", []):
+                if variant.get("chosen") and os.path.isfile(variant["chosen"]):
+                    out.append((entry_id, variant["chosen"]))
+                    break
+    return out
+
+
+def run_draw_scene(settings, book, base, index, count, log):
+    import random
+    import comfy
+
+    root = book_dir(settings, book)
+    scenes = load_scenes(root)
+    scene = scenes["chapters"][base]["scenes"][index]
+    refs = load_refs(root)
+    style = style_image_path(root)
+    chosen = scene_references(refs, scene)
+    room = comfy.MAX_REFS - (1 if os.path.isfile(style) else 0)
+    if len(chosen) > room:
+        log(f"SERVER {len(chosen)} references, only {room} fit - dropping "
+            + ", ".join(i for i, _ in chosen[room:]))
+        chosen = chosen[:room]
+    with comfy.ManagedComfy(settings, log) as engine:
+        names = []
+        if os.path.isfile(style):
+            names.append(engine.put_reference(style, f"si_{book}_style.png"))
+        for entry_id, path in chosen:
+            names.append(engine.put_reference(path, f"si_{book}_{entry_id}.png"))
+        log(f"SERVER drawing with {len(names)} reference(s)")
+        for i in range(count):
+            out = next_scene_sample(root, base, index)
+            log(f"TAKE {i + 1}/{count} start")
+            secs = engine.draw(scene["prompt"], names, random.randrange(2 ** 48), out,
+                               on_progress=lambda v, m: log(f"PROGRESS {v} {m}"))
+            log(f"SAMPLE {i + 1}/{count} {out} {secs}s")
+    log("DONE drew " + str(count))
+
+
 # ------------------------------------------------------- suggest merges
 SUGGEST = """Below is a numbered list of {kind} from one Japanese novel, each with the chapters it
 appears in and a short note. Some entries may be the SAME {kind_one} under different names (full
@@ -656,6 +865,15 @@ def main():
     d.add_argument("--id", required=True)
     d.add_argument("--variant", type=int, default=0)
     d.add_argument("--count", type=int, default=3)
+    p = sub.add_parser("propose")
+    p.add_argument("--book", required=True)
+    p.add_argument("--text", required=True)
+    p.add_argument("--chapter", default="")
+    ds = sub.add_parser("drawscene")
+    ds.add_argument("--book", required=True)
+    ds.add_argument("--chapter", required=True)
+    ds.add_argument("--scene", type=int, required=True)
+    ds.add_argument("--count", type=int, default=3)
     args = ap.parse_args()
 
     def log(line):
@@ -667,6 +885,12 @@ def main():
             sys.exit(0 if run_read(settings, args.book, args.text, log) else 2)
         if args.cmd == "draw":
             run_draw(settings, args.book, args.kind, args.id, args.variant, args.count, log)
+            return
+        if args.cmd == "propose":
+            run_propose(settings, args.book, args.text, args.chapter, log)
+            return
+        if args.cmd == "drawscene":
+            run_draw_scene(settings, args.book, args.chapter, args.scene, args.count, log)
             return
         run_suggest(settings, args.book, log)
     except (RuntimeError, ModelFailed) as e:

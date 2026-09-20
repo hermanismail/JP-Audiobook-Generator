@@ -78,6 +78,126 @@ def chapters_text(chapters):
     return "ch " + ", ".join(str(c) for c in chapters) if chapters else "added by hand"
 
 
+class Gallery:
+    """The takes of one thing (a reference variant, or a scene): thumbnails,
+    Choose, Delete, tick boxes with Select all / none and a bulk delete.
+    Both tabs use it; `container` is any dict with "samples" and "chosen"."""
+
+    def __init__(self, app, parent, save, refresh, height=290):
+        self.app = app
+        self.save = save
+        self.refresh = refresh
+        self.container = None
+        self.picked = set()
+        self._thumbs = []
+
+        picks = ctk.CTkFrame(parent, fg_color="transparent")
+        picks.pack(fill="x", padx=14, pady=(2, 0))
+        button(picks, "Select all", self.select_all, width=90, height=28).pack(side="left")
+        button(picks, "Select none", self.select_none, width=96, height=28).pack(side="left", padx=6)
+        self.delete_btn = button(picks, "Delete selected", self.delete_picked, width=130, height=28, danger=True)
+        self.delete_btn.pack(side="left")
+        self.count_label = ctk.CTkLabel(picks, text="", text_color=SUBTITLE, font=ctk.CTkFont(size=12))
+        self.count_label.pack(side="left", padx=10)
+        self.frame = ctk.CTkScrollableFrame(parent, fg_color=CARD, orientation="horizontal", height=height)
+        self.frame.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+
+    def show(self, container):
+        self.container = container
+        for w in self.frame.winfo_children():
+            w.destroy()
+        self._thumbs = []
+        if container is None:
+            self.picked = set()
+            self._update_count()
+            return
+        self.picked &= set(container["samples"])
+        for path in container["samples"]:
+            self._card(path)
+        self._update_count()
+
+    def _card(self, path):
+        if not os.path.isfile(path):
+            return
+        chosen = self.container["chosen"] == path
+        card = ctk.CTkFrame(self.frame, fg_color=PASTEL_VIOLET if chosen else CARD, corner_radius=8,
+                            border_width=2 if chosen else 1, border_color=ACCENT if chosen else BORDER)
+        card.pack(side="left", padx=6, pady=6)
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=6, pady=(4, 0))
+        picked = ctk.BooleanVar(value=path in self.picked)
+        ctk.CTkCheckBox(top, text="", width=24, variable=picked, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                        command=lambda: self.pick(path, picked.get())).pack(side="left")
+        ctk.CTkLabel(top, text=os.path.basename(path).split("_")[-1][:-4], text_color=SUBTITLE,
+                     font=ctk.CTkFont(size=11)).pack(side="left")
+        with Image.open(path) as im:
+            image = ctk.CTkImage(light_image=im.copy(), size=THUMB)
+        self._thumbs.append(image)
+        thumb = ctk.CTkLabel(card, image=image, text="", cursor="hand2")
+        thumb.pack(padx=6, pady=(2, 2))
+        thumb.bind("<Button-1>", lambda _e, p=path: ImageViewer(self.app, p))
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=6, pady=(0, 6))
+        if chosen:
+            ctk.CTkLabel(row, text="chosen", text_color=DONE,
+                         font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=4)
+        else:
+            button(row, "Choose", lambda: self.choose(path), width=74, height=26).pack(side="left")
+        button(row, "Delete", lambda: self.delete(path), width=68, height=26, danger=True).pack(side="right")
+
+    def pick(self, path, picked):
+        (self.picked.add if picked else self.picked.discard)(path)
+        self._update_count()
+
+    def _update_count(self):
+        n = len(self.picked)
+        self.count_label.configure(text=f"{n} selected" if n else "")
+        self.delete_btn.configure(state="normal" if n else "disabled")
+
+    def select_all(self):
+        if self.container:
+            self.picked = {p for p in self.container["samples"] if os.path.isfile(p)}
+            self.refresh()
+
+    def select_none(self):
+        self.picked = set()
+        self.refresh()
+
+    def choose(self, path):
+        self.container["chosen"] = path
+        self.save()
+        self.refresh()
+
+    def delete(self, path, refresh=True):
+        self.container["samples"] = [p for p in self.container["samples"] if p != path]
+        if self.container["chosen"] == path:
+            self.container["chosen"] = ""
+        self.picked.discard(path)
+        self.save()
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        if refresh:
+            self.refresh()
+
+    def delete_picked(self):
+        if not self.container or not self.picked:
+            return
+        paths = [p for p in self.container["samples"] if p in self.picked]
+        warn = "\n\nOne of them is the chosen image." if self.container["chosen"] in paths else ""
+        if not messagebox.askyesno("Delete takes", f"Delete {len(paths)} take(s)?{warn}"):
+            return
+        for path in paths:
+            self.delete(path, refresh=False)
+        self.picked = set()
+        self.refresh()
+
+    def add(self, paths):
+        self.container["samples"] += paths
+        self.save()
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -99,7 +219,6 @@ class App(ctk.CTk):
         self.ref_kind = "characters"    # References tab
         self.ref_entry = None           # selected entry id there
         self.ref_variant = 0
-        self._thumbs = []               # CTkImage refs, or Tk drops them
         self._drawn = []                # SAMPLE paths of the running job
         self._draw_target = None        # (kind, entry id, variant) that job is for
         self._take = None               # (i, n) of the take being drawn
@@ -108,7 +227,10 @@ class App(ctk.CTk):
         self._last_secs = 0.0
         self._take_done = False
         self._starting = 0.0            # clicked Draw, engine not drawing yet
-        self._picked = set()            # takes ticked for bulk delete
+        self._draw_where = "refs"       # which tab owns the status line
+        self.scenes = None
+        self.scene_chapter = ""
+        self.scene_index = 0
         self.kind = "characters"
         self.current = None            # selected entry id
         self.selected = set()          # ids ticked for merge / delete
@@ -146,6 +268,7 @@ class App(ctk.CTk):
         self._build_read(self.tabs.add("1  Read"))
         self._build_cast(self.tabs.add("2  Cast & places"))
         self._build_refs(self.tabs.add("3  References"))
+        self._build_scenes(self.tabs.add("4  Scenes"))
 
     def _card(self, parent, **pack):
         card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=11, border_width=1, border_color=BORDER)
@@ -298,17 +421,66 @@ class App(ctk.CTk):
         self.draw_bar = ctk.CTkProgressBar(status, progress_color=ACCENT, height=8)
         self.draw_bar.set(0)
         self.draw_bar.pack(fill="x", pady=(4, 0))
-        picks = ctk.CTkFrame(right, fg_color="transparent")
-        picks.pack(fill="x", padx=14, pady=(2, 0))
-        button(picks, "Select all", self.select_all_samples, width=90, height=28).pack(side="left")
-        button(picks, "Select none", self.select_no_samples, width=96, height=28).pack(side="left", padx=6)
-        self.delete_picked_btn = button(picks, "Delete selected", self.delete_picked_samples, width=130,
-                                        height=28, danger=True)
-        self.delete_picked_btn.pack(side="left")
-        self.picked_label = ctk.CTkLabel(picks, text="", text_color=SUBTITLE, font=ctk.CTkFont(size=12))
-        self.picked_label.pack(side="left", padx=10)
-        self.gallery = ctk.CTkScrollableFrame(right, fg_color=CARD, orientation="horizontal", height=290)
-        self.gallery.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+        self.ref_gallery = Gallery(self, right, save=lambda: il.save_refs(self.root(), self.refs),
+                                   refresh=self.render_ref_entry)
+
+    def _build_scenes(self, tab):
+        body = ctk.CTkFrame(tab, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+        left = ctk.CTkFrame(body, fg_color="transparent")
+        left.pack(side="left", fill="y")
+        bar = ctk.CTkFrame(left, fg_color="transparent")
+        bar.pack(fill="x", pady=(0, 6))
+        self.propose_btn = button(bar, "Propose scenes", self.start_propose, width=140, primary=True)
+        self.propose_btn.pack(side="left")
+        self.propose_all_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(bar, text="whole book", variable=self.propose_all_var, fg_color=ACCENT,
+                        hover_color=ACCENT_HOVER, text_color=ENTRY_TEXT).pack(side="left", padx=8)
+        self.chapter_list = ctk.CTkScrollableFrame(left, width=250, fg_color=CARD, corner_radius=11,
+                                                   border_width=1, border_color=BORDER)
+        self.chapter_list.pack(fill="both", expand=True)
+
+        right = ctk.CTkFrame(body, fg_color=CARD, corner_radius=11, border_width=1, border_color=BORDER)
+        right.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        head = ctk.CTkFrame(right, fg_color="transparent")
+        head.pack(fill="x", padx=14, pady=(12, 2))
+        self.scene_title = ctk.CTkLabel(head, text="Choose a chapter", anchor="w", text_color=TITLE,
+                                        font=ctk.CTkFont(size=14, weight="bold"))
+        self.scene_title.pack(side="left")
+        button(head, "Cast & place", self.edit_scene_cast, width=110).pack(side="right")
+        button(head, "Anchor", self.edit_scene_anchor, width=90).pack(side="right", padx=6)
+        self.scene_bar = ctk.CTkFrame(right, fg_color="transparent")
+        self.scene_bar.pack(fill="x", padx=14)
+        self.scene_anchor = ctk.CTkLabel(right, text="", anchor="w", justify="left", wraplength=800,
+                                         text_color=SUBTITLE, font=ctk.CTkFont(size=12))
+        self.scene_anchor.pack(fill="x", padx=14, pady=(4, 0))
+        self.scene_cast = ctk.CTkLabel(right, text="", anchor="w", justify="left", wraplength=800,
+                                       text_color=SUBTITLE, font=ctk.CTkFont(size=12))
+        self.scene_cast.pack(fill="x", padx=14)
+        self.scene_prompt = ctk.CTkTextbox(right, height=92, fg_color=CARD, border_width=1,
+                                           border_color=ENTRY_BORDER, text_color=ENTRY_TEXT,
+                                           font=ctk.CTkFont(size=12))
+        self.scene_prompt.pack(fill="x", padx=14, pady=(6, 4))
+        self.scene_prompt.bind("<FocusOut>", lambda _e: self.save_scene_prompt())
+        row = ctk.CTkFrame(right, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=(0, 4))
+        self.scene_draw_btn = button(row, "Draw", self.start_draw_scene, width=90, primary=True)
+        self.scene_draw_btn.pack(side="left")
+        self.scene_takes_var = ctk.StringVar(value=str(self.settings["takes"]))
+        entry(row, self.scene_takes_var, width=48).pack(side="left", padx=(8, 4))
+        ctk.CTkLabel(row, text="takes", text_color=SUBTITLE).pack(side="left")
+        self.scene_info = ctk.CTkLabel(row, text="", text_color=SUBTITLE, font=ctk.CTkFont(size=12))
+        self.scene_info.pack(side="left", padx=10)
+        status = ctk.CTkFrame(right, fg_color="transparent")
+        status.pack(fill="x", padx=14, pady=(0, 4))
+        self.scene_status = ctk.CTkLabel(status, text="", anchor="w", text_color=ENTRY_TEXT,
+                                         font=ctk.CTkFont(size=12))
+        self.scene_status.pack(fill="x")
+        self.scene_bar_progress = ctk.CTkProgressBar(status, progress_color=ACCENT, height=8)
+        self.scene_bar_progress.set(0)
+        self.scene_bar_progress.pack(fill="x", pady=(4, 0))
+        self.scene_gallery = Gallery(self, right, save=lambda: il.save_scenes(self.root(), self.scenes),
+                                     refresh=self.render_scene, height=260)
 
     # ------------------------------------------------------------- helpers
     def _update_work_label(self):
@@ -345,10 +517,15 @@ class App(ctk.CTk):
         self.current = None
         self.ref_entry = None
         self.selected.clear()
+        self.scenes = il.load_scenes(self.root())
+        self.scene_chapter = ""
+        self.scene_index = 0
         self.render_list()
         self.render_entry()
         self.render_ref_list()
         self.render_ref_entry()
+        self.render_chapter_list()
+        self.render_scene()
 
     def refresh_read_info(self):
         text = self.text_var.get().strip()
@@ -375,7 +552,7 @@ class App(ctk.CTk):
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
                                       encoding="utf-8", errors="replace",
                                       creationflags=subprocess.CREATE_NO_WINDOW)
-        for b in (self.read_btn, self.suggest_btn, self.draw_btn):
+        for b in (self.read_btn, self.suggest_btn, self.draw_btn, self.propose_btn, self.scene_draw_btn):
             b.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         proc = self._proc
@@ -426,13 +603,14 @@ class App(ctk.CTk):
                         self.status_var.set(value.split(" ", 1)[1])
                         # only while starting: never overwrite "take N/N done"
                         if self._starting:
-                            self.draw_status.configure(text=value.split(" ", 1)[1], text_color=ENTRY_TEXT)
+                            self.draw_widgets()[0].configure(text=value.split(" ", 1)[1], text_color=ENTRY_TEXT)
                     elif value.startswith("SUGGEST"):
                         self.status_var.set(value.split(" ", 1)[1])
                 else:
                     code, on_done = value
                     self._proc = None
-                    for b in (self.read_btn, self.suggest_btn, self.draw_btn):
+                    for b in (self.read_btn, self.suggest_btn, self.draw_btn, self.propose_btn,
+                              self.scene_draw_btn):
                         b.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
                     self.status_var.set("" if code == 0 else f"stopped (exit {code})")
@@ -645,6 +823,205 @@ class App(ctk.CTk):
         self.render_list()
         self.render_entry()
 
+    # ------------------------------------------------------------- scenes
+    def entry_names(self):
+        return {e["id"]: e["name"] for kind in il.KINDS for e in (self.bible[kind] if self.bible else [])}
+
+    def render_chapter_list(self):
+        for w in self.chapter_list.winfo_children():
+            w.destroy()
+        if not self.scenes or not os.path.isdir(self.text_var.get().strip()):
+            return
+        plan, _median = il.scene_plan(self.text_var.get().strip())
+        for base in sorted(plan):
+            chars, want = plan[base]
+            record = self.scenes["chapters"].get(base)
+            got = len(record["scenes"]) if record else 0
+            chosen = sum(1 for s in record["scenes"] if s["chosen"]) if record else 0
+            row = ctk.CTkFrame(self.chapter_list, fg_color=PASTEL_VIOLET if base == self.scene_chapter else CARD,
+                               corner_radius=8, border_width=1, border_color=BORDER)
+            row.pack(fill="x", pady=2, padx=2)
+            if not record:
+                state, colour = f"{want} scenes to propose", SUBTITLE
+            elif chosen == got:
+                state, colour = f"{got} scenes · all chosen", DONE
+            else:
+                state, colour = f"{got} scenes · {chosen} chosen", ENTRY_TEXT
+            label = ctk.CTkLabel(row, text=f"{base.replace('chapter_', 'Chapter ')}   {chars:,} chars\n{state}",
+                                 anchor="w", justify="left", text_color=colour, font=ctk.CTkFont(size=12))
+            label.pack(side="left", fill="x", expand=True, padx=8, pady=5)
+            for w in (row, label):
+                w.bind("<Button-1>", lambda _e, b=base: self.select_chapter(b))
+
+    def select_chapter(self, base):
+        self.save_scene_prompt()
+        self.scene_chapter = base
+        self.scene_index = 0
+        self.scene_gallery.picked = set()
+        self.render_chapter_list()
+        self.render_scene()
+
+    def chapter_scenes(self):
+        record = self.scenes["chapters"].get(self.scene_chapter) if self.scenes else None
+        return record["scenes"] if record else []
+
+    def current_scene(self):
+        scenes = self.chapter_scenes()
+        if not scenes:
+            return None
+        self.scene_index = min(self.scene_index, len(scenes) - 1)
+        return scenes[self.scene_index]
+
+    def render_scene(self):
+        for w in self.scene_bar.winfo_children():
+            w.destroy()
+        self.scene_prompt.delete("1.0", "end")
+        scene = self.current_scene()
+        if not scene:
+            self.scene_title.configure(text="Choose a chapter" if not self.scene_chapter
+                                       else f"{self.scene_chapter}: no scenes yet - Propose scenes")
+            self.scene_anchor.configure(text="")
+            self.scene_cast.configure(text="")
+            self.scene_info.configure(text="")
+            self.scene_gallery.show(None)
+            return
+        scenes = self.chapter_scenes()
+        self.scene_title.configure(text=f"{self.scene_chapter.replace('chapter_', 'Chapter ')}   "
+                                        f"scene {self.scene_index + 1} of {len(scenes)}")
+        for i, s in enumerate(scenes):
+            button(self.scene_bar, f"#{i + 1}" + (" ✓" if s["chosen"] else ""),
+                   lambda idx=i: self.select_scene(idx), width=0, height=28,
+                   primary=(i == self.scene_index)).pack(side="left", padx=(0, 6), pady=4)
+        where = f"{scene['position'] * 100:.0f}% into the chapter"
+        note = "" if scene["anchor_match"] == "exact" else "   (closest sentence - check it)"
+        self.scene_anchor.configure(text=f"starts at {where}:  {scene['anchor']}{note}",
+                                    text_color=SUBTITLE if scene["anchor_match"] == "exact" else WARN)
+        names = self.entry_names()
+        cast = ", ".join(names.get(c, c) for c in scene["cast"]) or "nobody"
+        place = names.get(scene["place"], scene["place"]) or "no place"
+        refs = il.scene_references(self.refs, scene) if self.refs else []
+        have = len(refs) + (1 if os.path.isfile(il.style_image_path(self.root())) else 0)
+        self.scene_cast.configure(text=f"cast: {cast}   ·   place: {place}   ·   {have} reference(s) attached"
+                                       + ("  - over the limit of 5, extras are dropped" if have > 5 else ""),
+                                  text_color=WARN if have > 5 else SUBTITLE)
+        self.scene_prompt.insert("1.0", scene["prompt"])
+        self.scene_info.configure(text=scene["seen"][:110])
+        self.scene_gallery.show(scene)
+
+    def select_scene(self, index):
+        self.save_scene_prompt()
+        self.scene_index = index
+        self.scene_gallery.picked = set()
+        self.render_scene()
+
+    def save_scene_prompt(self):
+        scene = self.current_scene() if self.scenes and self.scene_chapter else None
+        if scene:
+            text = self.scene_prompt.get("1.0", "end").strip()
+            if text and text != scene["prompt"]:
+                scene["prompt"] = text
+                il.save_scenes(self.root(), self.scenes)
+
+    def edit_scene_cast(self):
+        scene = self.current_scene()
+        if not scene or not self.bible:
+            return
+        dialog = CastDialog(self, self.bible, self.refs, scene)
+        if dialog.result is not None:
+            scene["cast"], scene["place"] = dialog.result
+            il.save_scenes(self.root(), self.scenes)
+            self.render_scene()
+
+    def edit_scene_anchor(self):
+        scene = self.current_scene()
+        if not scene:
+            return
+        path = os.path.join(self.text_var.get().strip(), self.scene_chapter + ".txt")
+        if not os.path.isfile(path):
+            return
+        text = il.read_text(path)
+        picked = AnchorDialog(self, il.sentences(text), scene["anchor"]).result
+        if picked:
+            scene["anchor"] = picked
+            scene["anchor_match"] = "exact"
+            scene["position"] = il.position_of(picked, text)
+            self.chapter_scenes().sort(key=lambda s: s["position"])
+            self.scene_index = self.chapter_scenes().index(scene)
+            il.save_scenes(self.root(), self.scenes)
+            self.render_scene()
+
+    def start_propose(self):
+        text = self.text_var.get().strip()
+        if not self.bible or not os.path.isdir(text):
+            return
+        self.save_scene_prompt()
+        whole = self.propose_all_var.get() or not self.scene_chapter
+        target = "" if whole else self.scene_chapter
+        if self.scenes and (self.scenes["chapters"] if whole else self.scene_chapter in self.scenes["chapters"]):
+            what = "every chapter" if whole else self.scene_chapter
+            if not messagebox.askyesno("Propose scenes",
+                                       f"Replace the scenes of {what}?\n\nPrompts you edited and takes you "
+                                       "drew for them are kept on disk but no longer listed."):
+                return
+        self.log_line(f"-- proposing scenes for {'the whole book' if whole else self.scene_chapter}")
+        args = ["propose", "--book", self.book_var.get().strip(), "--text", text]
+        if target:
+            args += ["--chapter", target]
+        self._run_child(args, self._propose_done)
+
+    def _propose_done(self, _code):
+        self.scenes = il.load_scenes(self.root())
+        self.render_chapter_list()
+        self.render_scene()
+
+    def start_draw_scene(self):
+        scene = self.current_scene()
+        if not scene:
+            return
+        self.save_scene_prompt()
+        if not scene["prompt"].strip():
+            messagebox.showerror("Draw", "This scene has no prompt.")
+            return
+        try:
+            count = max(1, min(8, int(self.scene_takes_var.get())))
+        except ValueError:
+            count = int(self.settings["takes"])
+        self.scene_takes_var.set(str(count))
+        self._drawn = []
+        self._draw_target = ("scene", self.scene_chapter, self.scene_index)
+        self._draw_where = "scene"
+        self._take = None
+        self._take_done = False
+        self._step = (0, 0)
+        self._starting = time.time()
+        self.scene_status.configure(text=f"starting to draw {count} take(s)…", text_color=ENTRY_TEXT)
+        self.scene_bar_progress.configure(mode="indeterminate")
+        self.scene_bar_progress.set(0)
+        self.scene_bar_progress.start()
+        self.update_idletasks()
+        self.log_line(f"-- drawing {count} for {self.scene_chapter} scene {self.scene_index + 1}")
+        self._run_child(["drawscene", "--book", self.book_var.get().strip(), "--chapter", self.scene_chapter,
+                         "--scene", str(self.scene_index), "--count", str(count)], self._draw_scene_done)
+
+    def _draw_scene_done(self, code):
+        if self._drawn and self._draw_target and self._draw_target[0] == "scene":
+            _, base, index = self._draw_target
+            scenes = self.scenes["chapters"].get(base, {}).get("scenes", [])
+            if index < len(scenes):
+                scenes[index]["samples"] += self._drawn
+                il.save_scenes(self.root(), self.scenes)
+        self._drawn = []
+        self._draw_target = None
+        self._take = None
+        self._starting = 0.0
+        self.scene_bar_progress.stop()
+        self.scene_bar_progress.configure(mode="determinate")
+        if code != 0:
+            self.scene_status.configure(text="stopped", text_color=WARN)
+            self.scene_bar_progress.set(0)
+        self.render_chapter_list()
+        self.render_scene()
+
     # -------------------------------------------------------- references
     def browse_style(self):
         path = filedialog.askopenfilename(title="Style image for this book",
@@ -702,7 +1079,7 @@ class App(ctk.CTk):
         self.save_prompt()
         self.ref_entry = entry_id
         self.ref_variant = 0
-        self._picked = set()
+        self.ref_gallery.picked = set()
         self.render_ref_list()
         self.render_ref_entry()
 
@@ -726,16 +1103,12 @@ class App(ctk.CTk):
     def render_ref_entry(self):
         for w in self.variant_bar.winfo_children():
             w.destroy()
-        for w in self.gallery.winfo_children():
-            w.destroy()
-        self._thumbs = []
         self.prompt_box.delete("1.0", "end")
         e = self.ref_entry_obj()
         if not e:
             self.ref_title.configure(text="Select a character or place")
             self.ref_info.configure(text="")
-            self._picked = set()
-            self.update_picked_label()
+            self.ref_gallery.show(None)
             return
         kept = sum(d["keep"] for d in e["details"])
         self.ref_title.configure(text=f"{e['name']}   ({kept} details kept)")
@@ -751,98 +1124,31 @@ class App(ctk.CTk):
         style_set = os.path.isfile(il.style_image_path(self.root()))
         self.ref_info.configure(text="" if style_set else "no style image set",
                                 text_color=SUBTITLE if style_set else WARN)
-        self._picked &= set(v["samples"])
-        for path in v["samples"]:
-            self._sample_card(v, path)
-        self.update_picked_label()
+        self.ref_gallery.show(v)
 
-    def _sample_card(self, variant, path):
-        if not os.path.isfile(path):
-            return
-        card = ctk.CTkFrame(self.gallery, fg_color=PASTEL_VIOLET if variant["chosen"] == path else CARD,
-                            corner_radius=8, border_width=2 if variant["chosen"] == path else 1,
-                            border_color=ACCENT if variant["chosen"] == path else BORDER)
-        card.pack(side="left", padx=6, pady=6)
-        with Image.open(path) as im:
-            image = ctk.CTkImage(light_image=im.copy(), size=THUMB)
-        self._thumbs.append(image)
-        top = ctk.CTkFrame(card, fg_color="transparent")
-        top.pack(fill="x", padx=6, pady=(4, 0))
-        picked = ctk.BooleanVar(value=path in self._picked)
-        ctk.CTkCheckBox(top, text="", width=24, variable=picked, fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                        command=lambda: self.pick_sample(path, picked.get())).pack(side="left")
-        ctk.CTkLabel(top, text=os.path.basename(path)[7:-4], text_color=SUBTITLE,
-                     font=ctk.CTkFont(size=11)).pack(side="left")
-        thumb = ctk.CTkLabel(card, image=image, text="", cursor="hand2")
-        thumb.pack(padx=6, pady=(2, 2))
-        thumb.bind("<Button-1>", lambda _e, p=path: ImageViewer(self, p))
-        row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=6, pady=(0, 6))
-        if variant["chosen"] == path:
-            ctk.CTkLabel(row, text="chosen", text_color=DONE,
-                         font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=4)
-        else:
-            button(row, "Choose", lambda: self.choose_sample(variant, path), width=74, height=26).pack(side="left")
-        button(row, "Delete", lambda: self.delete_sample(variant, path), width=68, height=26,
-               danger=True).pack(side="right")
-
+    # the References gallery, under the names the buttons and tests use
     def pick_sample(self, path, picked):
-        (self._picked.add if picked else self._picked.discard)(path)
-        self.update_picked_label()
-
-    def update_picked_label(self):
-        n = len(self._picked)
-        self.picked_label.configure(text=f"{n} selected" if n else "")
-        self.delete_picked_btn.configure(state="normal" if n else "disabled")
+        self.ref_gallery.pick(path, picked)
 
     def select_all_samples(self):
-        v = self.current_variant()
-        if v:
-            self._picked = {p for p in v["samples"] if os.path.isfile(p)}
-            self.render_ref_entry()
+        self.ref_gallery.select_all()
 
     def select_no_samples(self):
-        self._picked = set()
-        self.render_ref_entry()
+        self.ref_gallery.select_none()
 
     def delete_picked_samples(self):
-        v = self.current_variant()
-        if not v or not self._picked:
-            return
-        paths = [p for p in v["samples"] if p in self._picked]
-        warn = "\n\nOne of them is the chosen reference." if v["chosen"] in paths else ""
-        if not messagebox.askyesno("Delete takes", f"Delete {len(paths)} take(s)?{warn}"):
-            return
-        for path in paths:
-            self.delete_sample(v, path, refresh=False)
-        self._picked = set()
-        self.render_ref_list()
-        self.render_ref_entry()
+        self.ref_gallery.delete_picked()
 
-    def choose_sample(self, variant, path):
-        variant["chosen"] = path
-        il.save_refs(self.root(), self.refs)
-        self.render_ref_list()
-        self.render_ref_entry()
+    def choose_sample(self, _variant, path):
+        self.ref_gallery.choose(path)
 
-    def delete_sample(self, variant, path, refresh=True):
-        variant["samples"] = [p for p in variant["samples"] if p != path]
-        if variant["chosen"] == path:
-            variant["chosen"] = ""
-        self._picked.discard(path)
-        il.save_refs(self.root(), self.refs)
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        if refresh:
-            self.render_ref_list()
-            self.render_ref_entry()
+    def delete_sample(self, _variant, path, refresh=True):
+        self.ref_gallery.delete(path, refresh=refresh)
 
     def select_variant(self, index):
         self.save_prompt()
         self.ref_variant = index
-        self._picked = set()
+        self.ref_gallery.picked = set()
         self.render_ref_entry()
 
     def add_variant(self):
@@ -894,6 +1200,7 @@ class App(ctk.CTk):
         # remember WHICH variant this job is for: the selection may change
         # while it draws, and the takes belong to the entry that asked
         self._draw_target = (self.ref_kind, e["id"], self.ref_variant)
+        self._draw_where = "refs"
         # answer the click NOW: the engine may take half a minute to start,
         # and a dead bar reads as "did my click land?" (user report 09-20)
         self._take = None
@@ -910,25 +1217,31 @@ class App(ctk.CTk):
                          "--id", e["id"], "--variant", str(self.ref_variant), "--count", str(count)],
                         self._draw_done)
 
+    def draw_widgets(self):
+        """Whichever tab asked for this draw owns the status line and bar."""
+        if self._draw_where == "scene":
+            return self.scene_status, self.scene_bar_progress
+        return self.draw_status, self.draw_bar
+
     def update_draw_status(self, done=False):
         """Takes done + the sampler's own step, so the bar moves inside a take.
         Loading the text encoder reports nothing, so that stretch shows as
         'preparing' with the elapsed seconds instead of a fake percentage."""
+        status, bar = self.draw_widgets()
         if not self._take:
             if self._starting:      # engine starting: keep the bar alive
-                self.draw_status.configure(
-                    text=f"starting to draw…   ·   {time.time() - self._starting:.0f}s",
-                    text_color=ENTRY_TEXT)
+                status.configure(text=f"starting to draw…   ·   {time.time() - self._starting:.0f}s",
+                                 text_color=ENTRY_TEXT)
             else:
-                self.draw_status.configure(text="")
-                self.draw_bar.set(0)
+                status.configure(text="")
+                bar.set(0)
             return
         i, n = self._take
         step, steps = self._step
         elapsed = time.time() - self._take_started
         share = (step / steps) if steps else 0.0
         fraction = ((i - 1) + (1.0 if done else share)) / n
-        self.draw_bar.set(fraction)
+        bar.set(fraction)
         if done:
             text = f"take {i}/{n} done in {self._last_secs:.0f}s"
             if i < n:
@@ -939,7 +1252,7 @@ class App(ctk.CTk):
             text = f"take {i}/{n}   ·   preparing   ·   {elapsed:.0f}s"
             if self._last_secs:
                 text += f"   (last take {self._last_secs:.0f}s)"
-        self.draw_status.configure(text=text, text_color=DONE if done and i == n else ENTRY_TEXT)
+        status.configure(text=text, text_color=DONE if done and i == n else ENTRY_TEXT)
 
     def _draw_done(self, _code):
         if self._drawn and self._draw_target:
@@ -962,6 +1275,7 @@ class App(ctk.CTk):
 
     def on_close(self):
         self.save_note()
+        self.save_scene_prompt()
         if self._proc:
             if not messagebox.askyesno("Scene Illustrator", "A run is in progress. Stop it and close?"):
                 return
@@ -1089,6 +1403,118 @@ class ImageViewer(ctk.CTkToplevel):
         self.canvas.configure(scrollregion=(0, 0, max(w, cw), max(h, ch)))
         self.canvas.configure(cursor="fleur" if (w > cw or h > ch) else "")
         self.zoom_label.configure(text=f"{z * 100:.0f}%" + ("  (fit)" if self.zoom is None else ""))
+
+
+class CastDialog(ctk.CTkToplevel):
+    """Who is in this picture, and where. Entries with a chosen reference are
+    listed first and marked, because those are the ones that stay consistent."""
+
+    def __init__(self, parent, bible, refs, scene):
+        super().__init__(parent)
+        self.title("Cast & place")
+        self.geometry("720x700")
+        self.configure(fg_color=BG)
+        self.result = None
+        self.vars = {}
+        self.place_var = ctk.StringVar(value=scene.get("place") or "")
+
+        ctk.CTkLabel(self, text="In the picture", text_color=TITLE,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(padx=16, pady=(14, 2), anchor="w")
+        frame = ctk.CTkScrollableFrame(self, fg_color=CARD, height=300)
+        frame.pack(fill="both", expand=True, padx=16)
+        for e in self.order(bible["characters"], refs, "characters"):
+            has = self.has_reference(refs, "characters", e["id"])
+            var = ctk.BooleanVar(value=e["id"] in (scene.get("cast") or []))
+            self.vars[e["id"]] = var
+            ctk.CTkCheckBox(frame, text=f"{e['name']}   {'✓ reference' if has else '· no reference'}",
+                            variable=var, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                            text_color=TITLE if has else SUBTITLE).pack(anchor="w", padx=10, pady=3)
+
+        ctk.CTkLabel(self, text="Place", text_color=TITLE,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(padx=16, pady=(12, 2), anchor="w")
+        places = ctk.CTkScrollableFrame(self, fg_color=CARD, height=200)
+        places.pack(fill="both", expand=True, padx=16)
+        ctk.CTkRadioButton(places, text="no place", variable=self.place_var, value="",
+                           fg_color=ACCENT, text_color=SUBTITLE).pack(anchor="w", padx=10, pady=3)
+        for e in self.order(bible["places"], refs, "places"):
+            has = self.has_reference(refs, "places", e["id"])
+            ctk.CTkRadioButton(places, text=f"{e['name']}   {'✓ reference' if has else '· no reference'}",
+                               variable=self.place_var, value=e["id"], fg_color=ACCENT,
+                               text_color=TITLE if has else SUBTITLE).pack(anchor="w", padx=10, pady=3)
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(pady=12)
+        button(row, "Save", self.ok, primary=True).pack(side="left", padx=6)
+        button(row, "Cancel", self.destroy).pack(side="left")
+        bring_to_front(self)
+        self.grab_set()
+        self.wait_window()
+
+    @staticmethod
+    def has_reference(refs, kind, entry_id):
+        if not refs:
+            return False
+        return any(v.get("chosen") for v in refs.get(kind, {}).get(entry_id, {}).get("variants", []))
+
+    def order(self, entries, refs, kind):
+        return sorted(entries, key=lambda e: (not self.has_reference(refs, kind, e["id"]),
+                                              -len(e["chapters"])))
+
+    def ok(self):
+        self.result = ([i for i, v in self.vars.items() if v.get()], self.place_var.get())
+        self.destroy()
+
+
+class AnchorDialog(ctk.CTkToplevel):
+    """Move a scene to another sentence of the chapter. The image will appear
+    when that sentence is read (Stage D)."""
+
+    def __init__(self, parent, sentences, current):
+        super().__init__(parent)
+        self.title("Anchor sentence")
+        self.geometry("900x700")
+        self.configure(fg_color=BG)
+        self.result = None
+        self.sentences = sentences
+        self.filter_var = ctk.StringVar()
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(14, 6))
+        ctk.CTkLabel(row, text="Filter", width=50, anchor="w", text_color=TITLE).pack(side="left")
+        field = entry(row, self.filter_var)
+        field.pack(side="left", fill="x", expand=True)
+        self.filter_var.trace_add("write", lambda *_: self.render())
+        self.frame = ctk.CTkScrollableFrame(self, fg_color=CARD)
+        self.frame.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        self.current = current
+        self.render()
+        bring_to_front(self)
+        self.grab_set()
+        self.wait_window()
+
+    def render(self):
+        for w in self.frame.winfo_children():
+            w.destroy()
+        needle = self.filter_var.get().strip()
+        shown = 0
+        for i, s in enumerate(self.sentences, 1):
+            if needle and needle not in s:
+                continue
+            shown += 1
+            if shown > 400:
+                ctk.CTkLabel(self.frame, text="…narrow the filter to see more", text_color=SUBTITLE).pack(anchor="w")
+                break
+            row = ctk.CTkFrame(self.frame, fg_color=PASTEL_VIOLET if s == self.current else CARD,
+                               corner_radius=6)
+            row.pack(fill="x", pady=1)
+            label = ctk.CTkLabel(row, text=f"{i:>4}  {s}", anchor="w", justify="left", wraplength=800,
+                                 text_color=TITLE, font=ctk.CTkFont(size=12), cursor="hand2")
+            label.pack(fill="x", padx=8, pady=3)
+            for w in (row, label):
+                w.bind("<Button-1>", lambda _e, text=s: self.pick(text))
+
+    def pick(self, text):
+        self.result = text
+        self.destroy()
 
 
 class VariantDialog(ctk.CTkToplevel):
