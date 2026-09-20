@@ -22,7 +22,9 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 
+import websocket
 from PIL import Image
 
 MAX_REFS = 5
@@ -125,21 +127,59 @@ class ManagedComfy:
         })
         return g
 
-    def draw(self, prompt, refs, seed, out_path):
-        """One image, saved greyscale at out_path. Returns seconds taken."""
+    def draw(self, prompt, refs, seed, out_path, on_progress=None):
+        """One image, saved greyscale at out_path. Returns seconds taken.
+
+        Progress comes from ComfyUI's own WebSocket: `on_progress(value, max)`
+        for the sampler's steps, and (0, 0) when a node starts, since loading
+        the text encoder is silent and is most of a first take's time."""
         t0 = time.time()
         prefix = "scene-illustrator/tmp"
-        body = json.dumps({"prompt": self.graph(prompt, refs, seed, prefix)}).encode()
+        client_id = uuid.uuid4().hex
+        ws = None
+        if on_progress:
+            try:
+                ws = websocket.WebSocket()
+                ws.connect(self.url.replace("http://", "ws://") + f"/ws?clientId={client_id}", timeout=10)
+                ws.settimeout(1.0)
+            except (OSError, websocket.WebSocketException):
+                ws = None
+        body = json.dumps({"prompt": self.graph(prompt, refs, seed, prefix),
+                           "client_id": client_id}).encode()
         req = urllib.request.Request(self.url + "/prompt", body, {"Content-Type": "application/json"})
         try:
             pid = json.load(urllib.request.urlopen(req))["prompt_id"]
         except urllib.error.HTTPError as e:
+            if ws:
+                ws.close()
             raise RuntimeError("ComfyUI refused the job: " + e.read().decode()[:400])
+        node = None
         while True:
+            if ws:
+                try:
+                    message = ws.recv()
+                    if isinstance(message, str):
+                        data = json.loads(message)
+                        payload = data.get("data") or {}
+                        if payload.get("prompt_id") not in (None, pid):
+                            continue
+                        if data.get("type") == "progress":
+                            on_progress(payload.get("value", 0), payload.get("max", 1))
+                        elif data.get("type") == "executing" and payload.get("node") not in (None, node):
+                            node = payload["node"]     # a new node: still working, no percentage
+                            on_progress(0, 0)
+                except websocket.WebSocketTimeoutException:
+                    pass
+                except (OSError, websocket.WebSocketException, ValueError):
+                    ws.close()
+                    ws = None
             history = json.load(urllib.request.urlopen(f"{self.url}/history/{pid}"))
             if pid in history:
                 break
-            time.sleep(1)
+            if not ws:
+                time.sleep(1)
+        if ws:
+            ws.close()
         record = history[pid]
         status = record["status"].get("status_str")
         if status != "success":

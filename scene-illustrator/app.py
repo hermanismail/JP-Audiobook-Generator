@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -49,6 +50,8 @@ LOG_FG = "#C9C6D6"
 
 PIECE_RE = re.compile(r"^PIECE (\d+)/(\d+) (\S+) (ok|failed)")
 SAMPLE_RE = re.compile(r"^SAMPLE (\d+)/(\d+) (.+?) ([\d.]+)s$")
+TAKE_RE = re.compile(r"^TAKE (\d+)/(\d+) start$")
+PROGRESS_RE = re.compile(r"^PROGRESS (\d+) (\d+)$")
 THUMB = (168, 246)
 
 
@@ -99,6 +102,11 @@ class App(ctk.CTk):
         self._thumbs = []               # CTkImage refs, or Tk drops them
         self._drawn = []                # SAMPLE paths of the running job
         self._draw_target = None        # (kind, entry id, variant) that job is for
+        self._take = None               # (i, n) of the take being drawn
+        self._take_started = 0.0
+        self._step = (0, 0)             # sampler step from ComfyUI's WebSocket
+        self._last_secs = 0.0
+        self._take_done = False
         self.kind = "characters"
         self.current = None            # selected entry id
         self.selected = set()          # ids ticked for merge / delete
@@ -280,6 +288,14 @@ class App(ctk.CTk):
         button(row, "Rebuild prompt", self.rebuild_prompt, width=130).pack(side="left", padx=10)
         self.ref_info = ctk.CTkLabel(row, text="", text_color=SUBTITLE, font=ctk.CTkFont(size=12))
         self.ref_info.pack(side="left", padx=6)
+        status = ctk.CTkFrame(right, fg_color="transparent")
+        status.pack(fill="x", padx=14, pady=(0, 6))
+        self.draw_status = ctk.CTkLabel(status, text="", anchor="w", text_color=ENTRY_TEXT,
+                                        font=ctk.CTkFont(size=12))
+        self.draw_status.pack(fill="x")
+        self.draw_bar = ctk.CTkProgressBar(status, progress_color=ACCENT, height=8)
+        self.draw_bar.set(0)
+        self.draw_bar.pack(fill="x", pady=(4, 0))
         self.gallery = ctk.CTkScrollableFrame(right, fg_color=CARD, orientation="horizontal", height=290)
         self.gallery.pack(fill="both", expand=True, padx=8, pady=(0, 10))
 
@@ -369,14 +385,33 @@ class App(ctk.CTk):
                     self.log_line(value)
                     m = PIECE_RE.match(value)
                     s = SAMPLE_RE.match(value)
+                    t = TAKE_RE.match(value)
+                    p = PROGRESS_RE.match(value)
                     if m:
                         self.progress.set(int(m.group(1)) / int(m.group(2)))
                         self.status_var.set(f"reading {m.group(3)}")
+                    elif t:
+                        self._take = (int(t.group(1)), int(t.group(2)))
+                        self._take_started = time.time()
+                        self._step = (0, 0)
+                        self._take_done = False
+                        self.update_draw_status()
+                    elif p:
+                        self._step = (int(p.group(1)), int(p.group(2)))
+                        self.update_draw_status()
                     elif s:
                         self.progress.set(int(s.group(1)) / int(s.group(2)))
                         self.status_var.set(f"drawing {s.group(1)}/{s.group(2)}")
                         self._drawn.append(s.group(3))
-                    elif value.startswith(("SERVER", "SUGGEST")):
+                        self._last_secs = float(s.group(4))
+                        self._step = (0, 0)
+                        self._take_done = True
+                        self.update_draw_status(done=True)
+                    elif value.startswith("SERVER"):
+                        self.status_var.set(value.split(" ", 1)[1])
+                        if self._take:
+                            self.draw_status.configure(text=value.split(" ", 1)[1])
+                    elif value.startswith("SUGGEST"):
                         self.status_var.set(value.split(" ", 1)[1])
                 else:
                     code, on_done = value
@@ -388,6 +423,8 @@ class App(ctk.CTk):
                     on_done(code)
         except queue.Empty:
             pass
+        if self._take and not self._take_done:
+            self.update_draw_status()   # keep the elapsed seconds moving
         self.after(120, self._drain)
 
     def stop(self):
@@ -708,7 +745,9 @@ class App(ctk.CTk):
         with Image.open(path) as im:
             image = ctk.CTkImage(light_image=im.copy(), size=THUMB)
         self._thumbs.append(image)
-        ctk.CTkLabel(card, image=image, text="").pack(padx=6, pady=(6, 2))
+        thumb = ctk.CTkLabel(card, image=image, text="", cursor="hand2")
+        thumb.pack(padx=6, pady=(6, 2))
+        thumb.bind("<Button-1>", lambda _e, p=path: ImageViewer(self, p))
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=6, pady=(0, 6))
         if variant["chosen"] == path:
@@ -796,6 +835,32 @@ class App(ctk.CTk):
                          "--id", e["id"], "--variant", str(self.ref_variant), "--count", str(count)],
                         self._draw_done)
 
+    def update_draw_status(self, done=False):
+        """Takes done + the sampler's own step, so the bar moves inside a take.
+        Loading the text encoder reports nothing, so that stretch shows as
+        'preparing' with the elapsed seconds instead of a fake percentage."""
+        if not self._take:
+            self.draw_status.configure(text="")
+            self.draw_bar.set(0)
+            return
+        i, n = self._take
+        step, steps = self._step
+        elapsed = time.time() - self._take_started
+        share = (step / steps) if steps else 0.0
+        fraction = ((i - 1) + (1.0 if done else share)) / n
+        self.draw_bar.set(fraction)
+        if done:
+            text = f"take {i}/{n} done in {self._last_secs:.0f}s"
+            if i < n:
+                text += "   ·   next take starting"
+        elif steps:
+            text = f"take {i}/{n}   ·   step {step}/{steps}   ·   {elapsed:.0f}s"
+        else:
+            text = f"take {i}/{n}   ·   preparing   ·   {elapsed:.0f}s"
+            if self._last_secs:
+                text += f"   (last take {self._last_secs:.0f}s)"
+        self.draw_status.configure(text=text, text_color=DONE if done and i == n else ENTRY_TEXT)
+
     def _draw_done(self, _code):
         if self._drawn and self._draw_target:
             kind, entry_id, index = self._draw_target
@@ -805,6 +870,7 @@ class App(ctk.CTk):
                 il.save_refs(self.root(), self.refs)
         self._drawn = []
         self._draw_target = None
+        self._take = None
         self.render_ref_list()
         self.render_ref_entry()
 
@@ -841,6 +907,74 @@ class MergeDialog(ctk.CTkToplevel):
     def ok(self):
         self.result = self.var.get().strip()
         self.destroy()
+
+
+class ImageViewer(ctk.CTkToplevel):
+    """One take, big: Fit / 1:1 / zoom buttons, the mouse wheel to zoom and
+    drag to pan, so a face or a hand can actually be judged."""
+
+    ZOOMS = [0.25, 0.33, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0]
+
+    def __init__(self, parent, path):
+        super().__init__(parent)
+        self.title(os.path.basename(path))
+        self.geometry("980x900")
+        self.configure(fg_color=BG)
+        self.image = Image.open(path)
+        self.zoom = None                # None = fit to the window
+        self._photo = None
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=10, pady=(10, 4))
+        button(bar, "−", lambda: self.step(-1), width=44).pack(side="left")
+        button(bar, "+", lambda: self.step(1), width=44).pack(side="left", padx=6)
+        button(bar, "Fit", self.fit, width=64).pack(side="left")
+        button(bar, "1:1", lambda: self.set_zoom(1.0), width=64).pack(side="left", padx=6)
+        self.zoom_label = ctk.CTkLabel(bar, text="", text_color=SUBTITLE, font=ctk.CTkFont(size=12))
+        self.zoom_label.pack(side="left", padx=10)
+        ctk.CTkLabel(bar, text=f"{self.image.width}×{self.image.height}", text_color=SUBTITLE,
+                     font=ctk.CTkFont(size=12)).pack(side="right")
+
+        self.canvas = ctk.CTkCanvas(self, bg=CARD, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.canvas.bind("<Configure>", lambda _e: self.render())
+        self.canvas.bind("<ButtonPress-1>", lambda e: self.canvas.scan_mark(e.x, e.y))
+        self.canvas.bind("<B1-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
+        self.canvas.bind("<MouseWheel>", lambda e: self.step(1 if e.delta > 0 else -1))
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.after(60, self.render)
+
+    def current_zoom(self):
+        if self.zoom:
+            return self.zoom
+        cw = max(self.canvas.winfo_width(), 1)
+        ch = max(self.canvas.winfo_height(), 1)
+        return min(cw / self.image.width, ch / self.image.height)
+
+    def step(self, direction):
+        z = self.current_zoom()
+        options = sorted(self.ZOOMS + [z])
+        i = options.index(z)
+        self.set_zoom(options[max(0, min(len(options) - 1, i + direction))])
+
+    def set_zoom(self, value):
+        self.zoom = value
+        self.render()
+
+    def fit(self):
+        self.zoom = None
+        self.render()
+
+    def render(self):
+        z = self.current_zoom()
+        w, h = max(int(self.image.width * z), 1), max(int(self.image.height * z), 1)
+        self._photo = ctk.CTkImage(light_image=self.image.copy(), size=(w, h))
+        self.canvas.delete("all")
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        self._label = ctk.CTkLabel(self.canvas, image=self._photo, text="")
+        self.canvas.create_window(max(w, cw) // 2, max(h, ch) // 2, window=self._label)
+        self.canvas.configure(scrollregion=(0, 0, max(w, cw), max(h, ch)))
+        self.zoom_label.configure(text=f"{z * 100:.0f}%" + ("  (fit)" if self.zoom is None else ""))
 
 
 class VariantDialog(ctk.CTkToplevel):

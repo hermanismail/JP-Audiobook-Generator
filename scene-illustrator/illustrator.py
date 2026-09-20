@@ -596,7 +596,9 @@ def run_draw(settings, book, kind, entry_id, variant_index, count, log):
             log("SERVER no style image set - drawing without one")
         for i in range(count):
             out = next_sample_path(root, kind, entry_id, variant_index)
-            secs = engine.draw(variant["prompt"], ref_names, random.randrange(2 ** 48), out)
+            log(f"TAKE {i + 1}/{count} start")
+            secs = engine.draw(variant["prompt"], ref_names, random.randrange(2 ** 48), out,
+                               on_progress=lambda v, m: log(f"PROGRESS {v} {m}"))
             log(f"SAMPLE {i + 1}/{count} {out} {secs}s")
     log("DONE drew " + str(count))
 
