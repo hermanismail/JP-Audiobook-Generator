@@ -115,6 +115,68 @@ time.
    degrades. Unmeasured.
 3. **Per-character mixing** is impossible with these models (M7). If a take
    has two different good halves, the only route is the edit chain.
+   **Qwen-Image-2.1 changes this - see M9.**
+
+## M9 - Qwen-Image-2.1 against v1's reference sheets (2026-09-21)
+
+Released 2026-09-20, native in ComfyUI from that day (`F:\ComfyUI` pulled
+a8686f2 -> c194dd0; the old commit is in
+`F:\tmp\scene-illustrator\comfy_pre_qwen21.txt`). Run as
+`qwen_image_2.1_Q4_K_M.gguf` (3.90 GB, ComfyUI-GGUF) + `qwen3vl_8b_w4a8`
+(5.88 GB, CLIPLoader type `qwen_image`) + `qwen_image_2.1_vae_bf16`; node
+`TextEncodeQwenImage21`, references in API format as `images.image_N`,
+KSampler 25 steps, cfg 1, euler/simple. One model draws AND edits. What sets
+it apart: **the prompt names each reference by slot, `<image1>`, `<image2>`**
+- the mechanism M7 was missing. Script and takes: `F:\tmp\scene-illustrator\qwen21\`.
+
+Chapter_001 scene #2 of v1 (the one abandoned), Takahashi = c003 sheet,
+Mari = c002 sheet, place = p001; 3 takes each, seeds 1-3, 832x1216:
+
+| test | what | per take | peak VRAM | result |
+|---|---|---|---|---|
+| A | 2 character sheets, minimal background | 218-264 s | 7.3-7.8 GB | **3/3 both characters faithful** - face, scar, coat, tote bag, boots; cap, glasses, "H" jacket, bag, sneakers - and the action (toast, salad, book) right |
+| B | A + the place sheet | 305-355 s | 7.6 GB | characters still hold, but **the place is traced, not reused** - same camera, same "DINER" sign, busy; take 1 kept the reference's own table, so the food floats between two |
+| C | edit v2 `edit_003`: add the case from Takahashi's sheet | 218-253 s | 7.2 GB | **3/3 case added, rest of the drawing unchanged** - four Kontext rounds failed this; take 2 matched the sheet's tube case and angle |
+
+Read: character references work and the edit route can pull an object from
+a sheet; place references do not - a place sheet dictates the whole picture.
+
+## M10 - names instead of descriptions, and the sheet cap (2026-09-21)
+
+User decision after M9: Qwen for everything, character sheets attached. The
+tool writes "`<Name>` is the person in `<imageN>`" and then uses the names.
+2 takes each (`F:\tmp\scene-illustrator\qwen21\names.py`):
+
+| test | sheets | per take | peak VRAM | result |
+|---|---|---|---|---|
+| N | 2, names only, no appearance words | 217-260 s | 7.4-7.6 GB | **2/2 faithful**, actions on the right person |
+| T3 | 3 (Kaoru, Mari, Korogi) | 305-345 s | 7.7-7.8 GB | faces 2/2 right, **actions swapped 2/2** (Korogi sits, Mari holds the tea) |
+| T3b | T3 + a short tag per name ("Mari, in the baseball cap") | 305-354 s | 7.5 GB | 1/2 right; the other swapped AND leaked clothes (Mari in Korogi's jeans and watch) |
+| T4 | 4 (+ Takahashi) | 398-443 s | 7.84 GB | take 1 faces right but swapped and a line-up; **take 2 lost Takahashi** |
+
+Read: names alone hold faces up to 3 people; who-does-what holds at 2 and
+is a coin toss at 3, so a 3-person draw is one to expect to redraw. 4 breaks
+identity and sits at the VRAM ceiling - cap 3 (user decision) confirmed.
+
+The v2 roster is NOT reliable enough to tick sheets on its own: in
+after-dark it has chapter 1's Takahashi and Mari as 男 / 女の子 (not yet named
+in the text), merged 男 with 白川, and filed マリ under 浅井エリ.
+
+## The Qwen build - decisions (user, 2026-09-21)
+
+| # | decision |
+|---|---|
+| q1 | Qwen-Image-2.1 for everything - draws, edits, sheets. klein and Kontext leave the tool (their model files stay in ComfyUI). |
+| q2 | Character sheets come back; **place sheets do not** (M9 test B). Minimal background stays. |
+| q3 | v1's chosen sheets are **imported** (copied into `<book>\cast\`); new ones are drawn in the Cast tab. |
+| q4 | The style image is attached **only when a chapter has no sheet**. |
+| q5 | The anchor (another chapter's image) is **dropped** - the sheets carry characters between chapters. |
+| q6 | **At most 3 sheets** in a draw (M10); 2 in an edit, whose base image takes a slot. |
+| q7 | **2 samples** by default (~4 min a take). |
+| q8 | **Write prompt** button: Qwen3.5 rewrites the reading around the ticked names (the reading itself still describes looks and never names). |
+| q9 | The cast is a **user-kept list** with aliases; a chapter's ticks start as a guess from the aliases, and the user's ticks win. |
+
+Built on branch `scene-illustrator-qwen`.
 
 ---
 

@@ -1,15 +1,20 @@
 """
 app.py
 ------
-The Scene Illustrator window, v2 (2026-09-20). One image per chapter.
+The Scene Illustrator window. One image per chapter, drawn and edited by
+Qwen-Image-2.1 with character sheets (2026-09-21).
 
     1 Read       the first 25% of every chapter -> a drawable moment, an image
                  prompt and a character roster (local LLM)
-    2 Chapters   per chapter: the prompt -> samples (klein 9B) -> choose one
-                 -> promote it, or fine-tune it by instruction (Kontext),
-                 round after round, then export chapter_<N>_img_1.png
+    2 Cast       the people who get a character sheet: imported from v1 or
+                 drawn here, with the roster names that mean them
+    3 Chapters   per chapter: tick the cast (up to 3) -> Write prompt ->
+                 samples -> choose one -> promote it, or fine-tune it by
+                 instruction, round after round, then export
+                 chapter_<N>_img_1.png
 
-Everything is saved as you go, in <work_root>/<book>/chapters.json.
+Everything is saved as you go, in <work_root>/<book>/chapters.json and
+cast.json.
 
 Run it with:   uv run python app.py
 """
@@ -90,18 +95,24 @@ def bring_to_front(window):
 
 
 class Gallery:
-    """The takes of one thing (a chapter's samples, or one edit round):
-    thumbnails, Use this, Delete, tick boxes with Select all / none and a bulk
-    delete. `container` is any dict with a list under `key` and "chosen"."""
+    """The takes of one thing (a chapter's samples, one edit round, a cast
+    member's sheet takes): thumbnails, Use this, Delete, tick boxes with
+    Select all / none and a bulk delete. `container` is any dict with a list
+    under `key`; `working`, `choose` and `forget` say which take is the chosen
+    one, choose one, and drop a deleted one from wherever it was chosen."""
 
     def __init__(self, app, parent, save, refresh, key="samples", height=286, choose_text="Use this",
-                 thumb=THUMB):
+                 thumb=THUMB, working=None, choose=None, forget=None, chosen_text="working image"):
         self.app = app
         self.save = save
         self.refresh = refresh
         self.key = key
         self.choose_text = choose_text
+        self.chosen_text = chosen_text
         self.thumb = thumb
+        self.working = working or app.working_image
+        self.choose = choose or app.set_working
+        self.forget = forget or app.forget_image
         self.container = None
         self.picked = set()
         self._thumbs = []
@@ -138,7 +149,7 @@ class Gallery:
     def _card(self, path):
         if not os.path.isfile(path):
             return
-        working = self.app.working_image() == path
+        working = self.working() == path
         card = ctk.CTkFrame(self.frame, fg_color=PASTEL_VIOLET if working else CARD, corner_radius=8,
                             border_width=2 if working else 1, border_color=ACCENT if working else BORDER)
         card.pack(side="left", padx=6, pady=6)
@@ -158,10 +169,10 @@ class Gallery:
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=6, pady=(0, 6))
         if working:
-            ctk.CTkLabel(row, text="working image", text_color=DONE,
+            ctk.CTkLabel(row, text=self.chosen_text, text_color=DONE,
                          font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=4)
         else:
-            button(row, self.choose_text, lambda: self.app.set_working(path), width=84,
+            button(row, self.choose_text, lambda: self.choose(path), width=84,
                    height=26).pack(side="left")
         button(row, "Delete", lambda: self.delete(path), width=62, height=26, danger=True).pack(side="right")
 
@@ -185,7 +196,7 @@ class Gallery:
 
     def delete(self, path, refresh=True):
         self.container[self.key] = [p for p in self.paths() if p != path]
-        self.app.forget_image(path)
+        self.forget(path)
         self.picked.discard(path)
         self.save()
         try:
@@ -199,7 +210,7 @@ class Gallery:
         if not self.container or not self.picked:
             return
         paths = [p for p in self.paths() if p in self.picked]
-        warn = "\n\nOne of them is the working image." if self.app.working_image() in paths else ""
+        warn = f"\n\nOne of them is the {self.chosen_text}." if self.working() in paths else ""
         if not messagebox.askyesno("Delete takes", f"Delete {len(paths)} take(s)?{warn}"):
             return
         for path in paths:
@@ -299,11 +310,17 @@ class App(ctk.CTk):
         self.settings = il.load_settings()
         self.read = None
         self.chapters = None
+        self.cast = None
         self.chapter = ""              # selected chapter base
+        self.member = ""               # selected cast member id
+        self.edit_sheets = []          # member ids attached to the next chapter edit
         self._proc = None
         self._queue = queue.Queue()
         self._drawn = []               # SAMPLE paths of the running job
-        self._target = None            # ("samples"|"edit", chapter, chain index)
+        self._written = ""             # PROMPT path of a running write
+        # ("samples", chapter) | ("edit", chapter, chain index) | ("write", chapter)
+        # | ("sheet", member)
+        self._target = None
         self._take = None
         self._take_started = 0.0
         self._step = (0, 0)
@@ -315,11 +332,15 @@ class App(ctk.CTk):
         self.text_var = ctk.StringVar(value=self.settings["last_text_folder"])
         self.book_var = ctk.StringVar(value=self.settings["last_book"])
         self.status_var = ctk.StringVar(value="")
-        self.samples_var = ctk.StringVar(value=str(self.settings["samples"]))
-        self.takes_var = ctk.StringVar(value=str(self.settings["edit_takes"]))
-        self.anchor_var = ctk.StringVar(value="draw fresh")
+        self.samples_var = ctk.StringVar(value=str(self.settings["draw_samples"]))
+        self.takes_var = ctk.StringVar(value=str(self.settings["edit_count"]))
         self.change_var = ctk.StringVar()
         self.keep_var = ctk.StringVar()
+        self.m_name = ctk.StringVar()
+        self.m_aliases = ctk.StringVar()
+        self.m_tag = ctk.StringVar()
+        self.m_count = ctk.StringVar(value=str(self.settings["draw_samples"]))
+        self.m_change = ctk.StringVar()
         self.output_var = ctk.StringVar(value=self.settings.get("last_output_folder", ""))
 
         self._build()
@@ -340,7 +361,9 @@ class App(ctk.CTk):
                                    segmented_button_selected_hover_color=ACCENT_HOVER)
         self.tabs.pack(fill="both", expand=True, padx=14, pady=(6, 14))
         self._build_read(self.tabs.add("1  Read"))
-        self._build_chapters(self.tabs.add("2  Chapters"))
+        self._build_cast(self.tabs.add("2  Cast"))
+        self._build_chapters(self.tabs.add("3  Chapters"))
+        self.draw_status, self.draw_bar = self.chapter_status, self.chapter_bar
 
     def _card(self, parent):
         card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=11, border_width=1, border_color=BORDER)
@@ -385,6 +408,84 @@ class App(ctk.CTk):
         self.book_var.trace_add("write", lambda *_: self._update_work_label())
         self._update_work_label()
 
+    def _build_cast(self, tab):
+        body = ctk.CTkFrame(tab, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+        left = ctk.CTkFrame(body, fg_color="transparent", width=260)
+        left.pack(side="left", fill="y")
+        tools = ctk.CTkFrame(left, fg_color="transparent")
+        tools.pack(fill="x", pady=(0, 6))
+        self.add_member_btn = button(tools, "Add character", self.add_member, width=120)
+        self.add_member_btn.pack(side="left")
+        self.import_btn = button(tools, "Import v1 sheets", self.import_v1, width=130)
+        self.import_btn.pack(side="left", padx=6)
+        self.member_list = ctk.CTkScrollableFrame(left, width=240, fg_color=CARD, corner_radius=11,
+                                                  border_width=1, border_color=BORDER)
+        self.member_list.pack(fill="both", expand=True)
+
+        right = ctk.CTkFrame(body, fg_color=CARD, corner_radius=11, border_width=1, border_color=BORDER)
+        right.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        self.member_pane = right
+        head = ctk.CTkFrame(right, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(10, 4))
+        self.member_title = ctk.CTkLabel(head, text="Choose or add a character", anchor="w",
+                                         text_color=TITLE, font=ctk.CTkFont(size=15, weight="bold"))
+        self.member_title.pack(side="left")
+        self.delete_member_btn = button(head, "Remove character", self.delete_member, width=140,
+                                        danger=True)
+        self.delete_member_btn.pack(side="right")
+
+        def field(label, var, placeholder):
+            row = ctk.CTkFrame(right, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=2)
+            ctk.CTkLabel(row, text=label, width=90, anchor="w", text_color=TITLE).pack(side="left")
+            widget = entry(row, var, placeholder=placeholder)
+            widget.pack(side="left", fill="x", expand=True)
+            widget.bind("<FocusOut>", lambda _e: self.save_member())
+            return row
+        field("name", self.m_name, "the name prompts use, e.g. Mari")
+        field("aliases", self.m_aliases, "roster names that mean this person, comma separated")
+        self.roster_hint = ctk.CTkLabel(right, text="", anchor="w", justify="left", wraplength=880,
+                                        text_color=SUBTITLE, font=ctk.CTkFont(size=11))
+        self.roster_hint.pack(fill="x", padx=(104, 12))
+        field("tag", self.m_tag, "optional: what sets them apart at a glance, e.g. in the baseball cap")
+        row = ctk.CTkFrame(right, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=2)
+        ctk.CTkLabel(row, text="description", width=90, anchor="nw", text_color=TITLE).pack(
+            side="left", anchor="n")
+        self.m_desc = ctk.CTkTextbox(row, height=60, fg_color=CARD, border_width=1,
+                                     border_color=ENTRY_BORDER, text_color=ENTRY_TEXT,
+                                     font=ctk.CTkFont(size=12))
+        self.m_desc.pack(side="left", fill="x", expand=True)
+        self.m_desc.bind("<FocusOut>", lambda _e: self.save_member())
+
+        row = ctk.CTkFrame(right, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(6, 2))
+        self.sheet_btn = button(row, "Draw sheet", self.start_sheet, width=120, primary=True)
+        self.sheet_btn.pack(side="left")
+        entry(row, self.m_count, width=44).pack(side="left", padx=(8, 4))
+        ctk.CTkLabel(row, text="takes, from the description", text_color=SUBTITLE).pack(side="left")
+        row = ctk.CTkFrame(right, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=2)
+        ctk.CTkLabel(row, text="change", width=90, anchor="w", text_color=TITLE).pack(side="left")
+        change = entry(row, self.m_change, placeholder="edit the sheet, e.g. he carries a tote bag")
+        change.pack(side="left", fill="x", expand=True)
+        change.bind("<Return>", lambda _e: self.start_sheet_edit())
+        self.sheet_edit_btn = button(row, "Edit sheet", self.start_sheet_edit, width=110, primary=True)
+        self.sheet_edit_btn.pack(side="left", padx=(8, 0))
+        status = ctk.CTkFrame(right, fg_color="transparent")
+        status.pack(fill="x", padx=12, pady=(2, 4))
+        self.cast_status = ctk.CTkLabel(status, text="", anchor="w", text_color=ENTRY_TEXT,
+                                        font=ctk.CTkFont(size=12))
+        self.cast_status.pack(fill="x")
+        self.cast_bar = ctk.CTkProgressBar(status, progress_color=ACCENT, height=8)
+        self.cast_bar.set(0)
+        self.cast_bar.pack(fill="x", pady=(4, 0))
+        self.sheet_gallery = Gallery(self, right, save=self.save_cast_file, refresh=self.render_member,
+                                     key="samples", choose_text="Use as sheet", chosen_text="sheet",
+                                     working=self.member_sheet, choose=self.set_sheet,
+                                     forget=self.forget_sheet)
+
     def _build_chapters(self, tab):
         body = ctk.CTkFrame(tab, fg_color="transparent")
         body.pack(fill="both", expand=True)
@@ -408,7 +509,11 @@ class App(ctk.CTk):
         self.prompt_box = ctk.CTkTextbox(right, height=84, fg_color=CARD, border_width=1,
                                          border_color=ENTRY_BORDER, text_color=ENTRY_TEXT,
                                          font=ctk.CTkFont(size=12))
-        self.prompt_box.pack(fill="x", padx=12, pady=(6, 4))
+        # the cast row sits ABOVE the prompt: who is in the picture decides what
+        # Write prompt writes
+        self.cast_row = ctk.CTkFrame(right, fg_color="transparent")
+        self.cast_row.pack(fill="x", padx=12, pady=(6, 0))
+        self.prompt_box.pack(fill="x", padx=12, pady=(4, 4))
         self.prompt_box.bind("<FocusOut>", lambda _e: self.save_prompt())
         row = ctk.CTkFrame(right, fg_color="transparent")
         row.pack(fill="x", padx=12, pady=(0, 4))
@@ -416,21 +521,17 @@ class App(ctk.CTk):
         self.draw_btn.pack(side="left")
         entry(row, self.samples_var, width=44).pack(side="left", padx=(8, 4))
         ctk.CTkLabel(row, text="samples", text_color=SUBTITLE).pack(side="left")
-        ctk.CTkLabel(row, text="anchor:", text_color=SUBTITLE).pack(side="left", padx=(14, 4))
-        self.anchor_menu = ctk.CTkOptionMenu(row, variable=self.anchor_var, values=["draw fresh"],
-                                             width=180, fg_color=CARD, button_color=NEUTRAL_BORDER,
-                                             button_hover_color=BG, text_color=ENTRY_TEXT,
-                                             command=lambda _v: self.save_anchor())
-        self.anchor_menu.pack(side="left")
         button(row, "Reset prompt", self.reset_prompt, width=110).pack(side="right")
+        self.write_btn = button(row, "Write prompt", self.start_write, width=120)
+        self.write_btn.pack(side="right", padx=6)
         status = ctk.CTkFrame(right, fg_color="transparent")
         status.pack(fill="x", padx=12, pady=(0, 4))
-        self.draw_status = ctk.CTkLabel(status, text="", anchor="w", text_color=ENTRY_TEXT,
-                                        font=ctk.CTkFont(size=12))
-        self.draw_status.pack(fill="x")
-        self.draw_bar = ctk.CTkProgressBar(status, progress_color=ACCENT, height=8)
-        self.draw_bar.set(0)
-        self.draw_bar.pack(fill="x", pady=(4, 0))
+        self.chapter_status = ctk.CTkLabel(status, text="", anchor="w", text_color=ENTRY_TEXT,
+                                           font=ctk.CTkFont(size=12))
+        self.chapter_status.pack(fill="x")
+        self.chapter_bar = ctk.CTkProgressBar(status, progress_color=ACCENT, height=8)
+        self.chapter_bar.set(0)
+        self.chapter_bar.pack(fill="x", pady=(4, 0))
 
         self.stage = ctk.CTkSegmentedButton(right, values=["Samples", "Fine-tune"],
                                             command=lambda _v: self.render_chapter(),
@@ -470,10 +571,13 @@ class App(ctk.CTk):
         self.edit_btn.pack(side="left", padx=(8, 4))
         entry(form2, self.takes_var, width=44).pack(side="left")
         ctk.CTkLabel(form2, text="takes", text_color=SUBTITLE).pack(side="left", padx=(4, 0))
+        # sheets to pull something from, e.g. "the case from <image2>" (M9 test C)
+        self.edit_sheet_row = ctk.CTkFrame(self.tune_pane, fg_color="transparent")
+        self.edit_sheet_row.pack(fill="x", padx=10, pady=(0, 2))
         # smaller cards here: this pane also carries the working image, the round
-        # list and the two instruction fields
+        # list, the two instruction fields and the sheet ticks
         self.edit_gallery = Gallery(self, self.tune_pane, save=self.save, refresh=self.render_chapter,
-                                    key="takes", height=250, thumb=(116, 169))
+                                    key="takes", height=200, thumb=(74, 108))
 
         # side="bottom": the footer stays under the galleries whatever order the
         # panes are packed in later
@@ -521,9 +625,13 @@ class App(ctk.CTk):
             return
         self.read = il.load_read(self.root())
         self.chapters = il.load_chapters(self.root())
+        self.cast = il.load_cast(self.root())
         self.chapter = ""
+        self.member = ""
         self.refresh_read_info()
         self.render_roster()
+        self.render_member_list()
+        self.render_member()
         self.render_chapter_list()
         self.render_chapter()
 
@@ -559,6 +667,214 @@ class App(ctk.CTk):
             ctk.CTkLabel(card, text=rec["appearance"], anchor="w", justify="left", wraplength=330,
                          text_color=SUBTITLE, font=ctk.CTkFont(size=11)).pack(fill="x", padx=8, pady=(0, 5))
 
+    # --------------------------------------------------------------- cast
+    def save_cast_file(self):
+        il.save_cast(self.root(), self.cast)
+
+    def member_rec(self):
+        if not self.cast or not self.member:
+            return None
+        return self.cast["members"].get(self.member)
+
+    def member_sheet(self):
+        member = self.member_rec()
+        return member["sheet"] if member else ""
+
+    def set_sheet(self, path):
+        member = self.member_rec()
+        if member:
+            member["sheet"] = path
+            self.save_cast_file()
+            self.render_member_list()
+            self.render_member()
+            self.render_chapter()
+
+    def forget_sheet(self, path):
+        member = self.member_rec()
+        if member and member["sheet"] == path:
+            member["sheet"] = ""
+
+    def render_member_list(self):
+        for w in self.member_list.winfo_children():
+            w.destroy()
+        if not self.cast:
+            return
+        if not self.cast["members"]:
+            ctk.CTkLabel(self.member_list, text="No characters yet.\nImport v1 sheets, or add one.",
+                         justify="left", text_color=SUBTITLE).pack(padx=8, pady=8, anchor="w")
+        for member_id, member in self.cast["members"].items():
+            row = ctk.CTkFrame(self.member_list, fg_color=PASTEL_VIOLET if member_id == self.member
+                               else CARD, corner_radius=8, border_width=1, border_color=BORDER)
+            row.pack(fill="x", pady=2, padx=2)
+            aliases = ", ".join(member["aliases"]) or "no aliases"
+            state = "sheet ✓" if member["sheet"] else "no sheet yet"
+            label = ctk.CTkLabel(row, text=f"{member['name']}   ·   {state}\n{aliases}", anchor="w",
+                                 justify="left", font=ctk.CTkFont(size=12),
+                                 text_color=ENTRY_TEXT if member["sheet"] else WARN)
+            label.pack(side="left", fill="x", expand=True, padx=8, pady=5)
+            for w in (row, label):
+                w.bind("<Button-1>", lambda _e, i=member_id: self.select_member(i))
+
+    def select_member(self, member_id):
+        self.save_member()
+        self.member = member_id
+        self.sheet_gallery.picked = set()
+        self.render_member_list()
+        self.render_member()
+
+    def render_member(self):
+        member = self.member_rec()
+        self.m_desc.delete("1.0", "end")
+        if not member:
+            self.member_title.configure(text="Choose or add a character")
+            for var in (self.m_name, self.m_aliases, self.m_tag):
+                var.set("")
+            self.roster_hint.configure(text="")
+            self.sheet_gallery.show(None)
+            return
+        self.member_title.configure(text=member["name"] or "(no name)")
+        self.m_name.set(member["name"])
+        self.m_aliases.set(", ".join(member["aliases"]))
+        self.m_tag.set(member["tag"])
+        self.m_desc.insert("1.0", member["description"])
+        # the roster names no member claims yet - what aliases are for
+        claimed = {a for m in self.cast["members"].values() for a in m["aliases"] + [m["name"]]}
+        free = [n for n in (self.read or {}).get("roster", {}) if n not in claimed]
+        self.roster_hint.configure(text=("roster names not claimed yet: " + ", ".join(free))
+                                   if free else "every roster name is claimed")
+        self.sheet_gallery.show(member)
+
+    def save_member(self):
+        member = self.member_rec()
+        if not member:
+            return
+        name = self.m_name.get().strip()
+        aliases = [a.strip() for a in re.split(r"[,、，]", self.m_aliases.get()) if a.strip()]
+        new = {"name": name or member["name"], "aliases": aliases, "tag": self.m_tag.get().strip(),
+               "description": self.m_desc.get("1.0", "end").strip()}
+        if any(member[k] != v for k, v in new.items()):
+            member.update(new)
+            self.save_cast_file()
+            self.member_title.configure(text=member["name"])
+            self.render_member_list()
+            self.render_chapter()
+
+    def add_member(self):
+        if not self.cast:
+            messagebox.showinfo("Cast", "Open a book first (1 Read).")
+            return
+        self.save_member()
+        member_id = il.new_member_id(self.cast)
+        self.cast["members"][member_id] = il.new_member("new character")
+        self.save_cast_file()
+        self.select_member(member_id)
+
+    def delete_member(self):
+        member = self.member_rec()
+        if not member:
+            return
+        if not messagebox.askyesno("Remove character",
+                                   f"Remove {member['name']} and delete every sheet take of theirs?"
+                                   "\n\nThis cannot be undone."):
+            return
+        import shutil
+        folder = il.member_dir(self.root(), self.member)
+        # only ever the member's own folder under this book's cast folder
+        if os.path.normpath(os.path.dirname(folder)) == os.path.normpath(
+                os.path.join(self.root(), "cast")) and os.path.isdir(folder):
+            shutil.rmtree(folder, ignore_errors=True)
+        del self.cast["members"][self.member]
+        for record in self.chapters["chapters"].values():
+            if record.get("cast"):
+                record["cast"] = [i for i in record["cast"] if i != self.member]
+        self.save()
+        self.save_cast_file()
+        self.member = ""
+        self.render_member_list()
+        self.render_member()
+        self.render_chapter()
+
+    def import_v1(self):
+        if not self.cast:
+            messagebox.showinfo("Cast", "Open a book first (1 Read).")
+            return
+        added = il.import_v1_sheets(self.root())
+        self.cast = il.load_cast(self.root())
+        self.log_line(f"-- imported {len(added)} v1 sheet(s)")
+        self.render_member_list()
+        self.render_chapter()
+        messagebox.showinfo("Import v1 sheets",
+                            f"{len(added)} sheet(s) imported." + (
+                                "\n\nGive each one its aliases - the roster names that mean them - "
+                                "so chapters can guess their cast." if added else
+                                "\n\nNothing new: no v1 sheets in this book folder, or all are "
+                                "imported already."))
+
+    def _member_count(self):
+        try:
+            count = max(1, min(8, int(self.m_count.get())))
+        except ValueError:
+            count = int(self.settings["draw_samples"])
+        self.m_count.set(str(count))
+        return count
+
+    def start_sheet(self):
+        member = self.member_rec()
+        if not member:
+            return
+        self.save_member()
+        if not member["description"]:
+            messagebox.showinfo("Draw sheet", "Write a description to draw from first.")
+            return
+        count = self._member_count()
+        self._drawn = []
+        self._target = ("sheet", self.member)
+        self._answer_click(f"starting {count} sheet take(s)…", cast_tab=True)
+        self.log_line(f"-- drawing {count} sheet take(s) for {member['name']}")
+        self._run_child(["sheet", "--book", self.book_var.get().strip(), "--member", self.member,
+                         "--count", str(count)], self._sheet_done)
+
+    def start_sheet_edit(self):
+        member = self.member_rec()
+        if not member:
+            return
+        self.save_member()
+        change = self.m_change.get().strip()
+        if not member["sheet"]:
+            messagebox.showinfo("Edit sheet", "Choose a sheet first (Use as sheet).")
+            return
+        if not change:
+            messagebox.showinfo("Edit sheet", "Say what should change.")
+            return
+        count = self._member_count()
+        path = os.path.join(il.member_dir(self.root(), self.member), "instruction.txt")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(il.edit_prompt(change, ""))
+        self._drawn = []
+        self._target = ("sheet", self.member)
+        self._answer_click(f"starting {count} sheet edit take(s)…", cast_tab=True)
+        self.log_line(f"-- editing {member['name']}'s sheet: {change}")
+        self._run_child(["edit", "--book", self.book_var.get().strip(), "--member", self.member,
+                         "--base", member["sheet"], "--instruction-file", path,
+                         "--count", str(count)], self._sheet_done)
+
+    def _sheet_done(self, _code):
+        member_id = self._target[1] if self._target else ""
+        member = self.cast["members"].get(member_id) if member_id else None
+        if member is not None and self._drawn:
+            member["samples"] += self._drawn
+            self.save_cast_file()
+            self.log_line(f"-- {len(self._drawn)} take(s) added to {member['name']}")
+            self.m_change.set("")
+        self._drawn = []
+        self._target = None
+        if member_id and member_id != self.member:
+            self.member = member_id
+            self.log_line("-- showing that character again")
+        self.render_member_list()
+        self.render_member()
+
     # ------------------------------------------------------- child process
     def _run_child(self, args, on_done):
         if self._proc:
@@ -569,7 +885,7 @@ class App(ctk.CTk):
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
                                       encoding="utf-8", errors="replace",
                                       creationflags=subprocess.CREATE_NO_WINDOW)
-        for b in (self.read_btn, self.draw_btn, self.edit_btn):
+        for b in self._job_buttons():
             b.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         proc = self._proc
@@ -582,6 +898,11 @@ class App(ctk.CTk):
             self._queue.put(("exit", (proc.returncode, on_done)))
         threading.Thread(target=pump, daemon=True).start()
 
+    def _job_buttons(self):
+        """Everything that starts a child: one engine on the card at a time."""
+        return (self.read_btn, self.draw_btn, self.edit_btn, self.write_btn, self.sheet_btn,
+                self.sheet_edit_btn, self.import_btn)
+
     def _drain(self):
         try:
             while True:
@@ -592,7 +913,7 @@ class App(ctk.CTk):
                 else:
                     code, on_done = value
                     self._proc = None
-                    for b in (self.read_btn, self.draw_btn, self.edit_btn):
+                    for b in self._job_buttons():
                         b.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
                     self.status_var.set("" if code == 0 else f"stopped (exit {code})")
@@ -636,6 +957,8 @@ class App(ctk.CTk):
             self._step = (0, 0)
             self._take_done = True
             self.update_status(done=True)
+        elif line.startswith("PROMPT "):
+            self._written = line.split(" ", 1)[1].strip()
         elif line.startswith("SERVER"):
             self.status_var.set(line.split(" ", 1)[1])
             if self._starting:
@@ -667,9 +990,14 @@ class App(ctk.CTk):
                 text += f"   (last take {self._last_secs:.0f}s)"
         self.draw_status.configure(text=text, text_color=DONE if done and i == n else ENTRY_TEXT)
 
-    def _answer_click(self, what):
+    def _answer_click(self, what, cast_tab=False):
         """Answer the click at once: an engine can take half a minute to start,
-        and a dead bar reads as "did my click land?"."""
+        and a dead bar reads as "did my click land?". Progress goes to the tab
+        the job was started from."""
+        if cast_tab:
+            self.draw_status, self.draw_bar = self.cast_status, self.cast_bar
+        else:
+            self.draw_status, self.draw_bar = self.chapter_status, self.chapter_bar
         self._take = None
         self._take_done = False
         self._step = (0, 0)
@@ -768,12 +1096,51 @@ class App(ctk.CTk):
             if step.get("chosen") == path:
                 step["chosen"] = ""
 
-    def anchor_choices(self):
-        out = ["draw fresh"]
-        for base, record in sorted((self.chapters or {}).get("chapters", {}).items()):
-            if record.get("final") and base != self.chapter:
-                out.append(base.replace("chapter_", "Chapter "))
-        return out
+    def sheet_members(self):
+        """Cast members that have a sheet, in the Cast tab's order."""
+        return [(i, m) for i, m in (self.cast or {}).get("members", {}).items() if m["sheet"]]
+
+    def chapter_cast(self):
+        record = self.entry()
+        return il.chapter_cast(self.cast, record) if record and self.cast else []
+
+    def _tick_row(self, frame, label, chosen, limit, on_change, empty):
+        """A label and one tick box per cast member with a sheet; at most
+        `limit` ticked (M10)."""
+        for w in frame.winfo_children():
+            w.destroy()
+        ctk.CTkLabel(frame, text=label, text_color=TITLE).pack(side="left", padx=(0, 6))
+        members = self.sheet_members()
+        if not members:
+            ctk.CTkLabel(frame, text=empty, text_color=SUBTITLE, font=ctk.CTkFont(size=11)).pack(
+                side="left")
+            return
+
+        def toggle(member_id, var):
+            ticked = [i for i in chosen if i != member_id] + ([member_id] if var.get() else [])
+            if len(ticked) > limit:
+                var.set(False)
+                messagebox.showinfo("Cast", f"At most {limit} here - a 4th sheet lost a character "
+                                            "in testing (DESIGN.md M10).")
+                return
+            on_change(ticked)
+        for member_id, member in members:
+            var = ctk.BooleanVar(value=member_id in chosen)
+            # width=24: a box sized to its name, or seven names overflow the row
+            ctk.CTkCheckBox(frame, text=member["name"], variable=var, width=24, fg_color=ACCENT,
+                            hover_color=ACCENT_HOVER, text_color=ENTRY_TEXT,
+                            command=lambda i=member_id, v=var: toggle(i, v)).pack(side="left", padx=(4, 8))
+
+    def set_chapter_cast(self, ticked):
+        record = self.entry()
+        if record is not None:
+            record["cast"] = ticked      # an explicit choice now: no longer derived
+            self.save()
+            self.render_chapter()
+
+    def set_edit_sheets(self, ticked):
+        self.edit_sheets = ticked
+        self.render_chapter()
 
     def render_chapter(self):
         self.samples_pane.pack_forget()
@@ -790,13 +1157,24 @@ class App(ctk.CTk):
             self.edit_gallery.show(None)
             return
         self.chapter_title.configure(text=self.chapter.replace("chapter_", "Chapter "))
-        cast = ", ".join(record.get("characters") or []) or "nobody named"
-        self.moment_label.configure(text=f"{record.get('moment', '')}   ·   cast: {cast}")
+        read_as = ", ".join(record.get("characters") or []) or "nobody named"
+        self.moment_label.configure(text=f"{record.get('moment', '')}   ·   the reading saw: {read_as}")
         self.final_label.configure(text="final image set" if record["final"] else "")
         self.prompt_box.insert("1.0", record["prompt"])
-        self.anchor_menu.configure(values=self.anchor_choices())
-        self.anchor_var.set(record["anchor"].replace("chapter_", "Chapter ")
-                            if record["anchor"] else "draw fresh")
+        guessed = record.get("cast") is None and self.chapter_cast()
+        self._tick_row(self.cast_row, "cast:" + ("  (guessed from aliases)" if guessed else ""),
+                       self.chapter_cast(), il.MAX_SHEETS, self.set_chapter_cast,
+                       "no sheets yet - the style sample is used (see the Cast tab)")
+        self.edit_sheets = [i for i in self.edit_sheets if i in dict(self.sheet_members())]
+        self._tick_row(self.edit_sheet_row, "attach sheets:", self.edit_sheets, il.MAX_EDIT_SHEETS,
+                       self.set_edit_sheets, "none - add characters in the Cast tab")
+        # which slot each sheet is, for the change text ("the case from <image2>");
+        # at the end of the tick row - a row of its own squeezed the takes gallery
+        if self.edit_sheets:
+            slots = ", ".join(f"{self.cast['members'][i]['name']} = <image{n}>"
+                              for n, i in enumerate(self.edit_sheets, 2))
+            ctk.CTkLabel(self.edit_sheet_row, text=f"→ {slots}", text_color=ACCENT,
+                         font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(6, 0))
 
         if self.stage.get() == "Samples":
             self.samples_pane.pack(fill="both", expand=True)
@@ -828,10 +1206,12 @@ class App(ctk.CTk):
                          font=ctk.CTkFont(size=11)).pack(fill="x", padx=6, pady=4)
             return
         steps = list(enumerate(record["chain"], 1))
-        if len(steps) > 4:      # only the latest rounds; the rest stay in the file
-            ctk.CTkLabel(self.chain_frame, text=f"… {len(steps) - 4} earlier round(s)", anchor="w",
+        # only the latest two rounds (the rest stay in the file): with the sheet
+        # ticks, a longer list pushed the takes' buttons off the bottom
+        if len(steps) > 2:
+            ctk.CTkLabel(self.chain_frame, text=f"… {len(steps) - 2} earlier round(s)", anchor="w",
                          text_color=SUBTITLE, font=ctk.CTkFont(size=11)).pack(fill="x", padx=8, pady=(4, 0))
-            steps = steps[-4:]
+            steps = steps[-2:]
         for i, step in steps:
             row = ctk.CTkFrame(self.chain_frame, fg_color=CARD, corner_radius=6)
             row.pack(fill="x", padx=4, pady=2)
@@ -866,13 +1246,40 @@ class App(ctk.CTk):
             self.save()
             self.render_chapter()
 
-    def save_anchor(self):
+    def start_write(self):
         record = self.entry()
         if not record:
             return
-        choice = self.anchor_var.get()
-        record["anchor"] = "" if choice == "draw fresh" else choice.replace("Chapter ", "chapter_")
-        self.save()
+        cast = self.chapter_cast()
+        if not cast:
+            messagebox.showinfo("Write prompt", "Tick who is in the picture first - the prompt is "
+                                                "written around their names.")
+            return
+        self.save_prompt()
+        if record["prompt"].strip() and not messagebox.askyesno(
+                "Write prompt", "Replace the current prompt with a new one written around "
+                                "the ticked cast?"):
+            return
+        self._written = ""
+        self._target = ("write", self.chapter)
+        self._answer_click("writing a prompt…")
+        self.log_line(f"-- writing a prompt for {self.chapter}")
+        args = ["write", "--book", self.book_var.get().strip(), "--chapter", self.chapter]
+        for member_id in cast:
+            args += ["--cast", member_id]
+        self._run_child(args, self._write_done)
+
+    def _write_done(self, code):
+        base = self._target[1] if self._target else ""
+        record = self.chapters["chapters"].get(base) if base else None
+        if code == 0 and record is not None and self._written and os.path.isfile(self._written):
+            with open(self._written, encoding="utf-8") as f:
+                record["prompt"] = f.read().strip()
+            self.save()
+            self.draw_status.configure(text="new prompt written - edit it freely", text_color=DONE)
+        self._written = ""
+        self._target = None
+        self._show_result(base, self.stage.get())
 
     def set_working(self, path):
         record = self.entry()
@@ -907,20 +1314,26 @@ class App(ctk.CTk):
         try:
             count = max(1, min(8, int(self.samples_var.get())))
         except ValueError:
-            count = int(self.settings["samples"])
+            count = int(self.settings["draw_samples"])
         self.samples_var.set(str(count))
-        self.settings["samples"] = count
+        self.settings["draw_samples"] = count
+        cast = self.chapter_cast()
+        names = [self.cast["members"][i]["name"] for i in cast]
+        missing = [n for n in names if n not in record["prompt"]]
+        if missing and not messagebox.askyesno(
+                "Draw", f"The prompt never names {', '.join(missing)}, so the model cannot tell "
+                        "who does what.\n\nWrite prompt fixes that. Draw anyway?"):
+            return
         args = ["draw", "--book", self.book_var.get().strip(), "--chapter", self.chapter,
                 "--count", str(count)]
-        if record["anchor"]:
-            other = self.chapters["chapters"].get(record["anchor"], {})
-            if other.get("final"):
-                args += ["--anchor", other["final"]]
+        for member_id in cast:
+            args += ["--cast", member_id]
         self._drawn = []
         self._target = ("samples", self.chapter, -1)
         self._answer_click(f"starting to draw {count} sample(s)…")
         self.stage.set("Samples")
-        self.log_line(f"-- drawing {count} sample(s) for {self.chapter}")
+        self.log_line(f"-- drawing {count} sample(s) for {self.chapter}"
+                      + (f" with {', '.join(names)}" if names else " with the style sample"))
         self._run_child(args, self._draw_done)
 
     def _draw_done(self, _code):
@@ -948,10 +1361,11 @@ class App(ctk.CTk):
         try:
             count = max(1, min(8, int(self.takes_var.get())))
         except ValueError:
-            count = int(self.settings["edit_takes"])
+            count = int(self.settings["edit_count"])
         self.takes_var.set(str(count))
-        self.settings["edit_takes"] = count
-        instruction = il.edit_prompt(change, self.keep_var.get())
+        self.settings["edit_count"] = count
+        sheets = [self.cast["members"][i] for i in self.edit_sheets]
+        instruction = il.edit_prompt(change, self.keep_var.get(), sheets)
         path = os.path.join(il.chapter_dir(self.root(), self.chapter), "instruction.txt")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -965,9 +1379,11 @@ class App(ctk.CTk):
         self._answer_click(f"starting {count} edit take(s)…")
         self.stage.set("Fine-tune")
         self.log_line(f"-- editing {self.chapter}: {change}")
-        self._run_child(["edit", "--book", self.book_var.get().strip(), "--chapter", self.chapter,
-                         "--base", record["chosen"], "--instruction-file", path,
-                         "--count", str(count)], self._edit_done)
+        args = ["edit", "--book", self.book_var.get().strip(), "--chapter", self.chapter,
+                "--base", record["chosen"], "--instruction-file", path, "--count", str(count)]
+        for member_id in self.edit_sheets:
+            args += ["--cast", member_id]
+        self._run_child(args, self._edit_done)
 
     def _edit_done(self, _code):
         base = self._target[1] if self._target else ""

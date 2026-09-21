@@ -1,21 +1,20 @@
 """
 comfy.py
 --------
-The image engines, both in the separate ComfyUI install at F:\\ComfyUI and
-driven over its HTTP API. v2 uses two, because each is clearly better at one
-job (measured 2026-09-20, DESIGN.md v2):
+The image engine: Qwen-Image-2.1 in the separate ComfyUI install at
+F:\\ComfyUI, driven over its HTTP API. One model draws AND edits (user
+decision 2026-09-21, after DESIGN.md M9/M10):
 
-  DRAW  FLUX.2 klein 9B (GGUF)  - draws a chapter's samples from a prompt,
-        with the style sample attached. 4 steps, ~30 s a take.
-  EDIT  FLUX.1 Kontext dev (GGUF) - changes one thing in an existing image and
-        leaves the rest alone. 20 steps, ~165 s a take. It ignores a style
-        image: it inherits the style of the image it edits.
+  - the prompt names each reference by its slot, <image1>, <image2>, ... -
+    which is what lets a character sheet stand for one named person;
+  - a draw samples on our portrait canvas; an edit samples on its base
+    image's own grid (the encoder's latent), since any other size shifts the
+    edit;
+  - 25 steps, cfg 1, ~4 min a take with two references, ~5-6 with three.
 
-Only one is on the card at a time; ComfyUI unloads the other by itself.
-
-Also measured and relied on here:
-  - up to 5 reference images fit in 8 GB; time grows with the count, VRAM
-    does not;
+Measured and relied on here:
+  - 3 character sheets is the most that holds (M10): a 4th lost a character
+    and peaked at 7.84 of 8 GB;
   - a prompt cannot keep colour out, so every reference and every output is
     converted to greyscale (v2 decision v5).
 """
@@ -33,11 +32,10 @@ import uuid
 import websocket
 from PIL import Image
 
-MAX_REFS = 5
+MAX_SHEETS = 3          # character sheets in one draw (M10)
+MAX_REFS = MAX_SHEETS + 1   # an edit's base image + the sheets
 WIDTH, HEIGHT = 832, 1216
-DRAW_STEPS = 4
-EDIT_STEPS = 20
-EDIT_GUIDANCE = 2.5
+STEPS = 25
 
 
 class ManagedComfy:
@@ -98,93 +96,55 @@ class ManagedComfy:
         to_greyscale(path, os.path.join(self.input_dir(), name))
         return name
 
-    def check_models(self, mode):
+    def check_models(self):
         """Say plainly which file is missing rather than failing inside a graph."""
         root = self.s["comfy_root"]
-        needed = ([("unet", self.s["draw_unet"]), ("text_encoders", self.s["draw_clip"]),
-                   ("vae", self.s["draw_vae"])] if mode == "draw" else
-                  [("unet", self.s["edit_unet"]), ("text_encoders", self.s["edit_clip_l"]),
-                   ("text_encoders", self.s["edit_clip_t5"]), ("vae", self.s["edit_vae"])])
-        missing = [n for sub, n in needed if not os.path.isfile(os.path.join(root, "models", sub, n))]
+        # ComfyUI reads a diffusion model from either folder
+        needed = [(("diffusion_models", "unet"), self.s["qwen_unet"]),
+                  (("text_encoders", "clip"), self.s["qwen_clip"]), (("vae",), self.s["qwen_vae"])]
+        missing = [n for subs, n in needed
+                   if not any(os.path.isfile(os.path.join(root, "models", sub, n)) for sub in subs)]
         if missing:
-            raise RuntimeError(f"{mode} model files missing from {root}\\models: " + ", ".join(missing))
+            raise RuntimeError(f"model files missing from {root}\\models: " + ", ".join(missing))
 
-    # ------------------------------------------------------------- graphs
-    def draw_graph(self, prompt, refs, seed, prefix, width, height):
-        """FLUX.2 klein 9B: reference latents, 4 steps, cfg 1."""
+    # -------------------------------------------------------------- graph
+    def graph(self, prompt, refs, seed, prefix, width, height, edit):
+        """Qwen-Image-2.1: the references go to the text encoder in slot order
+        (<image1> is refs[0]); 25 steps, cfg 1, euler/simple - the shipped
+        template's settings (M9)."""
         g = {
-            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": self.s["draw_unet"]}},
+            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": self.s["qwen_unet"]}},
             "2": {"class_type": "CLIPLoader",
-                  "inputs": {"clip_name": self.s["draw_clip"], "type": "flux2", "device": "default"}},
-            "3": {"class_type": "VAELoader", "inputs": {"vae_name": self.s["draw_vae"]}},
-            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
-            "8": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["7", 0]}},
+                  "inputs": {"clip_name": self.s["qwen_clip"], "type": "qwen_image", "device": "default"}},
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": self.s["qwen_vae"]}},
         }
-        pos, neg = ["7", 0], ["8", 0]
-        for i, ref in enumerate(refs[:MAX_REFS]):
-            b = 100 + 10 * i
-            g[str(b)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
-            g[str(b + 1)] = {"class_type": "ImageScaleToTotalPixels",
-                             "inputs": {"image": [str(b), 0], "upscale_method": "nearest-exact",
-                                        "megapixels": 1.0, "resolution_steps": 1}}
-            g[str(b + 2)] = {"class_type": "VAEEncode", "inputs": {"pixels": [str(b + 1), 0], "vae": ["3", 0]}}
-            g[str(b + 3)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": pos, "latent": [str(b + 2), 0]}}
-            g[str(b + 4)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": neg, "latent": [str(b + 2), 0]}}
-            pos, neg = [str(b + 3), 0], [str(b + 4), 0]
-        g.update({
-            "11": {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": pos, "negative": neg, "cfg": 1.0}},
-            "12": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
-            "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
-            "14": {"class_type": "Flux2Scheduler", "inputs": {"steps": DRAW_STEPS, "width": width, "height": height}},
-            "15": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
-            "16": {"class_type": "SamplerCustomAdvanced",
-                   "inputs": {"noise": ["12", 0], "guider": ["11", 0], "sampler": ["13", 0],
-                              "sigmas": ["14", 0], "latent_image": ["15", 0]}},
-            "17": {"class_type": "VAEDecode", "inputs": {"samples": ["16", 0], "vae": ["3", 0]}},
-            "18": {"class_type": "SaveImage", "inputs": {"images": ["17", 0], "filename_prefix": prefix}},
-        })
-        return g
-
-    def edit_graph(self, prompt, refs, seed, prefix, width, height):
-        """FLUX.1 Kontext dev: the image(s) to work from, 20 steps, guidance 2.5."""
-        g = {
-            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": self.s["edit_unet"]}},
-            "2": {"class_type": "DualCLIPLoader",
-                  "inputs": {"clip_name1": self.s["edit_clip_l"], "clip_name2": self.s["edit_clip_t5"],
-                             "type": "flux", "device": "default"}},
-            "3": {"class_type": "VAELoader", "inputs": {"vae_name": self.s["edit_vae"]}},
-            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
-            "9": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["7", 0], "guidance": EDIT_GUIDANCE}},
-            "8": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["7", 0]}},
-        }
-        pos = ["9", 0]
-        for i, ref in enumerate(refs[:MAX_REFS]):
-            b = 110 + 10 * i
-            g[str(b)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
-            g[str(b + 1)] = {"class_type": "FluxKontextImageScale", "inputs": {"image": [str(b), 0]}}
-            g[str(b + 2)] = {"class_type": "VAEEncode", "inputs": {"pixels": [str(b + 1), 0], "vae": ["3", 0]}}
-            g[str(b + 3)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": pos, "latent": [str(b + 2), 0]}}
-            pos = [str(b + 3), 0]
-        g.update({
-            "15": {"class_type": "EmptySD3LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
-            "16": {"class_type": "KSampler",
-                   "inputs": {"model": ["1", 0], "positive": pos, "negative": ["8", 0], "latent_image": ["15", 0],
-                              "seed": seed, "steps": EDIT_STEPS, "cfg": 1.0, "sampler_name": "euler",
-                              "scheduler": "simple", "denoise": 1.0}},
-            "17": {"class_type": "VAEDecode", "inputs": {"samples": ["16", 0], "vae": ["3", 0]}},
-            "18": {"class_type": "SaveImage", "inputs": {"images": ["17", 0], "filename_prefix": prefix}},
-        })
+        enc = {"clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "negative_prompt": "",
+               "resolution": 1024}
+        for i, ref in enumerate(refs[:MAX_REFS], 1):
+            g[str(100 + i)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+            enc[f"images.image_{i}"] = [str(100 + i), 0]     # the node's growable inputs, API form
+        g["7"] = {"class_type": "TextEncodeQwenImage21", "inputs": enc}
+        g["15"] = {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height,
+                                                                "batch_size": 1}}
+        g["16"] = {"class_type": "KSampler", "inputs": {
+            "model": ["1", 0], "positive": ["7", 0], "negative": ["7", 1],
+            # an edit samples on its base image's own grid - any other size shifts it
+            "latent_image": ["7", 2] if edit else ["15", 0],
+            "seed": seed, "steps": STEPS, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple",
+            "denoise": 1.0}}
+        g["17"] = {"class_type": "VAEDecode", "inputs": {"samples": ["16", 0], "vae": ["3", 0]}}
+        g["18"] = {"class_type": "SaveImage", "inputs": {"images": ["17", 0], "filename_prefix": prefix}}
         return g
 
     # ------------------------------------------------------------ drawing
-    def run(self, mode, prompt, refs, seed, out_path, on_progress=None,
+    def run(self, prompt, refs, seed, out_path, on_progress=None, edit=False,
             width=WIDTH, height=HEIGHT):
-        """One image through `mode` ("draw" or "edit"), saved greyscale at
-        out_path. Returns seconds taken. Progress comes from ComfyUI's own
-        WebSocket: on_progress(value, max) per sampler step, and (0, 0) when a
-        node starts, since loading a model reports nothing."""
+        """One image, saved greyscale at out_path. `edit`: refs[0] is the image
+        being changed and the output keeps its size. Returns seconds taken.
+        Progress comes from ComfyUI's own WebSocket: on_progress(value, max)
+        per sampler step, and (0, 0) when a node starts, since loading a model
+        reports nothing."""
         t0 = time.time()
-        graph = self.draw_graph if mode == "draw" else self.edit_graph
         prefix = "scene-illustrator/tmp"
         client_id = uuid.uuid4().hex
         ws = None
@@ -195,7 +155,7 @@ class ManagedComfy:
                 ws.settimeout(1.0)
             except (OSError, websocket.WebSocketException):
                 ws = None
-        body = json.dumps({"prompt": graph(prompt, refs, seed, prefix, width, height),
+        body = json.dumps({"prompt": self.graph(prompt, refs, seed, prefix, width, height, edit),
                            "client_id": client_id}).encode()
         req = urllib.request.Request(self.url + "/prompt", body, {"Content-Type": "application/json"})
         try:
