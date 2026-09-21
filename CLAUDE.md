@@ -299,7 +299,8 @@ calls for with that seiyuu.
   Advanced shows only Output Encoding and Translation Subtitles.
 - **Six styles**: Natural (the profile's duration scales per band) and Even
   pace (a fixed length per sentence from the profile's pace targets), each
-  default / slower / faster. By ear on yojo-senki: Natural default was the
+  default / slower / faster - fewer for a narrow seiyuu (profile v3
+  `available_speeds`, see book-profiler below). By ear on yojo-senki: Natural default was the
   most natural and cleanest; Even pace too flat.
 - **Text**: `text_pipeline.dynamic_sentences()` - a line break ends a
   sentence; over-long sentences are cut with `split_for_length()` (0.7 s
@@ -721,6 +722,46 @@ The 1–32 band is set by two short sentences with hard readings
 
 **Still open**: how the reader groups one-sentence `sync.json` entries for
 display.
+
+### A seiyuu can fail SLOW too - narrow windows (2026-09-22)
+
+marinka-03-calm-shonen on wall crashed `recipe.py` (`'NoneType' object is
+not subscriptable` in `pace_targets`). She reads the sentence right and
+then **ad-libs a tail** when given too much time (`…理解できなかった。理解
+できなかった。`, `…思う。ぐげてもく。`) - clean x1.0-1.2/1.3, tails from
+x1.3-1.5. The recipe assumed tanya's shape (fails only FAST, window open at
+the top), found no usable scale on her first step, wrote no bands, and
+`lookup()` returned None. Confirmed by ear on 16 takes, then measured.
+User decisions, all built:
+
+- **score.py**: `length_ratio_high` 1.45 -> **1.15** (a clean read
+  transcribes at 1.00; 1.45 let 36 of 84 x1.5 takes through), plus
+  `overrun` - characters heard after the sentence's ending (catches
+  `…葉を噛む、噛む。`, +4%). Both set `ran_long`, which recipe.py never
+  excuses as a word slip. 0 new flags over tanya's 1,944 takes; moeshi 2,
+  both a real `ご視聴ありがとうございました` tail.
+- **recipe.py** re-judges every take with `score.flag_takes()` from what
+  `score.json` holds (a cleaned chapter cannot be re-scored), and the
+  window is the **longest run of adjacent clean scales** (ties slower).
+  faster = low edge + 0.1, slower = high edge, no margin.
+- **Fewer speeds, profile-wide**: a speed stays only if it is >= 0.1 from
+  default in every band; Natural and Even pace alike. Profile **v3**
+  `available_speeds`; dropped speeds written equal to default. The
+  generator (panel, Save & Run, Customize, `resolve_dynamic_plan`),
+  dynamic-repair and the listening test offer only what is available; v2
+  profiles read as all six. `render.json`'s profile block records it.
+- **No window at all**: exit code 3 (`NO_WINDOW_EXIT`), plain message, no
+  profile; the window's runner does not retry it. Chapters' windows not
+  overlapping -> no `profile_book.json` (was written with `None`s).
+- **Sweep now starts at x0.8** (was 1.0): marinka is clean at 1.0 on every
+  step, so her fast edge was unmeasured. Resuming a swept chapter renders
+  only 0.8/0.9.
+
+Proven on copies (old `main` recipe vs new, 36 checks): all 7 tanya
+profiles byte-identical in bands/L/pace targets; marinka -> default only
+(x1.1-1.3 per band, L 98); **moeshi's longest step changed** - one x1.8
+tail used to void the whole step, so L 76 -> 98 with a new 77-98 band
+x1.1/1.4/1.7, all her other bands identical.
 
 ### The window (`app.py` + `profiler_runner.py`, 2026-09-18)
 

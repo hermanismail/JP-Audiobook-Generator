@@ -840,7 +840,8 @@ class SettingsApp(ctk.CTk):
                         + "\n".join(problems[:10]), [])
             return None, ticked
         _profile, lines, ok = dynamic_mode_ui.check_profile(
-            data["dynamic"].get("profile_path", ""))
+            data["dynamic"].get("profile_path", ""),
+            data["dynamic"].get("style") or dynamic_mode_ui.dynamic_profile.DEFAULT_STYLE)
         if not ok:
             return ("The profile cannot be used:\n\n" + "\n".join(lines), [])
         return None, chapters

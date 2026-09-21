@@ -799,7 +799,7 @@ class ProfilerApp(ctk.CTk):
         self.job = pr.ListenRun(book, root, speaker, label, on_log=self.log,
                                 on_done=lambda s: self.ui(lambda: self._listen_done(s)))
         self.head_sub.configure(text=f"Listening test: {pr.nickname(speaker)} / {label}…")
-        self.status_label.configure(text="rendering six samples", text_color=ACCENT)
+        self.status_label.configure(text="rendering samples", text_color=ACCENT)
         self._refresh_buttons()
         self.job.start()
 

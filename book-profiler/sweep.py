@@ -22,7 +22,7 @@ It reads the length steps stage 1 wrote (`analysis.json`) and writes into
 - **steps** - shortest to longest, as stage 1 chose them. Every sentence is
   sent whole: the sweep is what FINDS the comfortable length, so it cannot
   cut to one.
-- **scales** - 1.0 upward in 0.1 steps (`scales` setting) until the take
+- **scales** - 0.8 upward in 0.1 steps (`scales` setting) until the take
   reaches the 30 s ceiling. The first scale that reaches it is still
   rendered and recorded - "it hit the ceiling at 1.5" is a result - and
   nothing above it is.
@@ -98,7 +98,10 @@ MARKER_VERSION = 1
 
 SWEEP_DEFAULTS = {
     "batch_script": "",
-    "scales": [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8],
+    # 0.8 and 0.9 added 2026-09-22: a seiyuu can be clean at the old 1.0
+    # floor on every step (marinka-03-calm-shonen), leaving her faster edge
+    # unmeasured. Resuming a chapter swept from 1.0 renders only these two.
+    "scales": [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8],
     "takes": 3,
     "fixed_seeds": [1001, 2002, 3003],
     "arms": ["seeded", "random"],

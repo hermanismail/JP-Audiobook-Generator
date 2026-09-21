@@ -6,20 +6,34 @@ TTS requests - shared, so the generator, its GUI and book-profiler can never
 disagree about it. Stdlib only: it is imported from the Irodori venv
 (run_audiobook.py), the GUI venv (gui_settings.py) and book-profiler's venv.
 
-## A profile (version 2)
+## A profile (version 3)
 
 Written by book-profiler/recipe.py, one per chapter and one for the book:
 
     {
-      "version": 2, "book": ..., "scope": "book" | "chapter", "chapters": [...],
+      "version": 3, "book": ..., "scope": "book" | "chapter", "chapters": [...],
       "speaker_path": ..., "speaker_stamp": [size, mtime],
       "trim_tail": true,
       "silence": {"section": 1.5, "sentence": 1.0, "comma": 0.7},
       "comfortable_length": 116,           # engine characters
       "bands": [{"from_len", "to_len", "faster", "default", "slower"}, ...],
       "pace_targets": {"default": 5.01, "slower": 4.46, "faster": 5.72},
+      "available_speeds": ["default", "slower", "faster"],
       ...
     }
+
+## Fewer speeds for a narrow seiyuu (version 3, 2026-09-22)
+
+A seiyuu can have a clean window CLOSED at both ends: garbling when read too
+fast, ad-libbing a tail after the sentence when given too much time
+(marinka-03-calm-shonen on wall: clean x1.0-1.3, tails from x1.4). Where
+that window is too narrow for three speeds at least 0.1 apart, recipe.py
+drops "slower" and/or "faster" for the WHOLE profile, and
+`available_speeds` says which remain - Natural and Even pace alike.
+"default" is always there. A dropped speed's band values and pace target
+are written equal to default, so even a stale selection renders safely;
+the tools offer only available_styles() all the same. A version 2 profile
+has no such list and offers all three.
 
 ## Six styles
 
@@ -46,7 +60,11 @@ import os
 
 import text_pipeline as tp
 
-PROFILE_VERSION = 2
+PROFILE_VERSION = 3
+# Version 2 predates available_speeds and offers every style; still read.
+READABLE_VERSIONS = (2, 3)
+
+SPEEDS = ("default", "slower", "faster")
 
 STYLE_KEYS = ("scale_default", "scale_slower", "scale_faster",
               "pace_default", "pace_slower", "pace_faster")
@@ -115,9 +133,15 @@ def load_profile(path):
     except (OSError, ValueError) as e:
         raise ProfileError(f"not a readable profile ({e})")
     version = profile.get("version")
-    if version != PROFILE_VERSION:
-        raise ProfileError(f"profile version {version} - this generator needs version "
-                           f"{PROFILE_VERSION}. Re-run book-profiler's recipe.py to rewrite it.")
+    if version not in READABLE_VERSIONS:
+        raise ProfileError(f"profile version {version} - this generator reads versions "
+                           f"{', '.join(map(str, READABLE_VERSIONS))}. Re-run book-profiler's "
+                           "recipe.py to rewrite it.")
+    speeds = profile.get("available_speeds", list(SPEEDS)) if version >= 3 else list(SPEEDS)
+    if "default" not in speeds or any(s not in SPEEDS for s in speeds):
+        raise ProfileError(f"profile available_speeds {speeds} - needs 'default', and only "
+                           f"{'/'.join(SPEEDS)}")
+    profile["available_speeds"] = [s for s in SPEEDS if s in speeds]
     for key in ("speaker_path", "silence", "comfortable_length", "bands", "pace_targets"):
         if key not in profile:
             raise ProfileError(f"profile is missing '{key}'")
@@ -157,6 +181,27 @@ def nickname(profile):
     return name[:-len(suffix)] if name.endswith(suffix) else os.path.splitext(name)[0]
 
 
+def available_styles(profile):
+    """The style keys this profile offers, in STYLE_KEYS order."""
+    speeds = profile.get("available_speeds") or SPEEDS
+    return [k for k in STYLE_KEYS if split_style(k)[1] in speeds]
+
+
+def check_style(profile, style_key):
+    """Raise ProfileError when `style_key` is not one this profile offers."""
+    if style_key not in available_styles(profile):
+        raise ProfileError(
+            f"{STYLE_LABELS.get(style_key, style_key)} is not available with this profile - "
+            f"seiyuu {nickname(profile)} reads cleanly at "
+            f"{speeds_phrase(profile)} only")
+
+
+def speeds_phrase(profile):
+    speeds = profile.get("available_speeds") or SPEEDS
+    return "all three speeds" if len(speeds) == len(SPEEDS) else " and ".join(speeds) + \
+        (" speed" if len(speeds) == 1 else " speeds")
+
+
 def band_for(profile, length):
     """(band, beyond) for a request of `length` engine characters: the next
     longer measured band, or the longest one - beyond=True - past them all."""
@@ -170,6 +215,7 @@ def request_for(profile, style_key, length, ceiling=29.5):
     """The TTS parameters for one request: {"duration_scale": x} for a
     Natural style, {"seconds": s} for an Even pace style."""
     method, style = split_style(style_key)
+    check_style(profile, style_key)
     if method == "scale":
         band, _beyond = band_for(profile, length)
         return {"duration_scale": band[style]}
@@ -182,6 +228,9 @@ def summary_lines(profile, style_key=None):
     the Profile Path to confirm the recipe is usable."""
     ok, speaker_note = speaker_status(profile)
     chapters = profile.get("chapters") or []
+    speeds = profile.get("available_speeds") or SPEEDS
+    order = [s for s in ("faster", "default", "slower") if s in speeds]
+    names = "/".join(order)
     lines = [
         f"{profile.get('book', '?')} · seiyuu {nickname(profile)} · "
         f"{profile.get('scope', '?')} profile of {len(chapters)} chapter(s)",
@@ -190,12 +239,15 @@ def summary_lines(profile, style_key=None):
         f"{profile['silence']['comma']} s · trim tail "
         f"{'on' if profile.get('trim_tail') else 'off'}",
         "Natural: " + "  ".join(
-            f"{b['from_len']}-{b['to_len']} x{b['faster']}/{b['default']}/{b['slower']}"
-            for b in profile["bands"]) + "  (faster/default/slower)",
-        f"Even pace: {profile['pace_targets']['faster']} / {profile['pace_targets']['default']} / "
-        f"{profile['pace_targets']['slower']} ch/s  (faster/default/slower)",
+            f"{b['from_len']}-{b['to_len']} x" + "/".join(str(b[s]) for s in order)
+            for b in profile["bands"]) + f"  ({names})",
+        "Even pace: " + " / ".join(str(profile["pace_targets"][s]) for s in order)
+        + f" ch/s  ({names})",
         ("OK · " if ok else "NOT USABLE · ") + speaker_note,
     ]
+    if len(speeds) < len(SPEEDS):
+        lines.insert(-1, f"narrow seiyuu: clean at {speeds_phrase(profile)} only - "
+                         f"{len(available_styles(profile))} of {len(STYLE_KEYS)} styles offered")
     if style_key:
         lines.append(f"style: {STYLE_LABELS.get(style_key, style_key)}")
     return lines

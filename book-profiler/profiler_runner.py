@@ -72,6 +72,7 @@ GUI_DEFAULTS = {
 }
 ARM_OPTIONS = {False: ("random", 6), True: ("seeded,random", 3)}
 ATTEMPTS = 2                    # retry once, then skip
+NO_WINDOW_EXIT = 3              # recipe.NO_WINDOW_EXIT: no clean window, never retried
 # Measured per chapter on this card (2026-09-17, memory released per job):
 # sweep 7-18 min, Whisper 6-10 min.
 MINUTES_PER_CHAPTER = (15, 30)
@@ -359,7 +360,10 @@ class Run:
             self.proc = None
         return None if self.stopped.is_set() else code
 
-    def _attempts(self, label, script, *args):
+    def _attempts(self, label, script, *args, final=()):
+        """True / False / None (stopped). An exit code in `final` is an
+        answer, not a failure: the same inputs would give it again, so it
+        is not retried."""
         for attempt in range(1, ATTEMPTS + 1):
             if self.stopped.is_set():
                 return None
@@ -371,6 +375,8 @@ class Run:
             if code == 0:
                 return True
             self.on_log(f"! {label} exited with code {code}")
+            if code in final:
+                return False
         return False
 
     # --- the queue
@@ -434,7 +440,8 @@ class Run:
                 continue
             self.on_log(f"=== recipe for {nickname(speaker)} over {len(scored)} chapter(s)")
             ok = self._attempts(f"{nickname(speaker)} recipe", "recipe.py", "--book", self.book,
-                                "--scope", SCOPE, "--speaker", speaker)
+                                "--scope", SCOPE, "--speaker", speaker,
+                                final=(NO_WINDOW_EXIT,))
             (summary["recipes"] if ok else summary["recipe_failed"]).append(nickname(speaker))
 
     def _all_chapters(self):
@@ -443,7 +450,7 @@ class Run:
 
 
 class ListenRun(Run):
-    """The optional listening test for one profile: all six samples
+    """The optional listening test for one profile: every style it offers
     rendered, then the audition tool's Results window opened in its own
     process (listen.py --window-only), so closing it never touches this
     window."""

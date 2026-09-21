@@ -18,7 +18,8 @@ Writes beside the sweep:
 `repair.similarity()` - punctuation and spacing stripped from both sides,
 difflib ratio, plus the transcript/script length ratio - and the two
 thresholds `repair.suspicious()` applies (similarity below
-`similarity_threshold`, or a length ratio outside 0.65-1.45). Imported, not
+`similarity_threshold`, or a length ratio outside 0.65-1.45 - here tightened
+to 0.65-1.15, plus an ending-repeat check; see SCORE_DEFAULTS). Imported, not
 copied, for the reason text_pipeline is imported: the profiler must judge
 takes exactly the way a published chapter is judged.
 
@@ -66,10 +67,17 @@ SCORE_DEFAULTS = {
     "whisper_model": "large-v3-turbo",
     "whisper_language": "ja",
     "device": "cuda",
-    # repair.DEFAULT_SETTINGS' value; the length-ratio band is repair.suspicious()'s.
+    # repair.DEFAULT_SETTINGS' value; the low length ratio is repair.suspicious()'s.
     "similarity_threshold": 0.72,
     "length_ratio_low": 0.65,
-    "length_ratio_high": 1.45,
+    # Was repair's 1.45 until 2026-09-22. A clean read transcribes at 1.00;
+    # 1.45 let a seiyuu read the whole sentence and then ad-lib a tail
+    # (marinka-03-calm-shonen: 36 of 84 takes at x1.5 ran >15% long, none
+    # flagged). At 1.15: 0 new flags over tanya's 1,944 takes and moeshi's.
+    "length_ratio_high": 1.15,
+    # Transcript characters after the sentence's ending was already heard -
+    # catches a tail too short for any ratio (…葉を噛む、噛む。, +4%).
+    "overrun_chars": 2,
     # A take this far below its step's median similarity is flagged too.
     "step_drop": 0.15,
 }
@@ -151,6 +159,27 @@ def read_transcript(wav):
     }
 
 
+def overrun(script, heard, k=3):
+    """How many transcript characters follow the point where the script's
+    last `k` characters were heard (punctuation stripped from both). 0 when
+    the ending was never heard - that is a misread or a truncation, which
+    similarity and the low length ratio already cover.
+
+    The ending is matched at its own occurrence count, so a sentence that
+    says its last word twice on purpose is not a repeat."""
+    a = repair.normalise_for_compare(script)
+    b = repair.normalise_for_compare(heard)
+    if len(a) < k:
+        return 0
+    ending = a[-k:]
+    pos = -1
+    for _ in range(a.count(ending)):
+        pos = b.find(ending, pos + 1)
+        if pos < 0:
+            return 0
+    return len(b) - (pos + k)
+
+
 def score_chapter(root, steps, speaker, settings):
     rows = []
     for step in steps:
@@ -170,21 +199,35 @@ def score_chapter(root, steps, speaker, settings):
                                   similarity=round(ratio, 4),
                                   length_ratio=None if length_ratio == float("inf")
                                   else round(length_ratio, 3)))
-        median = statistics.median(t["similarity"] for t in takes) if takes else 0
-        for t in takes:
-            reasons = []
-            if t["similarity"] < settings["similarity_threshold"]:
-                reasons.append(f"similarity {t['similarity']:.2f}")
-            lr = t["length_ratio"]
-            if lr is None or not (settings["length_ratio_low"] <= lr <= settings["length_ratio_high"]):
-                reasons.append(f"length ratio {lr}")
-            if median - t["similarity"] > settings["step_drop"]:
-                reasons.append(f"{median - t['similarity']:.2f} below the step median")
-            t["step_median"] = round(median, 4)
-            t["flags"] = reasons
+        median = flag_takes(step["text"], takes, settings)
         rows.append({"step": step["step"], "tts_len": step["tts_len"], "text": step["text"],
                      "median_similarity": round(median, 4), "takes": takes})
     return rows
+
+
+def flag_takes(text, takes, settings):
+    """Set each take's `flags` (reasons, empty = clean), `overrun` and
+    `ran_long` in place; return the step's median similarity. Needs only
+    what a score.json take already holds, so it can re-judge old scores."""
+    median = statistics.median(t["similarity"] for t in takes) if takes else 0
+    for t in takes:
+        reasons = []
+        if t["similarity"] < settings["similarity_threshold"]:
+            reasons.append(f"similarity {t['similarity']:.2f}")
+        lr = t["length_ratio"]
+        if lr is None or not (settings["length_ratio_low"] <= lr <= settings["length_ratio_high"]):
+            reasons.append(f"length ratio {lr}")
+        if median - t["similarity"] > settings["step_drop"]:
+            reasons.append(f"{median - t['similarity']:.2f} below the step median")
+        t["overrun"] = overrun(text, t["heard"])
+        if t["overrun"] >= settings["overrun_chars"]:
+            reasons.append(f"runs {t['overrun']} chars past the ending")
+        # Something was added: never excused as a word slip (recipe.py).
+        t["ran_long"] = (lr is not None and lr > settings["length_ratio_high"]) or \
+            t["overrun"] >= settings["overrun_chars"]
+        t["step_median"] = round(median, 4)
+        t["flags"] = reasons
+    return median
 
 
 def arm_summary(takes, arms):
@@ -207,6 +250,7 @@ def render_md(book, chapter, speaker, settings, rows):
          f"Whisper `{settings['whisper_model']}`, scored with chapter-repair's "
          f"`similarity()`. Flagged when similarity < {settings['similarity_threshold']}, "
          f"length ratio outside {settings['length_ratio_low']}-{settings['length_ratio_high']}, "
+         f"{settings['overrun_chars']}+ characters heard after the sentence's ending, "
          f"or more than {settings['step_drop']} below the step's own median. A shortlist, "
          "not a verdict.\n",
          f"**{len(every)} takes, {sum(1 for t in every if t['flags'])} flagged.**\n"]

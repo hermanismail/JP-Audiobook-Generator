@@ -77,13 +77,16 @@ def parse_input_folder(folder):
                  f"Parsing successful - 1 chapter file found ({bases[0]})", bases
 
 
-def check_profile(path):
+def check_profile(path, style=None):
     """(profile or None, [summary lines], ok). ok is False for anything the
-    run would refuse: unreadable, wrong version, missing speaker file."""
+    run would refuse: unreadable, wrong version, missing speaker file, or -
+    when `style` is given - a style the profile does not offer."""
     if not path or not path.strip():
         return None, ["No profile chosen."], False
     try:
         profile = dynamic_profile.load_profile(path.strip())
+        if style:
+            dynamic_profile.check_style(profile, style)
     except dynamic_profile.ProfileError as e:
         return None, [f"Not usable: {e}"], False
     ok, _note = dynamic_profile.speaker_status(profile)
@@ -211,6 +214,16 @@ class ProfilePanel(ctk.CTkFrame):
             color = COLOR_DISABLED
         self.summary.configure(text="\n".join(lines), text_color=color)
         self.details.pack(fill="x")
+        if profile is not None:
+            # A narrow seiyuu's profile offers fewer styles (v3): offer only
+            # those, and move a saved style it does not have to default.
+            offered = [dynamic_profile.STYLE_LABELS[k]
+                       for k in dynamic_profile.available_styles(profile)]
+            self.style_menu.configure(values=offered)
+            if self.style_var.get() not in offered:
+                self.style_var.set(dynamic_profile.STYLE_LABELS[dynamic_profile.DEFAULT_STYLE])
+                if self.on_change:
+                    self.after_idle(lambda: self.on_change(self.path, self.style))
         if ok:
             self.style_menu.master.pack(fill="x")
         else:
@@ -348,7 +361,8 @@ def plan_status(chapters, plan):
         if not entry.get("enabled"):
             continue
         ticked.append(base)
-        _p, lines, ok = check_profile(entry.get("profile_path", ""))
+        _p, lines, ok = check_profile(entry.get("profile_path", ""),
+                                      entry.get("style") or dynamic_profile.DEFAULT_STYLE)
         if ok:
             ready.append(base)
         else:

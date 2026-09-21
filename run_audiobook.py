@@ -880,7 +880,13 @@ def resolve_dynamic_plan(chapter_files):
             path, style = block.get("profile_path"), block.get("style")
         style = style or dynamic_profile.DEFAULT_STYLE
         dynamic_profile.split_style(style)
-        plan[base] = {"profile": profile_at(path), "style": style}
+        profile = profile_at(path)
+        # A narrow seiyuu's profile offers fewer styles: refuse up front.
+        try:
+            dynamic_profile.check_style(profile, style)
+        except dynamic_profile.ProfileError as e:
+            raise dynamic_profile.ProfileError(f"{base}: {e}")
+        plan[base] = {"profile": profile, "style": style}
     return plan
 
 
@@ -1063,6 +1069,9 @@ def process_chapter_dynamic(chapter_path, assignment, engine):
                 "trim_tail": profile.get("trim_tail"),
                 "bands": profile["bands"],
                 "pace_targets": profile["pace_targets"],
+                # dynamic-repair offers only these (v3; load_profile fills
+                # all three for a v2 profile).
+                "available_speeds": profile["available_speeds"],
             },
             "style": style,
             "style_label": dynamic_profile.STYLE_LABELS[style],

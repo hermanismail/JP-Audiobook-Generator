@@ -575,7 +575,12 @@ class RepairApp(ctk.CTk):
             self.part_text[index] = text
             self.part_readings[index] = {r["word"]: r["reading"] for r in self.readings
                                          if r["word"] in original}
-        # Each Part opens on the style its chapter was rendered with.
+        # Only the styles the chapter's profile offers (a narrow seiyuu has
+        # fewer), plus Custom scale. Each Part opens on the style its
+        # chapter was rendered with.
+        offered = dr.dynamic_profile.available_styles(self.chapter.profile)
+        self.style_menu.configure(values=[STYLE_LABELS[k] for k in STYLE_ORDER
+                                          if k in offered or k == dr.CUSTOM_STYLE])
         self.style_var.set(STYLE_LABELS.get(self.chapter.style, STYLE_LABELS["scale_default"]))
         self._render_part()
 
