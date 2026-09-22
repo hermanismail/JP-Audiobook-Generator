@@ -71,7 +71,6 @@ for path in (GENERATOR_DIR, SCRIPT_DIR, AUDITION_DIR,
              os.path.join(GENERATOR_DIR, "chapter-repair")):
     if path not in sys.path:
         sys.path.insert(0, path)
-import text_pipeline as tp  # noqa: E402
 import dynamic_profile  # noqa: E402
 import analyze  # noqa: E402
 import sweep  # noqa: E402
@@ -162,10 +161,12 @@ def sample_jobs(window, profile, engine, settings):
         # A narrow seiyuu's profile offers fewer speeds (v3): only those.
         for style in [s for s in STYLES if s in profile["available_speeds"]]:
             pieces, _skipped = dynamic_profile.plan_pieces(
-                sentences, profile, f"{method}_{style}", engine, first_gap=None)
+                sentences, profile, f"{method}_{style}", engine, first_gap=None,
+                readings=settings.get("readings"))
             rows = []
             for index, piece in enumerate(pieces):
                 row = {"piece": index + 1, "text": piece["display_text"], "gap": piece["gap"],
+                       "tts_text": piece["tts_text"],
                        "chars": piece["engine_len"], "seed": settings["seed_base"] + index + 1}
                 row.update(piece["request"])
                 rows.append(row)
@@ -176,7 +177,9 @@ def sample_jobs(window, profile, engine, settings):
 # ------------------------------------------------------------ rendering
 
 def job_fingerprint(row, speaker, settings):
-    return {"text": tp.prepare_tts_text_dynamic(row["text"]),
+    # plan_pieces' own TTS text (readings included); identical to the old
+    # prepare_tts_text_dynamic(text) when no reading applies.
+    return {"text": row["tts_text"],
             "speaker": os.path.abspath(speaker), "speaker_stamp": sweep.speaker_stamp(speaker),
             "seed": row["seed"], "duration_scale": row.get("duration_scale"),
             "seconds": row.get("seconds"), "trim_tail": bool(settings["trim_tail"]),
@@ -208,7 +211,7 @@ def render_missing(samples, speaker, settings, root, log):
         batch = items[first:first + size]
         jobs = []
         for index, (wav, row) in enumerate(batch, start=1):
-            job = {"index": index, "text": tp.prepare_tts_text_dynamic(row["text"]),
+            job = {"index": index, "text": row["tts_text"],
                    "output_wav": wav + ".part.wav", "seed": row["seed"]}
             if row.get("duration_scale") is not None:
                 job["duration_scale"] = row["duration_scale"]

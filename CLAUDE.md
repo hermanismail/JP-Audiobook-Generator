@@ -27,10 +27,8 @@ The user is slowly re-rendering older books in dynamic mode.
 1. The **reader shows one sentence per `sync.json` entry** for dynamic
    chapters. Accepted for now; grouping sentences for display is open
    (player side, `F:\JPAudiobookPlayer`).
-2. **Readings at render time**: `readings.json` is written only by
-   `dynamic-repair` today. Applying it in the generator's dynamic mode would
-   prevent misread names instead of repairing them - agreed as the natural
-   next step, not built.
+2. ~~Readings at render time~~ - built 2026-09-22, see "Readings" under
+   dynamic profile mode.
 3. The user's by-ear notes on tanya (unmeasured, 2026-09-17): sentences
    ending `！`/`？` sound over-excited and sometimes unfinished; some 19-20
    character sentences ending `。` at x1.5 cut short; a 9-character
@@ -308,6 +306,20 @@ calls for with that seiyuu.
   punctuation mark (a leading `、` is dropped from display and TTS, other
   marks join the previous sentence). Silences: 1.5 s section (also before
   a chapter's first sentence), 1.0 s sentence, 0.7 s comma.
+- **Readings** (built 2026-09-22, dynamic mode ONLY): `readings.json` in
+  the **Output folder**, beside `glossary.json` (which the translation tool
+  reads from `<output_folder>`, not the input folder). Same format
+  dynamic-repair writes; hand-written works - only `word`/`reading` count.
+  Loaded once per run (`dynamic_profile.load_readings`, longest word
+  first), applied by `plan_pieces()` to the **TTS text only**, after
+  cutting and measuring: cuts, `engine_len`, band and an Even-pace length
+  stay keyed to the book's wording, exactly as in dynamic-repair.
+  `sync.json`/`.srt`/translations keep the book's text. A plain replace -
+  a word inside another word changes too (accepted; keep words specific).
+  `render.json` records the file's readings and, per piece, `readings`
+  used. Proof (34 checks, stubbed worker, scratch folders): with no file
+  the plan is identical to `main` over 7 yojo-senki chapters x 2 styles;
+  with one, 562 pieces change TTS text and nothing else.
 - **Output**: `process_chapter_dynamic()` -> the same `finish_chapter()`
   tail as normal mode (stitch, FLAC master, `sync.json`, tags) plus
   `<chapter>.render.json` - per `sync.json` entry the display and engine
@@ -627,6 +639,15 @@ come from the record.
   appended after. Opening a Part pre-fills known readings; "Known
   readings" lists Parts still holding one.
 
+**Readings rendered in** (2026-09-22): a Part's `tts_text` may already
+hold readings the generator applied; `part()["readings"]` (from the
+piece's `readings` in `render.json`) says which, the note marks them
+"rendered with it", and "Known readings" lists only Parts whose text
+still holds a word. An applied repair writes the take's readings back to
+the piece. The user copies the book's `readings.json` from the output
+folder into the repair folder; `load_readings`/`apply_readings` are
+`dynamic_profile`'s, so both tools apply the file identically.
+
 **`translation.json` carries its own `start`/`end` per chunk** (copied
 from `sync.json`), so it must be re-timed with the `.srt` - otherwise a
 later re-emit of the `.srt` would bring back the old times.
@@ -762,6 +783,18 @@ profiles byte-identical in bands/L/pace targets; marinka -> default only
 (x1.1-1.3 per band, L 98); **moeshi's longest step changed** - one x1.8
 tail used to void the whole step, so L 76 -> 98 with a new 77-98 band
 x1.1/1.4/1.7, all her other bands identical.
+
+### Readings in the profiler (2026-09-22)
+
+`--readings <the book's readings.json>` on every stage, and an optional
+"Readings file" row in the window (remembered in `gui_state.json`; the
+runner passes it to every stage and to the window-only listening test,
+which re-plans its samples and would otherwise look for the wrong takes).
+Applied to what the takes are rendered from (`analyze.tts_text`) and to
+what Whisper is compared with (`analyze.spoken_text`, stored per row as
+`spoken_text` and used by recipe.py's re-judging). Lengths and steps stay
+the book's own. A step holding a reading word gets a new take fingerprint
+and is **re-rendered** (user decision); every other step keeps its takes.
 
 ### The window (`app.py` + `profiler_runner.py`, 2026-09-18)
 

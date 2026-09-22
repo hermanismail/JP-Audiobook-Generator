@@ -185,13 +185,15 @@ def score_chapter(root, steps, speaker, settings):
     for step in steps:
         state = sweep.step_state(root, step, speaker, settings)
         sweep.classify(step, state, settings)
+        # Judged against what was meant to be HEARD: the readings applied.
+        spoken = sweep.analyze.spoken_text(step["text"], settings)
         takes = []
         for scale in sorted(state):
             for marker in state[scale]:
                 fp = marker["fingerprint"]
                 wav, _m = sweep.take_paths(root, step, fp["arm"], scale, fp["take"])
                 t = read_transcript(wav)
-                ratio, length_ratio = repair.similarity(step["text"], t["heard"])
+                ratio, length_ratio = repair.similarity(spoken, t["heard"])
                 takes.append(dict(t, scale=scale, arm=fp["arm"], take=fp["take"],
                                   wav=wav, seconds=marker["seconds"],
                                   used_seed=marker["used_seed"],
@@ -199,8 +201,9 @@ def score_chapter(root, steps, speaker, settings):
                                   similarity=round(ratio, 4),
                                   length_ratio=None if length_ratio == float("inf")
                                   else round(length_ratio, 3)))
-        median = flag_takes(step["text"], takes, settings)
+        median = flag_takes(spoken, takes, settings)
         rows.append({"step": step["step"], "tts_len": step["tts_len"], "text": step["text"],
+                     "spoken_text": spoken,
                      "median_similarity": round(median, 4), "takes": takes})
     return rows
 

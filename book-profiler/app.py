@@ -282,6 +282,7 @@ class ProfilerApp(ctk.CTk):
         self.seeded_var = ctk.IntVar(value=1 if self.gui["seeded_arm"] else 0)
         self.clean_root_var = ctk.StringVar(value=self.gui["clean_root"]
                                             or self.gui["profile_root"])
+        self.readings_var = ctk.StringVar(value=self.gui["readings_path"])
         self.tab_var = ctk.StringVar(value=TAB_LABELS[0])
 
         self._build()
@@ -414,6 +415,19 @@ class ProfilerApp(ctk.CTk):
         self.root_hint = ctk.CTkLabel(card, text="", text_color=SUBTITLE, anchor="w",
                                       justify="left", font=ctk.CTkFont(size=11))
         self.root_hint.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(card, text="Readings file (optional) - the book's readings.json, from its "
+                                "output folder", text_color=TITLE, anchor="w",
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(fill="x", padx=16)
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(2, 2))
+        button(row, "Browse…", self._browse_readings).pack(side="right")
+        entry(row, self.readings_var, "leave empty to profile the book's own text").pack(
+            side="left", fill="x", expand=True, padx=(0, 8))
+        self.readings_hint = ctk.CTkLabel(card, text="", text_color=SUBTITLE, anchor="w",
+                                          justify="left", font=ctk.CTkFont(size=11))
+        self.readings_hint.pack(fill="x", padx=16, pady=(0, 6))
+        self.readings_var.trace_add("write", lambda *_: self._refresh_readings())
+        self._refresh_readings(persist=False)
         ctk.CTkCheckBox(card, text="Also use fixed seeds  (3 fixed-seed + 3 random takes per "
                                    "cell instead of 6 random - for seed experiments)",
                         variable=self.seeded_var, fg_color=ACCENT, hover_color=ACCENT_HOVER,
@@ -488,6 +502,41 @@ class ProfilerApp(ctk.CTk):
             self.root_var.set(os.path.normpath(chosen))
             if not self.clean_root_var.get().strip():
                 self.clean_root_var.set(os.path.normpath(chosen))
+
+    def _browse_readings(self):
+        current = self.readings_var.get().strip()
+        chosen = filedialog.askopenfilename(
+            title="Select the book's readings.json",
+            initialdir=os.path.dirname(current) if current else None,
+            filetypes=[("Readings", "readings.json"), ("JSON", "*.json"), ("All files", "*.*")])
+        if chosen:
+            self.readings_var.set(os.path.normpath(chosen))
+
+    def _readings_problem(self):
+        """(problem or None, count) for the readings field."""
+        path = self.readings_var.get().strip()
+        if not path:
+            return None, 0
+        if not os.path.isfile(path):
+            return f"readings file not found: {path}", 0
+        try:
+            return None, len(pr.dynamic_profile.load_readings(path))
+        except pr.dynamic_profile.ProfileError as e:
+            return str(e), 0
+
+    def _refresh_readings(self, persist=True):
+        problem, count = self._readings_problem()
+        if problem:
+            self.readings_hint.configure(text=problem, text_color=FAIL)
+        elif self.readings_var.get().strip():
+            self.readings_hint.configure(
+                text=f"{count} reading(s) - applied to the text the takes are rendered from "
+                     f"and to the Whisper comparison; a length step holding one is re-rendered",
+                text_color=DONE)
+        else:
+            self.readings_hint.configure(text="", text_color=SUBTITLE)
+        if persist:
+            self._persist()
 
     def _browse_clean_root(self):
         chosen = filedialog.askdirectory(title="Select a profile folder",
@@ -565,6 +614,7 @@ class ProfilerApp(ctk.CTk):
             "assign": ASSIGN_KEYS[self.assign_var.get()],
             "seeded_arm": bool(self.seeded_var.get()),
             "clean_root": self.clean_root_var.get().strip(),
+            "readings_path": self.readings_var.get().strip(),
         })
         try:
             pr.save_gui_state(self.gui)
@@ -701,6 +751,9 @@ class ProfilerApp(ctk.CTk):
         if missing:
             return "These chapters have no usable seiyuu file: " + ", ".join(missing[:6]) + \
                 (" …" if len(missing) > 6 else "")
+        problem, _count = self._readings_problem()
+        if problem:
+            return "Readings file: " + problem + " - fix it or clear the field."
         return None
 
     def on_run(self):
@@ -737,7 +790,8 @@ class ProfilerApp(ctk.CTk):
         self.job = pr.Run(self.folder_var.get().strip(), root, plan, bool(self.seeded_var.get()),
                           on_log=self.log,
                           on_state=lambda c, k, t: self.ui(lambda: self._live(c, k, t)),
-                          on_done=lambda s: self.ui(lambda: self._run_done(s)))
+                          on_done=lambda s: self.ui(lambda: self._run_done(s)),
+                          readings=self.readings_var.get().strip())
         self.head_sub.configure(text=f"Profiling {book}…")
         self.status_label.configure(text="running - the PC is kept awake", text_color=ACCENT)
         self._refresh_buttons()
@@ -788,8 +842,13 @@ class ProfilerApp(ctk.CTk):
         if self.job:
             return
         root, book = self.root_var.get().strip(), self.book()
+        readings = self.readings_var.get().strip()
+        problem, _count = self._readings_problem()
+        if problem:
+            messagebox.showerror("Readings file", problem)
+            return
         if ready:
-            pr.open_listening_window(book, root, speaker, label)
+            pr.open_listening_window(book, root, speaker, label, readings)
             self.log(f"opened the listening test: {pr.nickname(speaker)} / {label}")
             return
         warning = pr.gpu_warning()
@@ -797,7 +856,8 @@ class ProfilerApp(ctk.CTk):
                                                icon="warning"):
             return
         self.job = pr.ListenRun(book, root, speaker, label, on_log=self.log,
-                                on_done=lambda s: self.ui(lambda: self._listen_done(s)))
+                                on_done=lambda s: self.ui(lambda: self._listen_done(s)),
+                                readings=readings)
         self.head_sub.configure(text=f"Listening test: {pr.nickname(speaker)} / {label}…")
         self.status_label.configure(text="rendering samples", text_color=ACCENT)
         self._refresh_buttons()

@@ -88,7 +88,6 @@ if GENERATOR_DIR not in sys.path:
     sys.path.insert(0, GENERATOR_DIR)
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
-import text_pipeline as tp  # noqa: E402
 import analyze  # noqa: E402
 
 # Same pin as run_audiobook.py and seiyuu-audition.
@@ -164,7 +163,10 @@ def fingerprint(step, arm, scale, take, speaker, settings):
         "speaker_path": os.path.abspath(speaker),
         "speaker_stamp": speaker_stamp(speaker),
         "text": step["text"],
-        "tts_text": tp.prepare_tts_text_dynamic(step["text"]),
+        # With the book's readings (2026-09-22): a step holding a reading
+        # word no longer matches its old takes and is re-rendered (decision);
+        # every other step's fingerprint is unchanged.
+        "tts_text": analyze.tts_text(step["text"], settings),
         "scale": round(scale, 2),
         "arm": arm,
         "take": take,
@@ -322,7 +324,7 @@ def render_round(jobs, speaker, settings, root, log):
             os.remove(job["marker"])
         seed = settings["fixed_seeds"][job["take"] - 1] if job["arm"] == "seeded" else None
         payload_jobs.append({"index": index,
-                             "text": tp.prepare_tts_text_dynamic(job["step"]["text"]),
+                             "text": analyze.tts_text(job["step"]["text"], settings),
                              "output_wav": job["wav"],
                              "duration_scale": job["scale"],
                              "seed": seed})
