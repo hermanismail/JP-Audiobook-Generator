@@ -88,6 +88,7 @@ DEFAULT_SETTINGS = {
     "last_book": "",
     "last_text_folder": "",
     "last_output_folder": "",   # save_settings() keeps only these keys - it was dropped before
+    "export_overwrite": False,  # Output tab: replace chapter_<N>_img_1.png already there
 }
 
 # The prompt rules that made the difference (DESIGN.md v2, M8): the references
@@ -770,14 +771,34 @@ def run_edit(settings, book, base, member, count, base_image, instruction, membe
     log(f"DONE edited {count}")
 
 
-def export_final(root, base, final_path, output_folder):
+def export_target(base, output_folder):
     """The player reads chapter_<N>_img_<i>.png next to the chapter audio; v2
     writes exactly one per chapter."""
-    number = base.split("_")[1]
-    dst = os.path.join(output_folder, f"chapter_{number}_img_1.png")
+    return os.path.join(output_folder, f"chapter_{base.split('_')[1]}_img_1.png")
+
+
+def export_final(root, base, final_path, output_folder, entry=None):
+    """Write the chapter image; with `entry` (its chapters.json record), note
+    what was exported and when, so the Output tab can tell an export made
+    stale by a later Promote."""
+    dst = export_target(base, output_folder)
     import comfy
     comfy.to_greyscale(final_path, dst)
+    if entry is not None:
+        entry["export"] = {"path": dst, "source": final_path,
+                           "time": time.strftime("%Y-%m-%d %H:%M")}
     return dst
+
+
+def export_state(entry):
+    """'exported' | 'changed' (a different image was promoted since) |
+    'missing' (the exported file is gone) | 'none'."""
+    ex = (entry or {}).get("export")
+    if not ex:
+        return "none"
+    if not os.path.isfile(ex.get("path", "")):
+        return "missing"
+    return "exported" if ex.get("source") == entry.get("final") else "changed"
 
 
 def clear_history(root, base, keep_paths):

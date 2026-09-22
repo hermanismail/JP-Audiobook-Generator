@@ -374,12 +374,53 @@ class App(ctk.CTk):
         ctk.CTkLabel(header, textvariable=self.status_var, text_color=SUBTITLE,
                      font=ctk.CTkFont(size=12)).pack(side="right", padx=20)
         self.tabs = ctk.CTkTabview(self, fg_color=BG, segmented_button_selected_color=ACCENT,
-                                   segmented_button_selected_hover_color=ACCENT_HOVER)
+                                   segmented_button_selected_hover_color=ACCENT_HOVER,
+                                   command=self._tab_changed)
         self.tabs.pack(fill="both", expand=True, padx=14, pady=(6, 14))
         self._build_read(self.tabs.add("1  Read"))
         self._build_cast(self.tabs.add("2  Cast"))
         self._build_chapters(self.tabs.add("3  Chapters"))
+        self._build_output(self.tabs.add("4  Output"))
         self.draw_status, self.draw_bar = self.chapter_status, self.chapter_bar
+
+    def _tab_changed(self):
+        if self.tabs.get() == "4  Output":
+            self._guard(self.render_output)
+
+    def _build_output(self, tab):
+        """Every chapter's promoted image in one grid - to judge the book's
+        consistency at a glance - and a bulk export (user request 2026-09-22)."""
+        card = self._card(tab)
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(12, 4))
+        ctk.CTkLabel(row, text="output folder", width=100, anchor="w", text_color=TITLE).pack(side="left")
+        button(row, "Browse", self.browse_output, width=80).pack(side="right")
+        # the same variable as the Chapters tab's field: one folder, never two
+        entry(row, self.output_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(4, 4))
+        button(row, "Select all", self.output_select_all, width=90, height=30).pack(side="left")
+        button(row, "Select none", self.output_select_none, width=96, height=30).pack(side="left", padx=6)
+        self.export_btn = button(row, "Export selected", self.export_selected, width=140, primary=True)
+        self.export_btn.pack(side="left", padx=(6, 0))
+        self.overwrite_var = ctk.BooleanVar(value=bool(self.settings.get("export_overwrite")))
+        ctk.CTkSwitch(row, text="Overwrite existing files", variable=self.overwrite_var,
+                      progress_color=ACCENT, text_color=ENTRY_TEXT,
+                      command=self.remember).pack(side="left", padx=16)
+        self.output_count = ctk.CTkLabel(row, text="", text_color=SUBTITLE, font=ctk.CTkFont(size=12))
+        self.output_count.pack(side="left", padx=6)
+        self.output_summary = ctk.CTkLabel(card, text="", anchor="w", justify="left", wraplength=1180,
+                                           text_color=ENTRY_TEXT, font=ctk.CTkFont(size=12))
+        self.output_summary.pack(fill="x", padx=16, pady=(2, 2))
+        self.output_result = ctk.CTkLabel(card, text="", anchor="w", justify="left", wraplength=1180,
+                                          text_color=SUBTITLE, font=ctk.CTkFont(size=12))
+        self.output_result.pack(fill="x", padx=16, pady=(0, 10))
+        self.output_grid = ctk.CTkScrollableFrame(tab, fg_color=CARD, corner_radius=11, border_width=1,
+                                                  border_color=BORDER)
+        self.output_grid.pack(fill="both", expand=True)
+        self.output_picked = set()
+        self.output_last = {}          # base -> (ok, message) from the last export this session
+        self._output_thumbs = []
 
     def _card(self, parent):
         card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=11, border_width=1, border_color=BORDER)
@@ -660,6 +701,8 @@ class App(ctk.CTk):
         self.settings["last_output_folder"] = self.output_var.get().strip()
         self.settings["google_project"] = self.project_var.get().strip()
         self.settings["image_engine"] = ENGINE_NAMES.get(self.default_engine_var.get(), "google")
+        if hasattr(self, "overwrite_var"):
+            self.settings["export_overwrite"] = bool(self.overwrite_var.get())
         il.save_settings(self.settings)
 
     def open_book(self):
@@ -709,6 +752,141 @@ class App(ctk.CTk):
                          text_color=TITLE, font=ctk.CTkFont(size=12)).pack(fill="x", padx=8, pady=(4, 0))
             ctk.CTkLabel(card, text=rec["appearance"], anchor="w", justify="left", wraplength=330,
                          text_color=SUBTITLE, font=ctk.CTkFont(size=11)).pack(fill="x", padx=8, pady=(0, 5))
+
+    # ------------------------------------------------------------- output
+    OUTPUT_THUMB = (150, 219)
+    OUTPUT_COLUMNS = 6
+
+    def output_bases(self):
+        """Every chapter of the book: from the text folder, plus any chapter
+        the work folder knows that the folder no longer lists."""
+        text = self.text_var.get().strip()
+        bases = il.chapter_bases(text) if os.path.isdir(text) else []
+        known = sorted((self.chapters or {}).get("chapters", {}))
+        return sorted(set(bases) | set(known))
+
+    def render_output(self):
+        for w in self.output_grid.winfo_children():
+            w.destroy()
+        self._output_thumbs = []
+        if not self.chapters:
+            self.output_summary.configure(text="Open a book first (1 Read).")
+            return
+        with_image, missing = [], []
+        for base in self.output_bases():
+            record = self.chapters["chapters"].get(base)
+            final = (record or {}).get("final", "")
+            if final and os.path.isfile(final):
+                with_image.append(base)
+                continue
+            if not record or not record.get("prompt"):
+                why = "not read"
+            elif record.get("samples") or record.get("chain"):
+                why = "samples, none promoted"
+            else:
+                why = "nothing drawn"
+            missing.append(f"{base.replace('chapter_', '')} ({why})")
+        self.output_picked &= set(with_image)
+        total = len(with_image) + len(missing)
+        text = f"{len(with_image)} of {total} chapters have a promoted image."
+        if missing:
+            text += "   Without one: " + ", ".join(missing)
+        self.output_summary.configure(text=text, text_color=DONE if not missing else ENTRY_TEXT)
+        for i, base in enumerate(with_image):
+            self._output_card(base, i // self.OUTPUT_COLUMNS, i % self.OUTPUT_COLUMNS)
+        self._output_count()
+
+    def _output_card(self, base, r, c):
+        record = self.chapters["chapters"][base]
+        picked = base in self.output_picked
+        card = ctk.CTkFrame(self.output_grid, fg_color=PASTEL_VIOLET if picked else CARD, corner_radius=8,
+                            border_width=2 if picked else 1, border_color=ACCENT if picked else BORDER)
+        card.grid(row=r, column=c, padx=6, pady=6, sticky="n")
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=6, pady=(4, 0))
+        var = ctk.BooleanVar(value=picked)
+        ctk.CTkCheckBox(top, text=base.replace("chapter_", "Chapter "), variable=var, width=24,
+                        fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TITLE,
+                        command=lambda: self.output_pick(base, var.get())).pack(side="left")
+        with Image.open(record["final"]) as im:
+            image = ctk.CTkImage(light_image=im.copy(), size=self.OUTPUT_THUMB)
+        self._output_thumbs.append(image)
+        thumb = ctk.CTkLabel(card, image=image, text="", cursor="hand2")
+        thumb.pack(padx=6, pady=2)
+        thumb.bind("<Button-1>", lambda _e, p=record["final"]: ImageViewer(self, p))
+        # this session's result first; otherwise what chapters.json remembers
+        last = self.output_last.get(base)
+        state = il.export_state(record)
+        if last:
+            text, colour = last[1], DONE if last[0] else FAIL
+        elif state == "exported":
+            text, colour = f"exported ✓ {record['export']['time']}", DONE
+        elif state == "changed":
+            text, colour = "changed since export", WARN
+        elif state == "missing":
+            text, colour = "exported file is gone", WARN
+        else:
+            text, colour = "not exported", SUBTITLE
+        ctk.CTkLabel(card, text=text, text_color=colour, wraplength=self.OUTPUT_THUMB[0],
+                     font=ctk.CTkFont(size=11)).pack(padx=6, pady=(0, 6))
+
+    def output_pick(self, base, on):
+        (self.output_picked.add if on else self.output_picked.discard)(base)
+        self.render_output()
+
+    def output_select_all(self):
+        self.output_picked = {b for b, r in (self.chapters or {}).get("chapters", {}).items()
+                              if r.get("final") and os.path.isfile(r["final"])}
+        self.render_output()
+
+    def output_select_none(self):
+        self.output_picked = set()
+        self.render_output()
+
+    def _output_count(self):
+        n = len(self.output_picked)
+        self.output_count.configure(text=f"{n} selected" if n else "")
+        self.export_btn.configure(state="normal" if n else "disabled")
+
+    def export_selected(self):
+        folder = self.output_var.get().strip()
+        if not os.path.isdir(folder):
+            messagebox.showerror("Export", "Choose the book's output folder (where the chapter "
+                                           "audio is).")
+            return
+        self.remember()
+        overwrite = self.overwrite_var.get()
+        done = skipped = failed = 0
+        self.output_last = {}
+        for base in sorted(self.output_picked):
+            record = self.chapters["chapters"].get(base)
+            if not record or not record.get("final") or not os.path.isfile(record["final"]):
+                self.output_last[base] = (False, "failed: no promoted image")
+                failed += 1
+                continue
+            target = il.export_target(base, folder)
+            if os.path.exists(target) and not overwrite:
+                self.output_last[base] = (False, "skipped - file already exists")
+                skipped += 1
+                continue
+            try:
+                il.export_final(self.root(), base, record["final"], folder, record)
+                self.output_last[base] = (True, f"exported ✓ {record['export']['time']}")
+                done += 1
+            except OSError as e:
+                self.output_last[base] = (False, f"failed: {e.strerror or e}")
+                failed += 1
+        self.save()
+        parts = [f"{done} exported"]
+        if skipped:
+            parts.append(f"{skipped} skipped (already there - turn on Overwrite to replace)")
+        if failed:
+            parts.append(f"{failed} failed")
+        self.output_result.configure(text=" · ".join(parts) + f"   →   {folder}",
+                                     text_color=FAIL if failed else WARN if skipped else DONE)
+        self.log_line(f"-- export to {folder}: " + ", ".join(parts))
+        self.render_output()
+        self.render_chapter_list()
 
     # --------------------------------------------------------------- cast
     def save_cast_file(self):
@@ -1613,7 +1791,9 @@ class App(ctk.CTk):
         if os.path.exists(target) and not messagebox.askyesno(
                 "Export", f"{os.path.basename(target)} already exists.\n\nReplace it?"):
             return
-        dst = il.export_final(self.root(), self.chapter, record["final"], folder)
+        dst = il.export_final(self.root(), self.chapter, record["final"], folder, record)
+        self.save()          # the Output tab reads the export record
+        self.output_last.pop(self.chapter, None)
         self.log_line(f"-- exported {dst}")
         messagebox.showinfo("Export", f"Written:\n{dst}")
 

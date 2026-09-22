@@ -104,6 +104,27 @@ working image, **Back to before** returns to what it started from.
 **Clear history** deletes every sample and take of that chapter except the
 final and working images.
 
+## 4 Output
+
+Every chapter's promoted image in one grid, to check the book's consistency
+at a glance. Click a thumbnail to open it in the zoom viewer. The summary
+line lists the chapters without a promoted image, and why ("not read",
+"nothing drawn", "samples, none promoted").
+
+Tick images (or **Select all**) and **Export selected** writes
+`chapter_<N>_img_1.png` into the output folder, the same folder as the
+Chapters tab's field. **Overwrite existing files** is off by default: a file
+already there is skipped and reported. Each card shows its state, which is
+remembered in `chapters.json`:
+
+- exported ✓ with the time;
+- **changed since export**, when a different image was promoted afterwards;
+- exported file is gone;
+- not exported.
+
+The line under the buttons sums up the last export ("17 exported · 1
+skipped").
+
 Everything is saved as you go, to `chapters.json` and `cast.json`.
 
 ## CLI
