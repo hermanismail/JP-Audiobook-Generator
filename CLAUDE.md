@@ -10,7 +10,7 @@ Everything in this file describes code that exists today.
 
 ## State of play (2026-09-18) - start here
 
-Everything below is merged to `main`. One generator, five separate tools:
+Everything below is merged to `main`. One generator, six separate tools:
 
 | folder | what | status |
 |---|---|---|
@@ -20,6 +20,7 @@ Everything below is merged to `main`. One generator, five separate tools:
 | `chapter-repair/` | repairs pre-dynamic chapters | **frozen** - kept, not developed |
 | `seiyuu-audition/` | hear a seiyuu at given settings | stable |
 | `seiyuu-onboarder/` | train a new seiyuu | stable |
+| `scene-illustrator/` | one zen-mode image per chapter: Google (Gemini on Agent Platform) reads and draws with cast sheets, local Qwen-Image for refused scenes; Read / Cast / Chapters / Output tabs | built 2026-09-22, used on all of after-dark |
 
 The user is slowly re-rendering older books in dynamic mode.
 
@@ -37,10 +38,16 @@ The user is slowly re-rendering older books in dynamic mode.
 4. The existing tanya profiling data sits in `F:\tmp\book-profiler`
    (2 GB of takes); the user will decide where profiles live.
 5. The older ones listed under "Text, chunking and hallucination" below.
-6. **Scene illustrator** (planned 2026-09-18, a separate tool): zen-mode
-   images per chapter, timed to `sync.json` through a
-   `chapter_<N>.images.json` sidecar. Local test: ComfyUI at `F:\ComfyUI`
-   with FLUX.2 klein 4B, ~10 s per image on the 4060.
+6. **Scene illustrator** (built 2026-09-22, merged): one image per chapter,
+   exported as `chapter_<N>_img_1.png`. Its whole history - v1's four
+   scenes and reference sheets, v2, the local Qwen build, the Google
+   switch - is in `scene-illustrator/DESIGN.md` with every measurement.
+   Still open: timing images to `sync.json` through a sidecar (dropped for
+   one image per chapter; would need a player change, handed over to
+   `F:\JPAudiobookPlayer`). Google needs the user's own project ID in
+   `scene-illustrator/settings.json` (uncommitted) and
+   `gcloud auth application-default login`; their trial credits cannot pay
+   for AI Studio, only Agent Platform.
 
 **Player side (user decision 2026-09-18): the Android app is FROZEN.**
 Development goes into the web client first, then the server. Player
