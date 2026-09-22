@@ -246,16 +246,13 @@ def parse_folder(folder, settings):
 
 def load_readings(path):
     """[{word, reading, added, chapter}] - longest word first, which is the
-    order they must be applied in (a name inside a longer name)."""
-    data = _read_json(path)
-    items = [r for r in data.get("readings", []) if r.get("word") and r.get("reading")]
-    return sorted(items, key=lambda r: -len(r["word"]))
+    order they must be applied in (a name inside a longer name). The same
+    file the generator applies at render time (dynamic_profile)."""
+    return dynamic_profile.load_readings(path)
 
 
 def apply_readings(text, readings):
-    for r in readings or []:
-        text = text.replace(r["word"], r["reading"])
-    return text
+    return dynamic_profile.apply_readings(text, readings)[0]
 
 
 def merge_readings(path, book, new_items, chapter):
@@ -341,6 +338,9 @@ class DynChapter:
             "band": piece.get("band"), "request": piece["request"],
             "used_seed": piece.get("used_seed"), "gap_before": piece.get("gap_before"),
             "repairs": len(piece.get("repairs") or []),
+            # Readings already inside tts_text: applied by the generator at
+            # render time, or by an earlier repair ({} for older renders).
+            "readings": dict(piece.get("readings") or {}),
         }
 
     def check_audio(self):
@@ -661,10 +661,11 @@ def apply(chapter, selections, log):
         history = piece.setdefault("repairs", [])
         history.append({"at": now,
                         "before": {k: piece.get(k) for k in ("tts_text", "request", "used_seed",
-                                                             "seconds")},
+                                                             "seconds", "readings")},
                         "style": take["style"]})
         piece.update({"tts_text": take["tts_text"], "request": take["request"],
-                      "used_seed": take["used_seed"], "seconds": e["new_duration"]})
+                      "used_seed": take["used_seed"], "seconds": e["new_duration"],
+                      "readings": dict(take.get("readings") or {})})
     chapter.render.setdefault("repairs", []).append(
         {"at": now, "parts": [e["index"] + 1 for e in edits], "delta": p["delta"]})
     _write_json(chapter.render_path, chapter.render)

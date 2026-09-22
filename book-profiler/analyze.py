@@ -60,6 +60,7 @@ GENERATOR_DIR = os.path.dirname(SCRIPT_DIR)
 if GENERATOR_DIR not in sys.path:
     sys.path.insert(0, GENERATOR_DIR)
 import text_pipeline as tp  # noqa: E402
+import dynamic_profile  # noqa: E402
 
 DEFAULT_SETTINGS = {
     "irodori_root": "C:\\Irodori-TTS",
@@ -126,6 +127,10 @@ def add_run_options(parser, takes=False):
     under it, so it has to reach every stage or they would disagree about
     where the analysis, the takes and the recipe are."""
     parser.add_argument("--work-root", help="output root (default: work_root in settings.json)")
+    # The book's readings.json (it lives in the generator's OUTPUT folder,
+    # which the profiler does not know). TTS text and Whisper comparison
+    # only - lengths stay the book's own, as in the generator.
+    parser.add_argument("--readings", help="the book's readings.json (optional)")
     if takes:
         parser.add_argument("--arms", help="comma list, e.g. 'random' or 'seeded,random'")
         parser.add_argument("--takes", type=int, help="takes per arm per scale")
@@ -134,6 +139,14 @@ def add_run_options(parser, takes=False):
 def apply_run_options(settings, args):
     if getattr(args, "work_root", None):
         settings["work_root"] = os.path.abspath(args.work_root)
+    settings["readings"] = []
+    if getattr(args, "readings", None):
+        if not os.path.isfile(args.readings):
+            raise SystemExit(f"--readings: no such file {args.readings}")
+        try:
+            settings["readings"] = dynamic_profile.load_readings(args.readings)
+        except dynamic_profile.ProfileError as e:
+            raise SystemExit(f"--readings: {e}")
     if getattr(args, "arms", None):
         arms = [a.strip() for a in args.arms.split(",") if a.strip()]
         unknown = [a for a in arms if a not in ("seeded", "random")]
@@ -149,6 +162,19 @@ def apply_run_options(settings, args):
         raise SystemExit(f"the seeded arm has {len(settings['fixed_seeds'])} fixed seeds - "
                          f"takes cannot exceed that")
     return settings
+
+
+def tts_text(text, settings):
+    """What the engine is sent for `text`: the generator's dynamic rule,
+    then the book's readings - the same order plan_pieces() uses."""
+    return dynamic_profile.apply_readings(tp.prepare_tts_text_dynamic(text),
+                                          settings.get("readings"))[0]
+
+
+def spoken_text(text, settings):
+    """`text` as it is meant to be HEARD - readings applied - which is what
+    Whisper's transcript is compared with (decision 2026-09-22)."""
+    return dynamic_profile.apply_readings(text, settings.get("readings"))[0]
 
 
 # A chapter whose sweep audio was deleted by the GUI's Clean-up tab. Resume

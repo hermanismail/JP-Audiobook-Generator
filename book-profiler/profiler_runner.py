@@ -69,6 +69,9 @@ GUI_DEFAULTS = {
     "chapters": {},             # {base: {"enabled": bool, "speaker_path": str}}
     "seeded_arm": False,
     "clean_root": "",
+    # The book's readings.json (it lives in the generator's output folder);
+    # optional - "" profiles the book's own text, as before.
+    "readings_path": "",
 }
 ARM_OPTIONS = {False: ("random", 6), True: ("seeded,random", 3)}
 ATTEMPTS = 2                    # retry once, then skip
@@ -305,7 +308,9 @@ class Run:
     on_done   (summary dict)
     """
 
-    def __init__(self, book_folder, root, plan, seeded_arm, on_log, on_state, on_done):
+    def __init__(self, book_folder, root, plan, seeded_arm, on_log, on_state, on_done,
+                 readings=""):
+        self.readings = os.path.abspath(readings) if readings else ""
         self.book_folder = os.path.abspath(book_folder)
         self.book = analyze.book_name(book_folder)
         self.root = os.path.abspath(root)
@@ -329,6 +334,10 @@ class Run:
         """Runs one CLI stage; returns its exit code (None if stopped)."""
         cmd = [sys.executable, "-u", os.path.join(SCRIPT_DIR, script), *args,
                "--work-root", self.root]
+        # Every stage takes it (analyze.add_run_options); only the TTS text
+        # and the Whisper comparison use it.
+        if self.readings:
+            cmd += ["--readings", self.readings]
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
         # The stage runs on this venv's own interpreter; an inherited
         # VIRTUAL_ENV only makes the TTS worker's `uv run` warn that it
@@ -455,7 +464,8 @@ class ListenRun(Run):
     process (listen.py --window-only), so closing it never touches this
     window."""
 
-    def __init__(self, book, root, speaker, profile_label, on_log, on_done):
+    def __init__(self, book, root, speaker, profile_label, on_log, on_done, readings=""):
+        self.readings = os.path.abspath(readings) if readings else ""
         self.book, self.root = book, os.path.abspath(root)
         self.speaker, self.profile_label = speaker, profile_label
         self.on_log, self.on_done = _never_raises(on_log), _never_raises(on_done)
@@ -470,14 +480,18 @@ class ListenRun(Run):
             self.on_log(f"=== listening test: {nickname(self.speaker)} / {self.profile_label}")
             ok = self._attempts("listening test", "listen.py", *args, "--no-window")
         if ok:
-            open_listening_window(self.book, self.root, self.speaker, self.profile_label)
+            open_listening_window(self.book, self.root, self.speaker, self.profile_label,
+                                  self.readings)
         self.on_done({"ok": bool(ok), "stopped": self.stopped.is_set()})
 
 
-def open_listening_window(book, root, speaker, profile_label):
+def open_listening_window(book, root, speaker, profile_label, readings=""):
+    # The window re-plans the samples to find their takes, so it needs the
+    # same readings or it would look for takes that were never rendered.
     subprocess.Popen([sys.executable, os.path.join(SCRIPT_DIR, "listen.py"), "--book", book,
                       "--scope", SCOPE, "--speaker", speaker, "--profile", profile_label,
-                      "--window-only", "--work-root", os.path.abspath(root)],
+                      "--window-only", "--work-root", os.path.abspath(root)]
+                     + (["--readings", readings] if readings else []),
                      cwd=SCRIPT_DIR, creationflags=CREATE_NO_WINDOW)
 
 

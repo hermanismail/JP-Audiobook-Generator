@@ -570,11 +570,15 @@ class RepairApp(ctk.CTk):
         for w in self.result_widgets:
             w.set_selected(w.index == index)
         if index not in self.part_text:
-            original = self.chapter.part(index)["tts_text"]
+            part = self.chapter.part(index)
+            original = part["tts_text"]
             text = dr.apply_readings(original, self.readings)
             self.part_text[index] = text
-            self.part_readings[index] = {r["word"]: r["reading"] for r in self.readings
-                                         if r["word"] in original}
+            # Readings the render already baked into tts_text, plus any the
+            # book's readings.json adds now.
+            self.part_readings[index] = dict(part["readings"])
+            self.part_readings[index].update({r["word"]: r["reading"] for r in self.readings
+                                              if r["word"] in original})
         # Only the styles the chapter's profile offers (a narrow seiyuu has
         # fewer), plus Custom scale. Each Part opens on the style its
         # chapter was rendered with.
@@ -620,8 +624,10 @@ class RepairApp(ctk.CTk):
             self.readings_note.configure(text="No reading applied to this Part.")
             return
         known = {r["word"] for r in self.readings}
+        rendered = self.chapter.part(self.selected)["readings"] if self.chapter else {}
         self.readings_note.configure(text="Readings in this text: " + ",  ".join(
-            f"{w} → {r}" + ("" if w in known else " (new - saved to readings.json on Apply)")
+            f"{w} → {r}" + (" (rendered with it)" if rendered.get(w) == r else "")
+            + ("" if w in known else " (new - saved to readings.json on Apply)")
             for w, r in used.items()))
 
     def _remember_text(self):

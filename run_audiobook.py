@@ -977,9 +977,10 @@ def wav_duration(path):
         return get_audio_duration(path)
 
 
-def process_chapter_dynamic(chapter_path, assignment, engine):
+def process_chapter_dynamic(chapter_path, assignment, engine, readings=None):
     """One chapter in dynamic profile mode. `assignment` comes from
-    resolve_dynamic_plan(); `engine` is dynamic_profile.make_engine()."""
+    resolve_dynamic_plan(); `engine` is dynamic_profile.make_engine();
+    `readings` is dynamic_profile.load_readings() - TTS text only."""
     base = os.path.splitext(os.path.basename(chapter_path))[0]
     profile, style = assignment["profile"], assignment["style"]
     print(f"\n>>> Processing: {base}")
@@ -991,15 +992,17 @@ def process_chapter_dynamic(chapter_path, assignment, engine):
 
     with open(chapter_path, "r", encoding="utf-8") as f:
         raw_text = f.read()
-    pieces, skipped = dynamic_profile.plan_chapter(raw_text, profile, style, engine)
+    pieces, skipped = dynamic_profile.plan_chapter(raw_text, profile, style, engine, readings)
     if not pieces:
         print(f"Error: No sentences produced for {base} - is the file empty?")
         return
     cut = sum(1 for p in pieces if p["piece"] > 1)
     beyond = sum(1 for p in pieces if p["beyond"])
+    with_readings = sum(1 for p in pieces if p["readings"])
     print(f"Found {len(pieces)} request(s) from {len({p['sentence'] for p in pieces})} "
           f"sentence(s); {cut} cut piece(s) past L={profile['comfortable_length']}, "
-          f"{beyond} longer than any measured band, {len(skipped)} skipped (nothing to read).")
+          f"{beyond} longer than any measured band, {len(skipped)} skipped (nothing to read)"
+          + (f", {with_readings} with a reading." if readings else "."))
 
     work_dir = os.path.join(TEMP_DIR, base)
     os.makedirs(work_dir, exist_ok=True)
@@ -1076,6 +1079,9 @@ def process_chapter_dynamic(chapter_path, assignment, engine):
             "style": style,
             "style_label": dynamic_profile.STYLE_LABELS[style],
             "chapter_was_profiled": base in (profile.get("chapters") or []),
+            # The book's readings as they were at render time; each piece
+            # lists the ones its TTS text used.
+            "readings": [{"word": r["word"], "reading": r["reading"]} for r in readings or []],
             "sync_entries": len(sync_data["chunks"]),
             "skipped_texts": skipped,
             "pieces": [{
@@ -1084,6 +1090,7 @@ def process_chapter_dynamic(chapter_path, assignment, engine):
                 "piece": p["piece"],
                 "display_text": p["display_text"],
                 "tts_text": p["tts_text"],
+                "readings": p["readings"],
                 "engine_len": p["engine_len"],
                 "band": p["band"],
                 "beyond_measured": p["beyond"],
@@ -1197,7 +1204,7 @@ def main():
 
     # Dynamic profile mode: resolve and check every chapter's profile before
     # any GPU time is spent, and drop the chapters left unticked in Customize.
-    dynamic_plan, engine = None, None
+    dynamic_plan, engine, readings = None, None, []
     if GENERATION_MODE == "dynamic":
         print("Mode: dynamic profile")
         normalize, normalizer_path = dynamic_profile.load_irodori_normalizer(UV_PROJECT_DIR)
@@ -1209,9 +1216,15 @@ def main():
         engine = dynamic_profile.make_engine(normalize)
         try:
             dynamic_plan = resolve_dynamic_plan(chapter_files)
+            # The book's readings, beside glossary.json in the OUTPUT folder
+            # (decision 2026-09-22). No file = nothing changes.
+            readings_path = os.path.join(OUTPUT_FOLDER, dynamic_profile.READINGS_FILE)
+            readings = dynamic_profile.load_readings(readings_path)
         except dynamic_profile.ProfileError as e:
             print(f"Error: {e}")
             return
+        print(f"Readings: {len(readings)} from {readings_path}" if readings
+              else f"Readings: none ({readings_path} not found)")
         unticked = [b for b, a in dynamic_plan.items() if a is None]
         if unticked:
             print(f"Skipping {len(unticked)} chapter(s) not ticked in Customize: "
@@ -1260,7 +1273,7 @@ def main():
     for chapter_file in pending:
         if dynamic_plan is not None:
             base = os.path.splitext(os.path.basename(chapter_file))[0]
-            process_chapter_dynamic(chapter_file, dynamic_plan[base], engine)
+            process_chapter_dynamic(chapter_file, dynamic_plan[base], engine, readings)
         else:
             process_chapter(chapter_file)
 

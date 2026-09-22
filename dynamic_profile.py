@@ -253,9 +253,45 @@ def summary_lines(profile, style_key=None):
     return lines
 
 
+# ------------------------------------------------------------ readings
+
+# Per book, in the OUTPUT folder beside glossary.json (decision 2026-09-22),
+# hand-written or grown by dynamic-repair. Only "word" and "reading" matter:
+#     {"version": 1, "book": "...", "readings": [{"word": "此方", "reading": "こちら"}]}
+READINGS_FILE = "readings.json"
+
+
+def load_readings(path):
+    """[{word, reading, ...}] longest word first - the order they must be
+    applied in (a name inside a longer name). [] when there is no file.
+    Raises ProfileError for a file that cannot be read."""
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        items = [r for r in data.get("readings", [])
+                 if isinstance(r, dict) and r.get("word") and r.get("reading")]
+    except (OSError, ValueError, AttributeError) as e:
+        raise ProfileError(f"{path} is not a readable readings file ({e})")
+    return sorted(items, key=lambda r: -len(r["word"]))
+
+
+def apply_readings(text, readings):
+    """(text with every reading applied, {word: reading} actually used).
+    A plain replace, longest word first: a word inside another word is
+    replaced too (accepted 2026-09-22 - keep words specific)."""
+    used = {}
+    for r in readings or []:
+        if r["word"] in text:
+            text = text.replace(r["word"], r["reading"])
+            used[r["word"]] = r["reading"]
+    return text, used
+
+
 # ------------------------------------------------------------ a chapter
 
-def plan_pieces(sentences, profile, style_key, engine, first_gap="section"):
+def plan_pieces(sentences, profile, style_key, engine, first_gap="section", readings=None):
     """The requests for a run of sentences.
 
     `sentences` is [(text, gap_before)] - gap_before being
@@ -274,7 +310,12 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section"):
         skipped  display texts that leave nothing for the engine - a line
                  of "×××" once × is stripped. Normal mode drops these too
                  (build_chunks skips empty TTS text); here they are
-                 returned so the caller can record them."""
+                 returned so the caller can record them.
+
+    `readings` (load_readings()) change ONLY the text sent to the engine,
+    after cutting and measuring: band, cuts and an Even-pace length stay
+    keyed to the book's own wording, as in dynamic-repair. Each piece
+    records the ones it used in "readings"."""
     measure = lambda text: len(engine(text))
     limit = profile["comfortable_length"]
     out, skipped = [], []
@@ -295,11 +336,13 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section"):
         for piece_number, (piece, cut_kind) in enumerate(cuts, start=1):
             piece_len = measure(piece)
             band, beyond = band_for(profile, piece_len)
+            tts_text, used = apply_readings(tp.prepare_tts_text_dynamic(piece), readings)
             out.append({
                 "sentence": number,
                 "piece": piece_number,
                 "display_text": piece,
-                "tts_text": tp.prepare_tts_text_dynamic(piece),
+                "tts_text": tts_text,
+                "readings": used,
                 "engine_len": piece_len,
                 "gap": gap if piece_number == 1 else cut_kind,
                 "band": f"{band['from_len']}-{band['to_len']}",
@@ -314,8 +357,8 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section"):
     return out, skipped
 
 
-def plan_chapter(raw_text, profile, style_key, engine):
+def plan_chapter(raw_text, profile, style_key, engine, readings=None):
     """plan_pieces() over a whole chapter's text. Returns (pieces, skipped)."""
     units = tp.dynamic_sentences(raw_text)
     return plan_pieces([(u["text"], u["gap_before"], u["removed_before"], u["removed_after"])
-                        for u in units], profile, style_key, engine)
+                        for u in units], profile, style_key, engine, readings=readings)

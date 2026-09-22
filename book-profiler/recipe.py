@@ -161,7 +161,9 @@ def word_slips(step_row, settings):
         t["word_slip"] = False
         if not t["flags"]:
             continue
-        m = mismatch(step_row["text"], t["heard"])
+        # spoken_text: readings applied (score.py, 2026-09-22); older rows
+        # have none and were scored against the book text.
+        m = mismatch(step_row.get("spoken_text", step_row["text"]), t["heard"])
         # A dropped ending is the abandoned-sentence failure, never a slip:
         # chapter_002's 聞き慣れてもなお我慢のならないじ loses 自分の声だ.
         # Nor is an ADDED one (score.py's ran_long): marinka's …葉を噛む、噛む。
@@ -600,7 +602,7 @@ def main():
     score_settings = score.load_settings()
     for s in scores:
         for row in s["rows"]:
-            score.flag_takes(row["text"], row["takes"], score_settings)
+            score.flag_takes(row.get("spoken_text", row["text"]), row["takes"], score_settings)
 
     normalize, _path = analyze.load_irodori_normalizer(settings["irodori_root"])
     engine = analyze.make_engine(normalize)
