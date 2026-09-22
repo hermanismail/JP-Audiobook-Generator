@@ -44,15 +44,32 @@ class GoogleEngine:
         self.log = log
         self._client = None
 
+    # A call that never answers must not hang the run: a read sat 10+ minutes
+    # on chapter_010 with no reply, no retry and no error (user report
+    # 2026-09-22). Normal calls take 8-60 s.
+    TEXT_TIMEOUT_S = 180
+    IMAGE_TIMEOUT_S = 120
+
+    def _make_client(self, timeout_s):
+        from google import genai
+        from google.genai import types
+        if not self.s.get("google_project"):
+            raise RuntimeError("no Google project set (google_project in settings.json)")
+        return genai.Client(vertexai=True, project=self.s["google_project"],
+                            location=self.s.get("google_location") or "global",
+                            http_options=types.HttpOptions(timeout=timeout_s * 1000))
+
     @property
     def client(self):
         if self._client is None:
-            from google import genai
-            if not self.s.get("google_project"):
-                raise RuntimeError("no Google project set (google_project in settings.json)")
-            self._client = genai.Client(vertexai=True, project=self.s["google_project"],
-                                        location=self.s.get("google_location") or "global")
+            self._client = self._make_client(self.TEXT_TIMEOUT_S)
         return self._client
+
+    @property
+    def image_client(self):
+        if getattr(self, "_image_client", None) is None:
+            self._image_client = self._make_client(self.IMAGE_TIMEOUT_S)
+        return self._image_client
 
     # ------------------------------------------------------------ records
     def _record(self, kind, model, resp, secs, refused=""):
@@ -89,15 +106,19 @@ class GoogleEngine:
         """One JSON answer. A transport error is retried twice; a refusal is not."""
         from google.genai import types
         model = self.s["google_text_model"]
-        config = types.GenerateContentConfig(system_instruction=system, temperature=0.3,
-                                             response_mime_type="application/json")
+        config = types.GenerateContentConfig(
+            system_instruction=system, temperature=0.3, response_mime_type="application/json",
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
         last = None
         for attempt in range(3):
             t0 = time.time()
             try:
                 resp = self.client.models.generate_content(model=model, contents=user, config=config)
-            except Exception as e:  # noqa: BLE001 - network, quota, 5xx
+            except Exception as e:  # noqa: BLE001 - network, quota, 5xx, timeout
                 last = e
+                self.log(f"SERVER {what}: no answer after {time.time() - t0:.0f}s "
+                         f"({type(e).__name__}) - try {attempt + 2} of 3" if attempt < 2 else
+                         f"SERVER {what}: no answer after {time.time() - t0:.0f}s ({type(e).__name__})")
                 time.sleep(3 * (attempt + 1))
                 continue
             why = self._why_empty(resp)
@@ -126,15 +147,19 @@ class GoogleEngine:
                 contents.append(p)
         config = types.GenerateContentConfig(
             response_modalities=["IMAGE", "TEXT"],
-            image_config=types.ImageConfig(aspect_ratio=self.s.get("google_aspect") or "2:3"))
+            image_config=types.ImageConfig(aspect_ratio=self.s.get("google_aspect") or "2:3"),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
         t0 = time.time()
         last = None
         for attempt in range(3):
             try:
-                resp = self.client.models.generate_content(model=model, contents=contents, config=config)
+                resp = self.image_client.models.generate_content(model=model, contents=contents,
+                                                                 config=config)
                 break
-            except Exception as e:  # noqa: BLE001 - network, quota, 5xx
+            except Exception as e:  # noqa: BLE001 - network, quota, 5xx, timeout
                 last = e
+                self.log(f"SERVER {what}: no answer ({type(e).__name__})"
+                         + (f" - try {attempt + 2} of 3" if attempt < 2 else ""))
                 time.sleep(5 * (attempt + 1))
         else:
             raise RuntimeError(f"{what}: Google did not answer ({last})")

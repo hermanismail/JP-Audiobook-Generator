@@ -254,7 +254,7 @@ def build_prompt(subject):
     return f"{STYLE_NOTE} {MINIMAL_NOTE} {subject.strip()}"
 
 
-def run_read(settings, book, text_folder, only_chapter, log):
+def run_read(settings, book, text_folder, only_chapter, log, only_missing=False):
     root = book_dir(settings, book)
     write_json(os.path.join(root, "book.json"),
                {"book": book, "text_folder": os.path.abspath(text_folder)})
@@ -273,8 +273,10 @@ def run_read(settings, book, text_folder, only_chapter, log):
     cast = load_cast(root)
     engine = _google(settings, log)
     todo = [b for b in bases if not only_chapter or b == only_chapter]
+    if only_missing:     # carry on after a stopped run without paying twice
+        todo = [b for b in todo if b not in data["chapters"]]
     ok = failed = 0
-    log(f"SERVER reading with {settings['google_text_model']}")
+    log(f"SERVER reading {len(todo)} chapter(s) with {settings['google_text_model']}")
     for i, base in enumerate(todo, 1):
         text = read_text(os.path.join(text_folder, base + ".txt"))
         t0 = time.time()
@@ -803,6 +805,7 @@ def main():
     r.add_argument("--book", required=True)
     r.add_argument("--text", required=True)
     r.add_argument("--chapter", default="")
+    r.add_argument("--missing", action="store_true", help="only chapters Google has not read yet")
     w = sub.add_parser("write")
     w.add_argument("--book", required=True)
     w.add_argument("--chapter", required=True)
@@ -838,7 +841,8 @@ def main():
     settings = load_settings()
     try:
         if args.cmd == "read":
-            sys.exit(0 if run_read(settings, args.book, args.text, args.chapter, log) else 2)
+            sys.exit(0 if run_read(settings, args.book, args.text, args.chapter, log,
+                                   only_missing=args.missing) else 2)
         if args.cmd == "write":
             run_write(settings, args.book, args.chapter, args.cast, log)
             return

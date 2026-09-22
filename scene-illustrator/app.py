@@ -985,7 +985,11 @@ class App(ctk.CTk):
         sample = SAMPLE_RE.match(line)
         if chapter:
             self.read_bar.set(int(chapter.group(1)) / int(chapter.group(2)))
-            self.status_var.set(f"reading {chapter.group(3)}")
+            self.status_var.set(f"read {chapter.group(3)}, reading the next")
+            # the roster as it grows - it used to show the old one until the end
+            self.read = il.load_read(self.root())
+            self.render_roster()
+            self.refresh_cost()
         elif take:
             if self._starting:
                 self._starting = 0.0
@@ -1074,17 +1078,32 @@ class App(ctk.CTk):
         if not book:
             messagebox.showerror("Scene Illustrator", "Give the book a name.")
             return
-        if self.read and self.read["chapters"] and not messagebox.askyesno(
+        if not self.project_var.get().strip():
+            messagebox.showerror("Read book", "Enter your Google project ID first.")
+            return
+        args = ["read", "--book", book, "--text", text]
+        read = self.read or {}
+        done = set(read.get("chapters", {})) if read.get("reader") == "google" else set()
+        missing = [b for b in il.chapter_bases(text) if b not in done]
+        if done and missing:
+            # a stopped run: carry on without paying for the finished chapters again
+            answer = messagebox.askyesnocancel(
+                "Read book", f"Google has read {len(done)} chapter(s); {len(missing)} are not read "
+                             f"yet.\n\nYes - read only those {len(missing)}\nNo - read every "
+                             "chapter again")
+            if answer is None:
+                return
+            if answer:
+                args.append("--missing")
+        elif read.get("chapters") and not messagebox.askyesno(
                 "Read book", "Read again, with Google?\n\nSummaries, moments and the roster are "
                              "rewritten; the first Google reading keeps the old one as "
                              "read_local_backup.json. Prompts you edited, samples, edits and "
                              "final images are kept."):
             return
-        if not self.project_var.get().strip():
-            messagebox.showerror("Read book", "Enter your Google project ID first.")
-            return
-        self.log_line(f"-- reading every chapter of {book} with Google")
-        self._run_child(["read", "--book", book, "--text", text], self._read_done)
+        self.log_line(f"-- reading {'the unread' if '--missing' in args else 'every'} chapter(s) "
+                      f"of {book} with Google")
+        self._run_child(args, self._read_done)
 
     def _read_done(self, _code):
         self.open_book()
