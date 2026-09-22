@@ -29,6 +29,8 @@ from PIL import Image
 # USD per 1M tokens (list prices, 2026-09-22). Thinking tokens bill as output.
 RATES = {
     "gemini-3.8-flash": {"in": 0.75, "out": 3.75},
+    # not on the price page read on 2026-09-22; estimated at 3.8's rates
+    "gemini-3.7-flash": {"in": 0.75, "out": 3.75},
     "gemini-3.1-flash-image": {"in": 0.50, "out": 3.00, "image_out": 60.0},
 }
 
@@ -47,8 +49,14 @@ class GoogleEngine:
     # A call that never answers must not hang the run: a read sat 10+ minutes
     # on chapter_010 with no reply, no retry and no error (user report
     # 2026-09-22). Normal calls take 8-60 s.
-    TEXT_TIMEOUT_S = 180
+    TEXT_TIMEOUT_S = 240        # chapter_010 once took 119 s and succeeded
     IMAGE_TIMEOUT_S = 120
+    # Pay-as-you-go Gemini draws on a pool shared with everyone (Google's
+    # "dynamic shared quota"): no fixed calls-per-minute, but 429 / 503 / 504
+    # when the pool is busy. Google's advice is exponential backoff with
+    # jitter; retries 3 s and 6 s apart gave up inside a busy spell
+    # (chapter_011, 2026-09-22). Waits before tries 2-5, plus up to 30% jitter:
+    BACKOFF_S = (5, 15, 40, 90)
 
     def _make_client(self, timeout_s):
         from google import genai
@@ -91,6 +99,49 @@ class GoogleEngine:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return row
 
+    def _call(self, client, model, contents, config, what, fallback=""):
+        """generate_content with patient retries on transport and capacity
+        errors. After the first failure a `fallback` model takes over, if
+        given: on 2026-09-22 gemini-3.8-flash answered chapter_011 in 92 s
+        after three 500s while 3.7-flash took 11 s. Every failed try goes into
+        the usage log with its error, so a bad run can be read back afterwards
+        (the window log is not kept). Returns (response, model used)."""
+        import random
+        tries = len(self.BACKOFF_S) + 1
+        last = None
+        for attempt in range(tries):
+            if attempt == 1 and fallback and fallback != model:
+                self.log(f"SERVER {what}: {model} is busy - switching to {fallback}")
+                model = fallback
+            t0 = time.time()
+            try:
+                return client.models.generate_content(model=model, contents=contents,
+                                                      config=config), model
+            except Exception as e:  # noqa: BLE001 - network, 429, 5xx, timeout
+                last = e
+                code = getattr(e, "code", None) or type(e).__name__
+                self._record_error(what, model, time.time() - t0, f"{code}: {str(e)[:160]}")
+                # a request Google rejects as malformed will not improve by waiting
+                # (499 is our own time limit cancelling the call - worth another try)
+                if isinstance(code, int) and 400 <= code < 500 and code not in (408, 429, 499):
+                    break
+                if attempt + 1 < tries:
+                    wait = self.BACKOFF_S[attempt] * (1 + random.random() * 0.3)
+                    self.log(f"SERVER {what}: no answer after {time.time() - t0:.0f}s ({code}) - "
+                             f"waiting {wait:.0f}s, try {attempt + 2} of {tries}")
+                    time.sleep(wait)
+                else:
+                    self.log(f"SERVER {what}: no answer after {time.time() - t0:.0f}s ({code})")
+        raise RuntimeError(f"{what}: Google did not answer after {tries} tries ({last})")
+
+    def _record_error(self, what, model, secs, error):
+        row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": "error", "model": model,
+               "what": what, "in": 0, "out": 0, "usd": 0, "secs": round(secs, 1), "error": error}
+        path = usage_path(self.s)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     @staticmethod
     def _why_empty(resp):
         fb = getattr(resp, "prompt_feedback", None)
@@ -110,26 +161,20 @@ class GoogleEngine:
             system_instruction=system, temperature=0.3, response_mime_type="application/json",
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
         last = None
-        for attempt in range(3):
+        for _ in range(2):          # a second go only for an answer that is not JSON
             t0 = time.time()
-            try:
-                resp = self.client.models.generate_content(model=model, contents=user, config=config)
-            except Exception as e:  # noqa: BLE001 - network, quota, 5xx, timeout
-                last = e
-                self.log(f"SERVER {what}: no answer after {time.time() - t0:.0f}s "
-                         f"({type(e).__name__}) - try {attempt + 2} of 3" if attempt < 2 else
-                         f"SERVER {what}: no answer after {time.time() - t0:.0f}s ({type(e).__name__})")
-                time.sleep(3 * (attempt + 1))
-                continue
+            resp, used = self._call(self.client, model, user, config, what,
+                                    fallback=self.s.get("google_text_fallback", ""))
             why = self._why_empty(resp)
-            row = self._record("text", model, resp, time.time() - t0, why)
+            row = self._record("text", used, resp, time.time() - t0, why)
             if why:
                 raise Refused(f"{what}: {why}")
             try:
                 return json.loads(resp.text), row
             except (ValueError, TypeError) as e:
                 last = e
-        raise RuntimeError(f"{what}: Google did not answer ({last})")
+                self.log(f"SERVER {what}: the answer was not JSON - asking again")
+        raise RuntimeError(f"{what}: Google's answer was not JSON ({last})")
 
     # -------------------------------------------------------------- image
     def image(self, parts, out_path, what="image"):
@@ -150,19 +195,7 @@ class GoogleEngine:
             image_config=types.ImageConfig(aspect_ratio=self.s.get("google_aspect") or "2:3"),
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
         t0 = time.time()
-        last = None
-        for attempt in range(3):
-            try:
-                resp = self.image_client.models.generate_content(model=model, contents=contents,
-                                                                 config=config)
-                break
-            except Exception as e:  # noqa: BLE001 - network, quota, 5xx, timeout
-                last = e
-                self.log(f"SERVER {what}: no answer ({type(e).__name__})"
-                         + (f" - try {attempt + 2} of 3" if attempt < 2 else ""))
-                time.sleep(5 * (attempt + 1))
-        else:
-            raise RuntimeError(f"{what}: Google did not answer ({last})")
+        resp, model = self._call(self.image_client, model, contents, config, what)
         data = [p.inline_data.data for c in (resp.candidates or []) for p in ((c.content and c.content.parts) or [])
                 if getattr(p, "inline_data", None) and p.inline_data.data]
         if not data:
@@ -197,6 +230,8 @@ def spent(settings):
                 try:
                     row = json.loads(line)
                 except ValueError:
+                    continue
+                if row.get("kind") == "error":      # a failed try: no answer, no charge
                     continue
                 usd += row.get("usd", 0)
                 calls += 1

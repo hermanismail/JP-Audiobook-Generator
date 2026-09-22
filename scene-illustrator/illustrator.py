@@ -71,6 +71,7 @@ DEFAULT_SETTINGS = {
     "google_project": "",          # the user's own; lives in the uncommitted settings.json
     "google_location": "global",
     "google_text_model": "gemini-3.8-flash",
+    "google_text_fallback": "gemini-3.7-flash",   # takes over after the first busy answer
     "google_image_model": "gemini-3.1-flash-image",
     "google_aspect": "2:3",
     "image_engine": "google",      # default for chapters and sheets: google | local
