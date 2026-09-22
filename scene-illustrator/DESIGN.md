@@ -184,7 +184,7 @@ User report after using the Qwen build: the chapter summaries are weak, and
 usable images still take too many draws and edits. Trial of Google models
 on Agent Platform (formerly Vertex AI; the user's trial began after
 2026-03-02, so trial credits cannot pay for AI Studio - Agent Platform only).
-Project `project-753d9895-50f3-41a3-ac6`, location `global`, login by
+The user's own project (ID in `settings.json` only), location `global`, login by
 `gcloud auth application-default login` (no key in any file). Script and
 outputs: `F:\tmp\scene-illustrator\google\`.
 
@@ -201,6 +201,28 @@ route is ~15x faster per image and reads whole chapters; the cost for the
 trial was cents (to confirm in Billing, which lags a day). The image filter
 refuses the book's violent/sexual scenes, so a local engine must remain as
 the fallback for those.
+
+## The Google engine - decisions (user, 2026-09-22) and what the build found
+
+| # | decision |
+|---|---|
+| g1 | Google becomes the **second engine** - the default for images, with a per-chapter switch; the local Qwen engine stays for what Google refuses. |
+| g2 | Google's reading **replaces** the Qwen reading (kept once as `read_local_backup.json`); the local LLM leaves the tool. |
+| g3 | Login by Application Default Credentials on Agent Platform; the project ID lives in the uncommitted `settings.json`. |
+
+Found while building, on the after-dark copy:
+
+- the reading was given the cast's names and used them: chapter_001's people
+  came back as Mari and Takahashi, so the cast ticks guess right;
+- **the image filter judges the prompt, not the book**: chapter_003's moment
+  (Kaoru inspecting the injured woman's face with a desk lamp) drew fine,
+  where the trial's "naked, bleeding" prompt was refused;
+- a person with no sheet who is only NAMED is drawn as a stereotype (the
+  19-year-old became an older woman in a qipao) - Write prompt describes such
+  people from the text instead of naming them;
+- a refused take stops the run at once rather than trying the next take;
+  it still costs its input and is logged;
+- the Google draw returns 848x1264 (2:3) rather than the local 832x1216.
 
 ---
 

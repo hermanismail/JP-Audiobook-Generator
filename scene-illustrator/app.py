@@ -1,11 +1,13 @@
 """
 app.py
 ------
-The Scene Illustrator window. One image per chapter, drawn and edited by
-Qwen-Image-2.1 with character sheets (2026-09-21).
+The Scene Illustrator window. One image per chapter, with character sheets
+(2026-09-21), read and drawn by Google with the local Qwen-Image engine for
+what Google refuses (2026-09-22, DESIGN.md M11).
 
-    1 Read       the first 25% of every chapter -> a drawable moment, an image
-                 prompt and a character roster (local LLM)
+    1 Read       every WHOLE chapter -> a summary, 3 key moments, who is in
+                 them and an image prompt (Gemini); the Google project and the
+                 default image engine; the running Google cost
     2 Cast       the people who get a character sheet: imported from v1 or
                  drawn here, with the roster names that mean them
     3 Chapters   per chapter: tick the cast (up to 3) -> Write prompt ->
@@ -31,6 +33,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
+import google_engine as ge
 import illustrator as il
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +61,8 @@ TAKE_RE = re.compile(r"^TAKE (\d+)/(\d+) start$")
 PROGRESS_RE = re.compile(r"^PROGRESS (\d+) (\d+)$")
 SAMPLE_RE = re.compile(r"^SAMPLE (\d+)/(\d+) (.+?) ([\d.]+)s$")
 THUMB = (168, 246)
+ENGINE_LABELS = {"google": "Google (Nano Banana 2)", "local": "Local (Qwen-Image)"}
+ENGINE_NAMES = {v: k for k, v in ENGINE_LABELS.items()}
 
 
 def button(parent, text, command, width=96, primary=False, danger=False, height=32, **kw):
@@ -341,6 +346,12 @@ class App(ctk.CTk):
         self.m_tag = ctk.StringVar()
         self.m_count = ctk.StringVar(value=str(self.settings["draw_samples"]))
         self.m_change = ctk.StringVar()
+        self.project_var = ctk.StringVar(value=self.settings.get("google_project", ""))
+        self.default_engine_var = ctk.StringVar(value=ENGINE_LABELS[self.settings["image_engine"]])
+        self.engine_var = ctk.StringVar(value=ENGINE_LABELS["google"])
+        self.moment_var = ctk.StringVar()
+        self.cost_var = ctk.StringVar(value="")
+        self._refused = ""             # REFUSED reason of the running job
         self.output_var = ctk.StringVar(value=self.settings.get("last_output_folder", ""))
 
         self._build()
@@ -355,6 +366,8 @@ class App(ctk.CTk):
         header.pack(fill="x")
         ctk.CTkLabel(header, text="Scene Illustrator", text_color=TITLE,
                      font=ctk.CTkFont(size=18, weight="bold")).pack(side="left", padx=20, pady=14)
+        ctk.CTkLabel(header, textvariable=self.cost_var, text_color=ACCENT,
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(side="right", padx=(0, 20))
         ctk.CTkLabel(header, textvariable=self.status_var, text_color=SUBTITLE,
                      font=ctk.CTkFont(size=12)).pack(side="right", padx=20)
         self.tabs = ctk.CTkTabview(self, fg_color=BG, segmented_button_selected_color=ACCENT,
@@ -384,6 +397,18 @@ class App(ctk.CTk):
         self.work_label = ctk.CTkLabel(row, text="", text_color=SUBTITLE, font=ctk.CTkFont(size=11))
         self.work_label.pack(side="left", padx=12)
         row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(row, text="Google project", width=110, anchor="w", text_color=TITLE).pack(side="left")
+        project = entry(row, self.project_var, width=300, placeholder="your Google Cloud project ID")
+        project.pack(side="left")
+        project.bind("<FocusOut>", lambda _e: self.remember())
+        ctk.CTkLabel(row, text="images by default:", text_color=SUBTITLE).pack(side="left", padx=(20, 6))
+        ctk.CTkOptionMenu(row, variable=self.default_engine_var, values=list(ENGINE_LABELS.values()),
+                          width=200, fg_color=CARD, button_color=NEUTRAL_BORDER, button_hover_color=BG,
+                          text_color=ENTRY_TEXT, command=lambda _v: self.remember()).pack(side="left")
+        ctk.CTkLabel(row, text="login: gcloud auth application-default login", text_color=SUBTITLE,
+                     font=ctk.CTkFont(size=11)).pack(side="right")
+        row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=(4, 14))
         self.read_btn = button(row, "Read book", self.start_read, width=120, primary=True)
         self.read_btn.pack(side="left")
@@ -391,8 +416,8 @@ class App(ctk.CTk):
         self.stop_btn.pack(side="left", padx=8)
         self.read_info = ctk.CTkLabel(row, text="", text_color=SUBTITLE, font=ctk.CTkFont(size=12))
         self.read_info.pack(side="left", padx=10)
-        ctk.CTkLabel(row, text="the first 25% of each chapter", text_color=SUBTITLE,
-                     font=ctk.CTkFont(size=11)).pack(side="right")
+        ctk.CTkLabel(row, text="whole chapters, by Gemini - about 20 s and $0.01 a chapter",
+                     text_color=SUBTITLE, font=ctk.CTkFont(size=11)).pack(side="right")
         self.read_bar = ctk.CTkProgressBar(card, progress_color=ACCENT, height=8)
         self.read_bar.set(0)
         self.read_bar.pack(fill="x", padx=16, pady=(0, 14))
@@ -503,9 +528,18 @@ class App(ctk.CTk):
         self.final_label = ctk.CTkLabel(head, text="", text_color=DONE,
                                         font=ctk.CTkFont(size=12, weight="bold"))
         self.final_label.pack(side="right")
-        self.moment_label = ctk.CTkLabel(right, text="", anchor="w", justify="left", wraplength=880,
-                                         text_color=SUBTITLE, font=ctk.CTkFont(size=12))
-        self.moment_label.pack(fill="x", padx=12)
+        # the reading's 3 key moments; picking one is what Write prompt writes
+        # for (it replaced a one-line moment, so the panes below keep their room)
+        mrow = ctk.CTkFrame(right, fg_color="transparent")
+        mrow.pack(fill="x", padx=12)
+        ctk.CTkLabel(mrow, text="moment:", text_color=TITLE).pack(side="left", padx=(0, 6))
+        button(mrow, "Summary", self.show_summary, width=90, height=28).pack(side="right")
+        self.moment_menu = ctk.CTkOptionMenu(mrow, variable=self.moment_var, values=[""],
+                                             fg_color=CARD, button_color=NEUTRAL_BORDER,
+                                             button_hover_color=BG, text_color=ENTRY_TEXT,
+                                             dynamic_resizing=False, anchor="w",
+                                             command=self.pick_moment)
+        self.moment_menu.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.prompt_box = ctk.CTkTextbox(right, height=84, fg_color=CARD, border_width=1,
                                          border_color=ENTRY_BORDER, text_color=ENTRY_TEXT,
                                          font=ctk.CTkFont(size=12))
@@ -520,7 +554,10 @@ class App(ctk.CTk):
         self.draw_btn = button(row, "Draw samples", self.start_draw, width=130, primary=True)
         self.draw_btn.pack(side="left")
         entry(row, self.samples_var, width=44).pack(side="left", padx=(8, 4))
-        ctk.CTkLabel(row, text="samples", text_color=SUBTITLE).pack(side="left")
+        ctk.CTkLabel(row, text="samples  on", text_color=SUBTITLE).pack(side="left")
+        ctk.CTkOptionMenu(row, variable=self.engine_var, values=list(ENGINE_LABELS.values()), width=190,
+                          fg_color=CARD, button_color=NEUTRAL_BORDER, button_hover_color=BG,
+                          text_color=ENTRY_TEXT, command=self.set_chapter_engine).pack(side="left", padx=6)
         button(row, "Reset prompt", self.reset_prompt, width=110).pack(side="right")
         self.write_btn = button(row, "Write prompt", self.start_write, width=120)
         self.write_btn.pack(side="right", padx=6)
@@ -618,6 +655,8 @@ class App(ctk.CTk):
         self.settings["last_text_folder"] = self.text_var.get().strip()
         self.settings["last_book"] = self.book_var.get().strip()
         self.settings["last_output_folder"] = self.output_var.get().strip()
+        self.settings["google_project"] = self.project_var.get().strip()
+        self.settings["image_engine"] = ENGINE_NAMES.get(self.default_engine_var.get(), "google")
         il.save_settings(self.settings)
 
     def open_book(self):
@@ -628,6 +667,7 @@ class App(ctk.CTk):
         self.cast = il.load_cast(self.root())
         self.chapter = ""
         self.member = ""
+        self.refresh_cost()
         self.refresh_read_info()
         self.render_roster()
         self.render_member_list()
@@ -832,7 +872,8 @@ class App(ctk.CTk):
         self._answer_click(f"starting {count} sheet take(s)…", cast_tab=True)
         self.log_line(f"-- drawing {count} sheet take(s) for {member['name']}")
         self._run_child(["sheet", "--book", self.book_var.get().strip(), "--member", self.member,
-                         "--count", str(count)], self._sheet_done)
+                         "--count", str(count), "--engine", il.engine_for(self.settings, None)],
+                        self._sheet_done)
 
     def start_sheet_edit(self):
         member = self.member_rec()
@@ -857,7 +898,8 @@ class App(ctk.CTk):
         self.log_line(f"-- editing {member['name']}'s sheet: {change}")
         self._run_child(["edit", "--book", self.book_var.get().strip(), "--member", self.member,
                          "--base", member["sheet"], "--instruction-file", path,
-                         "--count", str(count)], self._sheet_done)
+                         "--count", str(count), "--engine", il.engine_for(self.settings, None)],
+                        self._sheet_done)
 
     def _sheet_done(self, _code):
         member_id = self._target[1] if self._target else ""
@@ -916,14 +958,20 @@ class App(ctk.CTk):
                     for b in self._job_buttons():
                         b.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
-                    self.status_var.set("" if code == 0 else f"stopped (exit {code})")
+                    self.status_var.set("" if code == 0 else
+                                        "refused by Google" if code == 3 else f"stopped (exit {code})")
+                    self.refresh_cost()
                     self._take = None
                     self._starting = 0.0
                     self.draw_bar.stop()
                     self.draw_bar.configure(mode="determinate")
-                    if code != 0:
+                    if code == 3:
+                        self.draw_status.configure(text="refused by Google: " + self._refused,
+                                                   text_color=FAIL)
+                    elif code != 0:
                         self.draw_status.configure(text="stopped", text_color=WARN)
                     on_done(code)
+                    self._refused = ""
         except queue.Empty:
             pass
         if self._starting or (self._take and not self._take_done):
@@ -959,6 +1007,8 @@ class App(ctk.CTk):
             self.update_status(done=True)
         elif line.startswith("PROMPT "):
             self._written = line.split(" ", 1)[1].strip()
+        elif line.startswith("REFUSED "):
+            self._refused = line.split(" ", 1)[1].strip()
         elif line.startswith("SERVER"):
             self.status_var.set(line.split(" ", 1)[1])
             if self._starting:
@@ -1025,10 +1075,15 @@ class App(ctk.CTk):
             messagebox.showerror("Scene Illustrator", "Give the book a name.")
             return
         if self.read and self.read["chapters"] and not messagebox.askyesno(
-                "Read book", "Read again?\n\nMoments and the roster are rewritten. Prompts you "
-                             "edited, samples, edits and final images are kept."):
+                "Read book", "Read again, with Google?\n\nSummaries, moments and the roster are "
+                             "rewritten; the first Google reading keeps the old one as "
+                             "read_local_backup.json. Prompts you edited, samples, edits and "
+                             "final images are kept."):
             return
-        self.log_line(f"-- reading the first 25% of every chapter of {book}")
+        if not self.project_var.get().strip():
+            messagebox.showerror("Read book", "Enter your Google project ID first.")
+            return
+        self.log_line(f"-- reading every chapter of {book} with Google")
         self._run_child(["read", "--book", book, "--text", text], self._read_done)
 
     def _read_done(self, _code):
@@ -1131,6 +1186,54 @@ class App(ctk.CTk):
                             hover_color=ACCENT_HOVER, text_color=ENTRY_TEXT,
                             command=lambda i=member_id, v=var: toggle(i, v)).pack(side="left", padx=(4, 8))
 
+    @staticmethod
+    def moment_choices(record):
+        return [f"{i}. {m['moment']}" for i, m in enumerate(record.get("moments") or [], 1)]
+
+    def current_pick(self, record):
+        moments = record.get("moments") or []
+        pick = record.get("moment_pick")
+        if pick is None or not (0 <= pick < len(moments)):
+            source = (self.read or {}).get("chapters", {}).get(self.chapter, {})
+            pick = source.get("best", 0) if moments else 0
+        return max(0, min(pick, len(moments) - 1)) if moments else 0
+
+    def pick_moment(self, label):
+        record = self.entry()
+        if not record or not record.get("moments"):
+            return
+        index = int(label.split(".", 1)[0]) - 1
+        if index == self.current_pick(record):
+            return
+        record["moment_pick"] = index
+        record["moment"] = record["moments"][index]["moment"]
+        record["quote"] = record["moments"][index]["quote"]
+        self.save()
+        self.draw_status.configure(text="moment changed - Write prompt writes the prompt for it",
+                                   text_color=WARN)
+
+    def show_summary(self):
+        record = self.entry()
+        if not record:
+            return
+        people = ", ".join(record.get("characters") or []) or "nobody identified"
+        lines = [record.get("summary") or "(no summary - read the book again with Google)", "",
+                 f"In the chosen moment: {people}", ""]
+        for i, m in enumerate(record.get("moments") or [], 1):
+            lines += [f"{i}. {m['moment']}", f"    「{m['quote']}」" if m.get("quote") else ""]
+        messagebox.showinfo(self.chapter.replace("chapter_", "Chapter "), "\n".join(lines))
+
+    def set_chapter_engine(self, label):
+        record = self.entry()
+        if record is not None:
+            record["engine"] = ENGINE_NAMES.get(label, "google")
+            self.save()
+
+    def refresh_cost(self):
+        usd, calls, refused = ge.spent(self.settings)
+        self.cost_var.set(f"Google so far: ${usd:.2f} · {calls} calls" + (
+            f" · {refused} refused" if refused else "") if calls else "")
+
     def set_chapter_cast(self, ticked):
         record = self.entry()
         if record is not None:
@@ -1151,14 +1254,18 @@ class App(ctk.CTk):
         record = self.entry()
         if not record:
             self.chapter_title.configure(text="Choose a chapter")
-            self.moment_label.configure(text="")
+            self.moment_menu.configure(values=[""])
+            self.moment_var.set("")
             self.final_label.configure(text="")
             self.sample_gallery.show(None)
             self.edit_gallery.show(None)
             return
         self.chapter_title.configure(text=self.chapter.replace("chapter_", "Chapter "))
-        read_as = ", ".join(record.get("characters") or []) or "nobody named"
-        self.moment_label.configure(text=f"{record.get('moment', '')}   ·   the reading saw: {read_as}")
+        choices = self.moment_choices(record)
+        self.moment_menu.configure(values=choices or [record.get("moment", "") or "(not read yet)"])
+        pick = self.current_pick(record)
+        self.moment_var.set(choices[pick] if choices else (record.get("moment", "") or "(not read yet)"))
+        self.engine_var.set(ENGINE_LABELS[il.engine_for(self.settings, record)])
         self.final_label.configure(text="final image set" if record["final"] else "")
         self.prompt_box.insert("1.0", record["prompt"])
         guessed = record.get("cast") is None and self.chapter_cast()
@@ -1324,19 +1431,37 @@ class App(ctk.CTk):
                 "Draw", f"The prompt never names {', '.join(missing)}, so the model cannot tell "
                         "who does what.\n\nWrite prompt fixes that. Draw anyway?"):
             return
+        engine = il.engine_for(self.settings, record)
         args = ["draw", "--book", self.book_var.get().strip(), "--chapter", self.chapter,
-                "--count", str(count)]
+                "--count", str(count), "--engine", engine]
         for member_id in cast:
             args += ["--cast", member_id]
         self._drawn = []
         self._target = ("samples", self.chapter, -1)
         self._answer_click(f"starting to draw {count} sample(s)…")
         self.stage.set("Samples")
-        self.log_line(f"-- drawing {count} sample(s) for {self.chapter}"
+        self.log_line(f"-- drawing {count} sample(s) for {self.chapter} on {engine}"
                       + (f" with {', '.join(names)}" if names else " with the style sample"))
         self._run_child(args, self._draw_done)
 
-    def _draw_done(self, _code):
+    def _offer_local(self, base, code):
+        """Google refuses the book's violent and sexual scenes (M11); the local
+        engine draws them. Switch the chapter over if the user agrees."""
+        if code != 3 or not base:
+            return
+        record = self.chapters["chapters"].get(base)
+        if record is None:
+            return
+        if messagebox.askyesno("Refused by Google",
+                               f"Google would not draw this:\n{self._refused}\n\nSwitch "
+                               f"{base.replace('chapter_', 'Chapter ')} to the local engine "
+                               "(Qwen-Image, about 4 min a take)? Then press the button again."):
+            record["engine"] = "local"
+            self.save()
+            self.log_line(f"-- {base} now draws on the local engine")
+
+    def _draw_done(self, code):
+        self._offer_local(self._target[1] if self._target else "", code)
         base = self._target[1] if self._target else ""
         if self._drawn and self._target:
             record = self.chapters["chapters"].setdefault(base, il.new_chapter())
@@ -1380,12 +1505,14 @@ class App(ctk.CTk):
         self.stage.set("Fine-tune")
         self.log_line(f"-- editing {self.chapter}: {change}")
         args = ["edit", "--book", self.book_var.get().strip(), "--chapter", self.chapter,
-                "--base", record["chosen"], "--instruction-file", path, "--count", str(count)]
+                "--base", record["chosen"], "--instruction-file", path, "--count", str(count),
+                "--engine", il.engine_for(self.settings, record)]
         for member_id in self.edit_sheets:
             args += ["--cast", member_id]
         self._run_child(args, self._edit_done)
 
-    def _edit_done(self, _code):
+    def _edit_done(self, code):
+        self._offer_local(self._target[1] if self._target else "", code)
         base = self._target[1] if self._target else ""
         if self._target and self._target[0] == "edit":
             _, base, index = self._target

@@ -1,9 +1,10 @@
 # Scene Illustrator
 
-One zen-mode image per chapter, drawn and edited by **Qwen-Image-2.1** with
-**character sheets**. Every decision and every measurement behind it:
-[DESIGN.md](DESIGN.md) (M9 and M10 for the Qwen switch; v2 and v1 below them
-as history).
+One zen-mode image per chapter, with **character sheets**. The book is read,
+and images are drawn, by **Google** (Gemini on Agent Platform). The local
+**Qwen-Image-2.1** engine stays for the scenes Google refuses. Every decision
+and every measurement behind it: [DESIGN.md](DESIGN.md) (M11 for Google, M9 and
+M10 for Qwen; v2 and v1 below them as history).
 
 ## Run
 
@@ -18,23 +19,40 @@ Needs, outside this folder (paths in `settings.json`, defaults in
 
 | for | what |
 |---|---|
-| reading, Write prompt | `C:\llama.cpp\llama-server.exe` + `F:\models\llm\Qwen3.5-9B-Q4_K_M.gguf` |
-| drawing and editing | `F:\ComfyUI` (2026-09-20 or later) with `qwen_image_2.1_Q4_K_M.gguf` (ComfyUI-GGUF node), `qwen3vl_8b_w4a8.safetensors`, `qwen_image_2.1_vae_bf16.safetensors` |
+| reading, Write prompt, Google images | a Google Cloud project with the **Agent Platform API** enabled (`aiplatform.googleapis.com`), its ID in the Read tab, and this PC logged in once with `gcloud auth application-default login`. No key is stored anywhere. |
+| local images | `F:\ComfyUI` (2026-09-20 or later) with `qwen_image_2.1_Q4_K_M.gguf` (ComfyUI-GGUF node), `qwen3vl_8b_w4a8.safetensors`, `qwen_image_2.1_vae_bf16.safetensors` |
 
-Only one engine is on the card at a time. Work files go to
-`F:\tmp\scene-illustrator\<book>\`; `style_ink.png` beside this README is the
-drawing style, used when no sheet is attached and for new sheets.
+Google's models: `gemini-3.8-flash` reads, `gemini-3.1-flash-image` (Nano
+Banana 2) draws, set in `settings.json`. It must be Agent Platform, not an AI
+Studio key: trial credits from after 2 March 2026 cannot pay for AI Studio.
+
+Every Google call is logged, with its tokens and an estimated cost, to
+`F:\tmp\scene-illustrator\google_usage.jsonl`. The header shows the running
+total. The estimate uses list prices; Google's bill is the real figure.
+
+Work files go to `F:\tmp\scene-illustrator\<book>\`. `style_ink.png` beside
+this README is the drawing style; it is attached to Google draws and to new
+sheets, and to local draws only when no sheet is attached.
 
 ## 1 Read
 
-Choose the chapter text folder (`chapter_*.txt`). **Read book** reads the
-**first 25% of each chapter** and returns, per chapter, a drawable moment, the
-sentence it happens in and an image prompt, plus a **roster** of the people
-the model saw. About 7 s a chapter.
+Choose the chapter text folder (`chapter_*.txt`) and enter the Google
+project. **Read book** sends every **whole chapter** to Gemini and returns, per
+chapter:
 
-The roster is a hint, not a decision: it records people the text has not
-named yet as 男 or 女の子, and it merges people it should not. The Cast tab is
-where you decide.
+- a **summary**;
+- the **3 key moments**, each with the sentence it happens in, copied from
+  the text;
+- **who is in the best moment**, identified across the book (男 → Takahashi),
+  using your cast's names where it can;
+- an **image prompt** for it.
+
+It takes about 20-60 s and about $0.01-0.02 a chapter. The first Google
+reading keeps the old one as `read_local_backup.json`. A prompt you never
+edited follows a new reading; one you edited, or one Write prompt wrote, is
+kept.
+
+**images by default** picks the engine for chapters and for new sheets.
 
 ## 2 Cast
 
@@ -55,18 +73,25 @@ image model how they look. For each one:
 
 ## 3 Chapters
 
-1. **cast**: tick who is in the picture, **3 at most**. The ticks start as a
+1. **moment**: pick one of the reading's 3 moments. **Summary** shows the
+   chapter summary, the moments with their sentences, and who is in the
+   picture.
+2. **cast**: tick who is in the picture, **3 at most**. The ticks start as a
    guess from the aliases ("guessed from aliases"); once you tick, your choice
    is kept.
-2. **Write prompt**: Qwen3.5 rewrites the chapter's reading into a prompt that
-   names the ticked people. Edit it freely. **Reset prompt** goes back to the
-   reading.
-3. **Draw samples**: 2 takes by default. Each ticked person's sheet is attached
-   and named in the prompt ("Mari is the person in `<image2>`"). With nobody
-   ticked, the style sample is attached instead. About 4 min a take with two
-   people, 5-6 with three. With three people, faces hold but who-does-what
-   sometimes swaps: expect to redraw.
-4. Pick one with **Use this**: it becomes the *working image*.
+3. **Write prompt**: Gemini writes the prompt for the chosen moment around the
+   ticked names, reading the chapter again, so positions and objects come from
+   the text. Anyone without a sheet is described instead of named. Edit it
+   freely. **Reset prompt** goes back to the reading.
+4. **Draw samples** on the chapter's engine (the menu beside it):
+   - **Google**: about 15 s and $0.07 a take.
+   - **Local**: about 4 min a take.
+
+   Each ticked person's sheet is attached and named in the prompt ("Mari is
+   the person in `<image2>`"). When Google refuses a picture (it does for the
+   book's violent or sexual scenes), the window offers to switch that chapter
+   to the local engine.
+5. Pick one with **Use this**: it becomes the *working image*.
 
 **Fine-tune.** Say what should **change** and who must **keep** as they are,
 then **Apply edit**. **attach sheets** adds up to 2 sheets. The label beside
@@ -90,7 +115,11 @@ uv run python illustrator.py read      --book after-dark --text F:\...\chapter-t
 uv run python illustrator.py import-v1 --book after-dark
 uv run python illustrator.py sheet     --book after-dark --member m002 --count 2
 uv run python illustrator.py write     --book after-dark --chapter chapter_001 --cast m003 --cast m002
-uv run python illustrator.py draw      --book after-dark --chapter chapter_001 --cast m003 --cast m002
+uv run python illustrator.py draw      --book after-dark --chapter chapter_001 --cast m003 --cast m002 --engine google
 uv run python illustrator.py edit      --book after-dark --chapter chapter_001 \
-      --base <png> --instruction-file <txt> --cast m003
+      --base <png> --instruction-file <txt> --cast m003 --engine local
 ```
+
+`--engine` defaults to the chapter's engine, then to `image_engine` in
+`settings.json`. A Google refusal prints `REFUSED <reason>` and exits with
+code 3.

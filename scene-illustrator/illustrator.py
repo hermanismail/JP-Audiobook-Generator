@@ -1,21 +1,26 @@
 """
 illustrator.py
 --------------
-Core of the Scene Illustrator. One image per chapter (v2, 2026-09-20), drawn
-and edited by Qwen-Image-2.1 with character sheets (2026-09-21, DESIGN.md
-M9/M10):
+Core of the Scene Illustrator. One image per chapter (v2, 2026-09-20), with
+character sheets (2026-09-21, M9/M10), read and drawn by Google (2026-09-22,
+M11), with the local Qwen-Image engine kept for what Google refuses:
 
-    read    the first 25% of each chapter -> a drawable moment, an image
-            prompt, and a character roster (local LLM through llama-server)
-    cast    the people who get a character sheet - a list the user keeps,
-            because the roster is not reliable enough to decide (M10);
+    read    each WHOLE chapter -> a summary, the 3 key moments with their
+            sentences, who is in the best one (identified across the book),
+            and an image prompt that names them (Gemini)
+    cast    the people who get a character sheet - a list the user keeps;
             sheets are imported from v1 or drawn here
-    write   rewrite a chapter's prompt so it names the cast (local LLM)
+    write   rewrite a chapter's prompt around the ticked cast, for the moment
+            the user picked (Gemini)
     draw    samples for a chapter, with up to 3 cast sheets attached, each
-            named by its slot ("Mari is the person in <image2>"); the style
-            sample instead when nobody is attached
+            named by its slot ("Mari is the person in <image2>")
     edit    change one thing in an image and leave the rest alone, optionally
             with sheets attached (e.g. "the case from <image2>")
+
+Images go to the chapter's engine: "google" (Nano Banana 2, ~15 s a take) or
+"local" (Qwen-Image-2.1 in ComfyUI, ~4 min). Google refuses the book's
+violent and sexual scenes (M11); the CLI then says REFUSED and the window
+offers the local engine.
 
 The reasons behind every rule here are in DESIGN.md; the ones that cost real
 time to find are commented where they apply.
@@ -25,9 +30,11 @@ CLI (the window runs these as child processes, one code path):
     python illustrator.py read   --book <name> --text <chapter folder> [--chapter chapter_003]
     python illustrator.py write  --book <name> --chapter chapter_003 [--cast c002 --cast c003]
     python illustrator.py draw   --book <name> --chapter chapter_003 [--count 2] [--cast c002 ...]
-    python illustrator.py sheet  --book <name> --member c002 [--count 2]
+                                 [--engine google|local]
+    python illustrator.py sheet  --book <name> --member c002 [--count 2] [--engine ...]
     python illustrator.py edit   --book <name> (--chapter chapter_003 | --member c002)
                                  --base <png> --instruction-file <txt> [--count 2] [--cast c003]
+                                 [--engine ...]
     python illustrator.py import-v1 --book <name>
 
 Protocol lines on stdout (the window parses them):
@@ -37,6 +44,7 @@ Protocol lines on stdout (the window parses them):
     TAKE <i>/<n> start        PROGRESS <value> <max>
     SAMPLE <i>/<n> <path> <secs>s
     PROMPT <path>             (write: the new prompt, in a text file)
+    REFUSED <reason>          (Google declined; exit code 3)
     DONE <summary>
 """
 
@@ -46,24 +54,26 @@ import glob
 import json
 import os
 import re
-import socket
-import subprocess
+import shutil
 import sys
 import time
-import urllib.error
-import urllib.request
+
+import google_engine as ge
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(SCRIPT_DIR, "settings.json")
 STYLE_IMAGE = os.path.join(SCRIPT_DIR, "style_ink.png")   # shipped with the tool (decision v4)
 
 DEFAULT_SETTINGS = {
-    "llama_server_exe": r"C:\llama.cpp\llama-server.exe",
-    "llm_model": r"F:\models\llm\Qwen3.5-9B-Q4_K_M.gguf",
-    "llm_port": 8080,
-    "llm_ctx": 24576,
     "work_root": r"F:\tmp\scene-illustrator",
-    "read_fraction": 0.25,
+    # Google (M11): reading and prompts always; images unless a chapter is
+    # switched to the local engine
+    "google_project": "",          # the user's own; lives in the uncommitted settings.json
+    "google_location": "global",
+    "google_text_model": "gemini-3.8-flash",
+    "google_image_model": "gemini-3.1-flash-image",
+    "google_aspect": "2:3",
+    "image_engine": "google",      # default for chapters and sheets: google | local
     "comfy_root": r"F:\ComfyUI",
     "comfy_port": 8188,
     # Qwen-Image-2.1 draws and edits (M9)
@@ -150,16 +160,6 @@ def read_text(path):
         return f.read()
 
 
-def opening(text, fraction):
-    """The chapter's first `fraction`, cut at a line break so no sentence is
-    halved (decision v6: the image comes from this part of the chapter)."""
-    target = max(int(len(text) * fraction), 400)
-    if len(text) <= target:
-        return text
-    cut = text.rfind("\n", 0, target)
-    return text[:cut if cut > target // 2 else target]
-
-
 _SENTENCE_RE = re.compile(r"(?<=[。！？!?])|\n")
 _NORM_RE = re.compile(r"[\s「」『』（）()〈〉《》【】]")
 
@@ -190,112 +190,53 @@ def find_quote(quote, text):
     return (best, "fuzzy") if score >= 0.5 else ("", "none")
 
 
-# -------------------------------------------------------------- llama-server
-class ManagedLlamaServer:
-    """Starts llama-server only if nothing listens on the port, and only ever
-    stops a server it started. The whole tree is killed so VRAM comes back."""
-
-    def __init__(self, settings, log):
-        self.s = settings
-        self.log = log
-        self.proc = None
-        self.url = f"http://127.0.0.1:{settings['llm_port']}"
-
-    def _listening(self):
-        with socket.socket() as sock:
-            sock.settimeout(0.5)
-            return sock.connect_ex(("127.0.0.1", int(self.s["llm_port"]))) == 0
-
-    def __enter__(self):
-        if self._listening():
-            self.log(f"SERVER already listening on port {self.s['llm_port']} - using it as-is")
-            return self
-        for key in ("llama_server_exe", "llm_model"):
-            if not os.path.isfile(self.s[key]):
-                raise RuntimeError(f"{key} not found: {self.s[key]}")
-        cmd = [self.s["llama_server_exe"], "-m", self.s["llm_model"], "-c", str(self.s["llm_ctx"]),
-               "-ngl", "99", "-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
-               # this llama.cpp build's output parser aborts valid replies (500)
-               # unless reasoning is off and left unparsed (measured 2026-09-18)
-               "--reasoning", "off", "--reasoning-format", "none",
-               "--host", "127.0.0.1", "--port", str(self.s["llm_port"])]
-        self.log("SERVER starting " + os.path.basename(self.s["llm_model"]))
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                     creationflags=subprocess.CREATE_NO_WINDOW)
-        t0 = time.time()
-        while time.time() - t0 < 180:
-            if self.proc.poll() is not None:
-                raise RuntimeError(f"llama-server exited with code {self.proc.returncode}")
-            try:
-                with urllib.request.urlopen(self.url + "/health", timeout=2) as r:
-                    if json.load(r).get("status") == "ok":
-                        self.log(f"SERVER ready in {time.time() - t0:.0f}s")
-                        return self
-            except (urllib.error.URLError, OSError, ValueError):
-                pass
-            time.sleep(1)
-        self.__exit__(None, None, None)
-        raise RuntimeError("llama-server did not become ready in 180 s")
-
-    def __exit__(self, *exc):
-        if self.proc and self.proc.poll() is None:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True)
-            self.log("SERVER stopped")
-        self.proc = None
-        return False
-
-
 class ModelFailed(Exception):
     pass
 
 
-def chat(url, system, user, max_tokens, attempts=(None, 1, 2, 3, 4)):
-    """One JSON reply. The model occasionally emits a broken UTF-8 sequence
-    (server 500) or malformed JSON; a different seed samples a different path,
-    so retry with fresh seeds before giving up."""
-    body = {"messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.2, "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"}}
-    last = ""
-    for seed in attempts:
-        if seed is not None:
-            body["seed"] = seed
-        try:
-            req = urllib.request.Request(url + "/v1/chat/completions", json.dumps(body).encode(),
-                                         {"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=1800) as r:
-                reply = json.load(r)
-            content = reply["choices"][0]["message"]["content"].split("</think>")[-1]
-            content = content[content.index("{"):content.rindex("}") + 1]   # drop ```json fences
-            return json.loads(content, strict=False)                        # raw newlines in strings
-        except urllib.error.HTTPError as e:
-            last = f"HTTP {e.code}"
-        except ValueError as e:
-            last = f"bad JSON ({e})"
-    raise ModelFailed(last)
+def _google(settings, log):
+    return ge.GoogleEngine(settings, log)
 
 
 # ------------------------------------------------------------- Stage: read
-READ = """You are choosing ONE illustration for this part of a Japanese novel chapter, and keeping
-track of who appears in the book.
-{roster_block}
+# The whole chapter goes to Gemini (M11): Qwen3.5 read 25% of one, and could
+# not tell that 男 in chapter 1 is Takahashi or that the girl is Mari.
+READ = """You are choosing ONE illustration for a chapter of a Japanese novel, and keeping track of
+who appears in the book.
+{known}
 Return JSON only:
-{{"moment":"","quote":"","subject":"","characters":[{{"name":"","known_as":"","appearance":""}}]}}
-- "moment": one English sentence saying what is happening in the picture.
-- "quote": ONE sentence copied EXACTLY from the passage below, where that moment happens.
-- "subject": an English image prompt for it: who is in the picture, what they are doing, how they
-  are positioned, and what they hold or sit at. Describe each person by how they LOOK (hair, face,
-  build, clothes). Do NOT describe a room, furniture beyond what they touch, weather, or other
-  people. Under 70 words. Never name a character.
-- "characters": the people in the picture. "name" as the text writes it (Japanese). "known_as" is
-  the matching name from the roster above if this is the same person, else "". "appearance" is a
-  short English description from the text.
-Only people physically present in this passage."""
+{{"summary":"","moments":[{{"moment":"","quote":""}}],"best":0,
+  "people":[{{"as_written":"","who":"","appearance":""}}],"prompt":""}}
+- "summary": 4-6 English sentences on what happens in the chapter.
+- "moments": the 3 most important visual moments, in story order. "moment" is one English sentence
+  on what the picture shows; "quote" is ONE sentence copied exactly from the text where it happens.
+- "best": the index of the moment that best represents the chapter.
+- "people": everyone physically present in the BEST moment. "as_written" is how the text refers to
+  them there (Japanese, e.g. 男, 女の子). "who" is who they are, using the book's knowledge beyond
+  this chapter if you have it - and EXACTLY the name from the known list above when it is one of
+  them. "appearance" is a short English description of how they look, from the text.
+- "prompt": an English image prompt for the best moment, under 70 words. Name each person by their
+  "who" name; say what each does, where each is relative to the others (left, right, seated,
+  standing, across a table), and what they hold or sit at. Do NOT describe a room, windows,
+  weather or scenery, and do not describe faces, hair or clothes."""
 
-ROSTER_BLOCK = """Characters already known in this book (name - description - chapters):
-{lines}
-If a person below is one of them, put that name in "known_as"."""
+KNOWN_BLOCK = """People already known in this book - use these exact names for them:
+{lines}"""
+
+
+def known_lines(roster, cast):
+    """Cast names first (they are what prompts must use), then the rest of the
+    roster, each with the names the text has used for them."""
+    lines, seen = [], set()
+    for member in (cast or {}).get("members", {}).values():
+        names = [member["name"]] + member["aliases"]
+        lines.append(f"- {member['name']} (also written: {', '.join(member['aliases']) or '-'})")
+        seen.update(names)
+    for name, rec in roster.items():
+        if name not in seen:
+            aka = ", ".join(rec.get("aka") or []) or "-"
+            lines.append(f"- {name} (also written: {aka}) - {rec.get('appearance', '')[:80]}")
+    return "\n".join(lines)
 
 
 def read_path(root):
@@ -304,11 +245,6 @@ def read_path(root):
 
 def load_read(root):
     return read_json(read_path(root)) or {"version": 2, "chapters": {}, "roster": {}}
-
-
-def roster_lines(roster):
-    return "\n".join(f"- {name} - {rec['appearance'][:90]} - ch {rec['chapters']}"
-                     for name, rec in roster.items()) or "- (none yet)"
 
 
 def build_prompt(subject):
@@ -325,84 +261,70 @@ def run_read(settings, book, text_folder, only_chapter, log):
     bases = chapter_bases(text_folder)
     if not bases:
         raise RuntimeError(f"no chapter_*.txt in {text_folder}")
+    # the Qwen-era reading is kept once, the first time Google reads this
+    # book (user decision 2026-09-22: Google's reading replaces it)
+    backup = os.path.join(root, "read_local_backup.json")
     data = load_read(root)
+    if data.get("reader") != "google":
+        if os.path.isfile(read_path(root)) and not os.path.isfile(backup):
+            shutil.copy2(read_path(root), backup)
+            log(f"SERVER kept the previous reading as {os.path.basename(backup)}")
+        data = {"version": 3, "reader": "google", "chapters": {}, "roster": {}}
+    cast = load_cast(root)
+    engine = _google(settings, log)
     todo = [b for b in bases if not only_chapter or b == only_chapter]
-    fraction = float(settings["read_fraction"])
     ok = failed = 0
-    with ManagedLlamaServer(settings, log) as server:
-        for i, base in enumerate(todo, 1):
-            text = read_text(os.path.join(text_folder, base + ".txt"))
-            part = opening(text, fraction)
-            t0 = time.time()
-            block = ROSTER_BLOCK.format(lines=roster_lines(data["roster"])) if data["roster"] else ""
-            try:
-                raw = chat(server.url, READ.format(roster_block=block), part, 1200)
-            except ModelFailed as e:
-                failed += 1
-                log(f"CHAPTER {i}/{len(todo)} {base} failed {time.time() - t0:.1f}s {e}")
+    log(f"SERVER reading with {settings['google_text_model']}")
+    for i, base in enumerate(todo, 1):
+        text = read_text(os.path.join(text_folder, base + ".txt"))
+        t0 = time.time()
+        lines = known_lines(data["roster"], cast)
+        system = READ.format(known=KNOWN_BLOCK.format(lines=lines) if lines else "")
+        try:
+            raw, row = engine.json_call(system, text, what=base)
+        except (ge.Refused, RuntimeError) as e:
+            failed += 1
+            log(f"CHAPTER {i}/{len(todo)} {base} failed {time.time() - t0:.1f}s {e}")
+            continue
+        moments = []
+        for m in raw.get("moments") or []:
+            quote, match = find_quote(str(m.get("quote") or ""), text)   # code looks it up (v1)
+            moments.append({"moment": str(m.get("moment") or ""), "quote": quote,
+                            "quote_match": match})
+        try:
+            best = max(0, min(int(raw.get("best") or 0), len(moments) - 1))
+        except (TypeError, ValueError):
+            best = 0
+        people = []
+        chapter_no = int(base.split("_")[1])
+        for p in raw.get("people") or []:
+            who = str(p.get("who") or p.get("as_written") or "").strip()
+            if not who:
                 continue
-            quote, match = find_quote(raw.get("quote", ""), text)
-            people = []
-            for c in raw.get("characters") or []:
-                name = str(c.get("name") or "").strip()
-                if not name:
-                    continue
-                known = str(c.get("known_as") or "").strip()
-                canonical = known if known in data["roster"] else name
-                rec = data["roster"].setdefault(canonical, {"appearance": "", "chapters": [], "aka": []})
-                if not rec["appearance"]:
-                    rec["appearance"] = str(c.get("appearance") or "")
-                chapter_no = int(base.split("_")[1])
-                if chapter_no not in rec["chapters"]:
-                    rec["chapters"].append(chapter_no)
-                    rec["chapters"].sort()
-                if name != canonical and name not in rec["aka"]:
-                    rec["aka"].append(name)
-                people.append(canonical)
-            data["chapters"][base] = {
-                "moment": str(raw.get("moment") or ""),
-                "quote": quote, "quote_match": match,
-                "subject": str(raw.get("subject") or ""),
-                "characters": people,
-                "secs": round(time.time() - t0, 1),
-            }
-            write_json(read_path(root), data)
-            ok += 1
-            log(f"CHAPTER {i}/{len(todo)} {base} ok {time.time() - t0:.1f}s "
-                f"{len(people)} character(s)")
-        # second pass (decision v6): every chapter re-checked against the FULL
-        # roster, so a character first met in chapter 9 is also recognised in
-        # chapter 2, which the sequential pass could not know.
-        if not only_chapter and data["roster"]:
-            log("SERVER second pass: cross-checking characters against the whole book")
-            for base, record in data["chapters"].items():
-                names = record["characters"]
-                if not names:
-                    continue
-                try:
-                    res = chat(server.url,
-                               "Match each name to the roster. Return JSON only: "
-                               '{"pairs":[{"name":"","roster":""}]} - "roster" is the roster name '
-                               'for the same person, or "" if none matches.',
-                               "Roster:\n" + roster_lines(data["roster"]) + "\n\nNames:\n"
-                               + "\n".join(f"- {n}" for n in names), 800)
-                except ModelFailed:
-                    continue
-                mapping = {p.get("name"): p.get("roster") for p in res.get("pairs") or []}
-                merged = []
-                for n in names:
-                    target = mapping.get(n) or n
-                    if target not in data["roster"]:
-                        target = n
-                    if target not in merged:
-                        merged.append(target)
-                    rec = data["roster"].get(target)
-                    chapter_no = int(base.split("_")[1])
-                    if rec and chapter_no not in rec["chapters"]:
-                        rec["chapters"].append(chapter_no)
-                        rec["chapters"].sort()
-                record["characters"] = merged
-            write_json(read_path(root), data)
+            rec = data["roster"].setdefault(who, {"appearance": "", "chapters": [], "aka": []})
+            if not rec["appearance"]:
+                rec["appearance"] = str(p.get("appearance") or "")
+            if chapter_no not in rec["chapters"]:
+                rec["chapters"].append(chapter_no)
+                rec["chapters"].sort()
+            written = str(p.get("as_written") or "").strip()
+            if written and written != who and written not in rec["aka"]:
+                rec["aka"].append(written)
+            if who not in people:
+                people.append(who)
+        pick = moments[best] if moments else {"moment": "", "quote": "", "quote_match": "none"}
+        data["chapters"][base] = {
+            "summary": str(raw.get("summary") or ""),
+            "moments": moments, "best": best,
+            "moment": pick["moment"], "quote": pick["quote"], "quote_match": pick["quote_match"],
+            "subject": str(raw.get("prompt") or ""),
+            "characters": people,
+            "secs": round(time.time() - t0, 1), "usd": row["usd"],
+        }
+        write_json(read_path(root), data)
+        ok += 1
+        log(f"CHAPTER {i}/{len(todo)} {base} ok {time.time() - t0:.1f}s "
+            f"{len(people)} character(s) ${row['usd']:.3f}")
     log(f"DONE read {ok} chapter(s), {failed} failed, {len(data['roster'])} characters known")
     return failed == 0
 
@@ -418,16 +340,44 @@ def load_chapters(root):
     edited, a sample, an edit chain or a final image."""
     data = read_json(chapters_path(root)) or {"version": 2, "chapters": {}}
     read = load_read(root)
+    old = unedited_prompts(root)
     for base, record in read["chapters"].items():
         entry = data["chapters"].setdefault(base, new_chapter())
-        if not entry["prompt"]:
-            entry["prompt"] = build_prompt(record["subject"])
-        entry["moment"] = record.get("moment", "")
-        entry["quote"] = record.get("quote", "")
+        seeded = build_prompt(record["subject"])
+        # a prompt the user never touched follows a new reading; an edited one
+        # (or one written by Write prompt) is theirs and stays
+        if not entry["prompt"] or entry["prompt"] in old.get(base, ()) or \
+                entry["prompt"] == entry.get("seeded_from"):
+            entry["prompt"] = seeded
+        if entry["prompt"] == seeded:
+            entry["seeded_from"] = seeded
+        entry["summary"] = record.get("summary", "")
+        entry["moments"] = record.get("moments") or []
+        pick = entry.get("moment_pick")
+        if pick is None or not (0 <= pick < len(entry["moments"])):
+            pick = record.get("best", 0)
+        if entry["moments"]:
+            entry["moment"] = entry["moments"][pick]["moment"]
+            entry["quote"] = entry["moments"][pick]["quote"]
+        else:
+            entry["moment"] = record.get("moment", "")
+            entry["quote"] = record.get("quote", "")
         entry["characters"] = record.get("characters", [])
     for base in list(data["chapters"]):
         adopt_loose_files(root, base, data["chapters"][base])
     return data
+
+
+def unedited_prompts(root):
+    """Per chapter, the prompts the previous (Qwen) reading would have seeded,
+    in both style-note spellings - a saved prompt equal to one of them was
+    never edited, so it may follow the new reading."""
+    backup = read_json(os.path.join(root, "read_local_backup.json")) or {}
+    out = {}
+    for base, record in backup.get("chapters", {}).items():
+        subject = (record.get("subject") or "").strip()
+        out[base] = {f"{note} {MINIMAL_NOTE} {subject}" for note in (STYLE_NOTE,) + OLD_STYLE_NOTES}
+    return out
 
 
 def adopt_loose_files(root, base, entry):
@@ -452,6 +402,9 @@ def adopt_loose_files(root, base, entry):
 
 def new_chapter():
     return {"prompt": "", "moment": "", "quote": "", "characters": [],
+            "summary": "", "moments": [],
+            "moment_pick": None, # which of the reading's moments; None = the reading's best
+            "engine": None,      # google | local; None = the default in settings
             "cast": None,        # cast member ids attached; None = not set, derive from aliases
             "samples": [], "chosen": "",   # the drawn samples; chosen = working image
             "chain": [],         # [{instruction, parent, takes:[...], chosen, secs}]
@@ -603,35 +556,43 @@ def with_cast(prompt, line):
 
 
 # ------------------------------------------------------------ Stage: write
-WRITE = """Rewrite an illustration prompt for one picture from a novel so that it names the people
-in it. Each named person already has a reference picture that shows how they look, so do NOT
-describe faces, hair or clothes. Return JSON only: {{"subject":""}}
-- "subject": English, under 70 words. Say who is in the picture using EXACTLY these names:
+WRITE = """Write the illustration prompt for one picture from a chapter of a Japanese novel (the
+chapter text follows). Return JSON only: {{"subject":""}}
+- The picture shows this moment: {moment}
+  It happens at this sentence: {quote}
+- "subject": English, under 70 words. These people have a reference picture that shows how they
+  look, so name them EXACTLY like this and do NOT describe their faces, hair or clothes:
 {names}
-  what each of them is doing, where each is relative to the others (left, right, seated, standing,
-  across a table), and what they hold or sit at. Only these people - no one else. Do NOT describe a
+  Anyone else who is in the moment gets a short description of how they look instead of a name.
+  Say what each person is doing, where each is relative to the others (left, right, seated,
+  standing, across a table), and what they hold or sit at, true to the text. Do NOT describe a
   room, windows, weather or scenery."""
 
 
 def run_write(settings, book, base, member_ids, log):
-    """Qwen3.5 rewrites the chapter's reading into a prompt that names the
-    attached cast. The window reads the result from PROMPT <path>, so the
-    child never writes chapters.json under a window that holds it open."""
+    """Gemini writes the chapter's prompt around the attached cast, for the
+    moment the user picked, reading the whole chapter again so positions and
+    objects come from the text. The window reads the result from
+    PROMPT <path>, so the child never writes chapters.json under a window
+    that holds it open."""
     root = book_dir(settings, book)
-    record = load_read(root)["chapters"].get(base)
-    if not record:
+    entry = load_chapters(root)["chapters"].get(base)
+    if not entry or not entry.get("moment"):
         raise RuntimeError(f"{base} has not been read yet")
+    book_info = read_json(os.path.join(root, "book.json")) or {}
+    text_path = os.path.join(book_info.get("text_folder", ""), base + ".txt")
+    if not os.path.isfile(text_path):
+        raise RuntimeError(f"chapter text not found: {text_path}")
     cast = load_cast(root)
     members = [cast["members"][i] for i in member_ids if i in cast["members"]]
     if not members:
         raise RuntimeError("tick at least one cast member first")
     names = "\n".join(f"  - {m['name']}" for m in members)
-    source = (f"What happens: {record.get('moment', '')}\n"
-              f"The sentence: {record.get('quote', '')}\n"
-              f"The current prompt: {record.get('subject', '')}")
-    with ManagedLlamaServer(settings, log) as server:
-        t0 = time.time()
-        raw = chat(server.url, WRITE.format(names=names), source, 600)
+    t0 = time.time()
+    log(f"SERVER writing with {settings['google_text_model']}")
+    raw, row = _google(settings, log).json_call(
+        WRITE.format(moment=entry["moment"], quote=entry.get("quote", ""), names=names),
+        read_text(text_path), what=f"write {base}")
     subject = str(raw.get("subject") or "").strip()
     if not subject:
         raise RuntimeError("the model returned no prompt")
@@ -640,7 +601,7 @@ def run_write(settings, book, base, member_ids, log):
     with open(path, "w", encoding="utf-8") as f:
         f.write(build_prompt(subject))
     log(f"PROMPT {path}")
-    log(f"DONE wrote a prompt in {time.time() - t0:.0f}s")
+    log(f"DONE wrote a prompt in {time.time() - t0:.0f}s (${row['usd']:.3f})")
 
 
 # ------------------------------------------------------- Stage: draw, edit
@@ -651,13 +612,47 @@ def _engine(settings, log):
     return engine
 
 
-def _takes(engine, log, count, prompt, refs, out_for, edit=False):
+class Declined(Exception):
+    """Google refused the picture; the CLI exits 3 so the window can offer
+    the local engine."""
+
+
+def engine_for(settings, record_or_member):
+    name = (record_or_member or {}).get("engine") or settings.get("image_engine") or "google"
+    return name if name in ("google", "local") else "google"
+
+
+def _takes(settings, engine_name, log, count, prompt, refs, out_for, edit=False):
+    """`count` takes on the chosen engine. `refs` are file paths, in slot
+    order: <image1> is refs[0] for both engines."""
     import random
+    if engine_name == "local":
+        engine = _engine(settings, log)
+        with engine:
+            names = [engine.put_reference(p, f"si_ref{i}.png") for i, p in enumerate(refs, 1)]
+            for i in range(count):
+                out = out_for()
+                log(f"TAKE {i + 1}/{count} start")
+                secs = engine.run(prompt, names, random.randrange(2 ** 48), out, edit=edit,
+                                  on_progress=lambda v, m: log(f"PROGRESS {v} {m}"))
+                log(f"SAMPLE {i + 1}/{count} {out} {secs}s")
+        return
+    google = _google(settings, log)
+    # each image is labelled with its slot, so "<image2>" in the prompt means
+    # the same picture it means to the local engine
+    parts = []
+    for i, path in enumerate(refs, 1):
+        parts += [f"<image{i}>:", path]
+    parts.append(prompt)
+    log(f"SERVER {settings['google_image_model']} with {len(refs)} image(s)")
     for i in range(count):
         out = out_for()
         log(f"TAKE {i + 1}/{count} start")
-        secs = engine.run(prompt, refs, random.randrange(2 ** 48), out, edit=edit,
-                          on_progress=lambda v, m: log(f"PROGRESS {v} {m}"))
+        try:
+            secs = google.image(parts, out, what=f"take {i + 1}")
+        except ge.Refused as e:
+            log(f"REFUSED {e}")
+            raise Declined(str(e))
         log(f"SAMPLE {i + 1}/{count} {out} {secs}s")
 
 
@@ -676,33 +671,40 @@ def sheet_members(root, member_ids, limit):
     return members
 
 
-def run_draw(settings, book, base, count, member_ids, log):
+def run_draw(settings, book, base, count, member_ids, engine_name, log):
     """`count` samples for one chapter. Up to 3 cast sheets, each named by its
-    slot; the style sample only when no sheet is attached (user decision
-    2026-09-21: the sheets carry the style themselves)."""
+    slot. The style sample: locally only when no sheet is attached (decision
+    q4 - the sheets carry the style); on Google always, last, because that is
+    how the M11 trial held the ink style."""
     root = book_dir(settings, book)
     entry = load_chapters(root)["chapters"].get(base) or new_chapter()
+    engine_name = engine_name or engine_for(settings, entry)
     prompt = entry["prompt"].strip()
     if not prompt:
         raise RuntimeError(f"{base} has no prompt yet - read the book first")
     members = sheet_members(root, member_ids, MAX_SHEETS)
-    if not members and not os.path.isfile(STYLE_IMAGE):
+    if not os.path.isfile(STYLE_IMAGE):
         raise RuntimeError(f"style image missing: {STYLE_IMAGE}")
-    engine = _engine(settings, log)
-    with engine:
+    refs = [m["sheet"] for _, m in members]
+    if members:
+        prompt = with_cast(prompt, cast_line([m for _, m in members]))
+        log(f"SERVER drawing on {engine_name} with the sheets of "
+            + ", ".join(m["name"] for _, m in members))
+    else:
+        log(f"SERVER drawing on {engine_name} with the style sample (no cast attached)")
+    if engine_name == "google" or not members:
+        refs.append(STYLE_IMAGE)
         if members:
-            refs = [engine.put_reference(m["sheet"], f"si_{book}_sheet_{i}.png")
-                    for i, (_, m) in enumerate(members, 1)]
-            prompt = with_cast(prompt, cast_line([m for _, m in members]))
-            log("SERVER drawing with the sheets of " + ", ".join(m["name"] for _, m in members))
-        else:
-            refs = [engine.put_reference(STYLE_IMAGE, f"si_{book}_style.png")]
-            log("SERVER drawing with the style sample (no cast attached)")
-        _takes(engine, log, count, prompt, refs, lambda: next_path(root, base, "samples"))
+            prompt = with_style_slot(prompt, len(refs))
+    _takes(settings, engine_name, log, count, prompt, refs, lambda: next_path(root, base, "samples"))
     log(f"DONE drew {count}")
 
 
-def run_sheet(settings, book, member_id, count, log):
+def with_style_slot(prompt, slot):
+    return f"{prompt} <image{slot}> is only the drawing style to follow - nobody from it is drawn."
+
+
+def run_sheet(settings, book, member_id, count, engine_name, log):
     """New character sheets: the member's description, full body on white,
     with the style sample attached."""
     root = book_dir(settings, book)
@@ -713,13 +715,11 @@ def run_sheet(settings, book, member_id, count, log):
         raise RuntimeError(f"{member['name']} has no description to draw from")
     if not os.path.isfile(STYLE_IMAGE):
         raise RuntimeError(f"style image missing: {STYLE_IMAGE}")
+    engine_name = engine_name or engine_for(settings, None)
     prompt = f"{STYLE_NOTE} {SHEET_NOTE} {member['description'].strip()}"
-    engine = _engine(settings, log)
-    with engine:
-        refs = [engine.put_reference(STYLE_IMAGE, f"si_{book}_style.png")]
-        log(f"SERVER drawing a sheet for {member['name']}")
-        _takes(engine, log, count, prompt, refs,
-               lambda: next_path(root, member_id, "samples", member_dir(root, member_id)))
+    log(f"SERVER drawing a sheet for {member['name']} on {engine_name}")
+    _takes(settings, engine_name, log, count, prompt, [STYLE_IMAGE],
+           lambda: next_path(root, member_id, "samples", member_dir(root, member_id)))
     log(f"DONE drew {count}")
 
 
@@ -744,7 +744,8 @@ def edit_prompt(change, keep, members=()):
             + " Everything else identical.")
 
 
-def run_edit(settings, book, base, member, count, base_image, instruction, member_ids, log):
+def run_edit(settings, book, base, member, count, base_image, instruction, member_ids,
+             engine_name, log):
     """`count` takes of one change against `base_image` - a chapter's image
     (`base`) or a cast member's sheet (`member`). The instruction already
     names the attached sheets (edit_prompt); here they are only loaded, in
@@ -755,15 +756,14 @@ def run_edit(settings, book, base, member, count, base_image, instruction, membe
     members = sheet_members(root, member_ids, MAX_EDIT_SHEETS)
     if member:
         out_for = lambda: next_path(root, member, "edits", member_dir(root, member))   # noqa: E731
+        engine_name = engine_name or engine_for(settings, None)
     else:
         out_for = lambda: next_path(root, base, "edits")   # noqa: E731
-    engine = _engine(settings, log)
-    with engine:
-        refs = [engine.put_reference(base_image, f"si_{book}_edit_base.png")]
-        refs += [engine.put_reference(m["sheet"], f"si_{book}_edit_sheet{i}.png")
-                 for i, (_, m) in enumerate(members, 1)]
-        log(f"SERVER editing with {len(refs)} image(s)")
-        _takes(engine, log, count, instruction, refs, out_for, edit=True)
+        engine_name = engine_name or engine_for(
+            settings, load_chapters(root)["chapters"].get(base))
+    refs = [base_image] + [m["sheet"] for _, m in members]
+    log(f"SERVER editing on {engine_name} with {len(refs)} image(s)")
+    _takes(settings, engine_name, log, count, instruction, refs, out_for, edit=True)
     log(f"DONE edited {count}")
 
 
@@ -812,10 +812,12 @@ def main():
     d.add_argument("--chapter", required=True)
     d.add_argument("--count", type=int, default=2)
     d.add_argument("--cast", action="append", default=[])
+    d.add_argument("--engine", choices=["google", "local"])
     s = sub.add_parser("sheet")
     s.add_argument("--book", required=True)
     s.add_argument("--member", required=True)
     s.add_argument("--count", type=int, default=2)
+    s.add_argument("--engine", choices=["google", "local"])
     e = sub.add_parser("edit")
     e.add_argument("--book", required=True)
     target = e.add_mutually_exclusive_group(required=True)
@@ -825,6 +827,7 @@ def main():
     e.add_argument("--instruction-file", required=True)
     e.add_argument("--count", type=int, default=2)
     e.add_argument("--cast", action="append", default=[])
+    e.add_argument("--engine", choices=["google", "local"])
     i = sub.add_parser("import-v1")
     i.add_argument("--book", required=True)
     args = ap.parse_args()
@@ -840,10 +843,10 @@ def main():
             run_write(settings, args.book, args.chapter, args.cast, log)
             return
         if args.cmd == "draw":
-            run_draw(settings, args.book, args.chapter, args.count, args.cast, log)
+            run_draw(settings, args.book, args.chapter, args.count, args.cast, args.engine, log)
             return
         if args.cmd == "sheet":
-            run_sheet(settings, args.book, args.member, args.count, log)
+            run_sheet(settings, args.book, args.member, args.count, args.engine, log)
             return
         if args.cmd == "import-v1":
             added = import_v1_sheets(book_dir(settings, args.book))
@@ -854,7 +857,12 @@ def main():
         with open(args.instruction_file, encoding="utf-8-sig") as f:
             instruction = f.read().strip()
         run_edit(settings, args.book, args.chapter, args.member, args.count, args.base,
-                 instruction, args.cast, log)
+                 instruction, args.cast, args.engine, log)
+    except (Declined, ge.Refused) as e:
+        if isinstance(e, ge.Refused):        # a Declined take already said so
+            log(f"REFUSED {e}")
+        log("DONE refused by Google - the local engine can draw this")
+        sys.exit(3)
     except (RuntimeError, ModelFailed) as e:
         log(f"DONE error: {e}")
         sys.exit(1)
