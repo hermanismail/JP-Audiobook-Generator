@@ -178,6 +178,30 @@ in the text), merged 男 with 白川, and filed マリ under 浅井エリ.
 
 Built on branch `scene-illustrator-qwen`.
 
+## M11 - Google trial, after-dark (2026-09-22)
+
+User report after using the Qwen build: the chapter summaries are weak, and
+usable images still take too many draws and edits. Trial of Google models
+on Agent Platform (formerly Vertex AI; the user's trial began after
+2026-03-02, so trial credits cannot pay for AI Studio - Agent Platform only).
+Project `project-753d9895-50f3-41a3-ac6`, location `global`, login by
+`gcloud auth application-default login` (no key in any file). Script and
+outputs: `F:\tmp\scene-illustrator\google\`.
+
+| call | model | time | result |
+|---|---|---|---|
+| read chapter_001, WHOLE | gemini-3.8-flash | 18 s, 8.1k in / 2.1k out+thinking | a real chapter summary; 3 moments with exact quotes; resolves 男 -> Takahashi and マリ/女の子 -> Asai Mari itself; a name-based prompt |
+| draw x2, Mari + Takahashi sheets + style_ink | gemini-3.1-flash-image | 12-21 s | both characters recognisable, a coherent booth scene (coffee, ashtray, case on the seat beside him), no stray people; details drift (jacket letter, case shape, cap/scar in one take only) |
+| edit the Qwen take where Mari sat ON the table | gemini-3.1-flash-image | 12 s | fixed - chair at the table, everything else kept |
+| read chapter_003 (the assault) | gemini-3.8-flash | 29 s | read and summarised normally - the TEXT side does not refuse |
+| draw the beaten, naked woman | gemini-3.1-flash-image | 13 s | **refused: IMAGE_PROHIBITED_CONTENT** |
+
+Read: against local Qwen (~4 min a take, 25% of a chapter read) the Google
+route is ~15x faster per image and reads whole chapters; the cost for the
+trial was cents (to confirm in Billing, which lags a day). The image filter
+refuses the book's violent/sexual scenes, so a local engine must remain as
+the fallback for those.
+
 ---
 
 # Scene Illustrator — v1 design (history, 2026-09-19)
