@@ -221,3 +221,6 @@ book-profiler/settings.json
 book-profiler/gui_state.json
 # dynamic-repair keeps its settings local, like book-profiler
 dynamic-repair/settings.json
+# scene-illustrator too
+scene-illustrator/settings.json
+scene-illustrator/window_errors.log

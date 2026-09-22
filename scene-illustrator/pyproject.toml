@@ -1,0 +1,21 @@
+[project]
+name = "scene-illustrator"
+version = "0.1.0"
+description = "Zen-mode images per chapter: read the book, curate a cast, draw and time scenes"
+readme = "DESIGN.md"
+authors = [
+    { name = "hermanismail", email = "hermanismail@gmail.com" }
+]
+requires-python = ">=3.12"
+# No torch and no model code. Reading and prompts go to Gemini on Google's
+# Agent Platform (google-genai); images go to Gemini too, or to the separate
+# ComfyUI install at F:\ComfyUI over HTTP when Google refuses a scene.
+dependencies = [
+    "customtkinter>=6.0.0",
+    "google-genai>=2.24.0",
+    "pillow>=12.3.0",
+    "websocket-client>=1.9.2",
+]
+
+[tool.uv]
+package = false

@@ -37,6 +37,15 @@ The user is slowly re-rendering older books in dynamic mode.
 4. The existing tanya profiling data sits in `F:\tmp\book-profiler`
    (2 GB of takes); the user will decide where profiles live.
 5. The older ones listed under "Text, chunking and hallucination" below.
+6. **Scene illustrator** (planned 2026-09-18, a separate tool): zen-mode
+   images per chapter, timed to `sync.json` through a
+   `chapter_<N>.images.json` sidecar. Local test: ComfyUI at `F:\ComfyUI`
+   with FLUX.2 klein 4B, ~10 s per image on the 4060.
+
+**Player side (user decision 2026-09-18): the Android app is FROZEN.**
+Development goes into the web client first, then the server. Player
+changes this repo needs (e.g. reading the images sidecar) are handed over
+as a prompt for a separate session in `F:\JPAudiobookPlayer`.
 
 **How the user works** (from the sessions that built all this): digest a
 request, summarise it back with the loose ends and decisions needed, and
