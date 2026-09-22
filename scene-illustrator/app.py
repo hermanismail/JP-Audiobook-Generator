@@ -355,6 +355,9 @@ class App(ctk.CTk):
         self.output_var = ctk.StringVar(value=self.settings.get("last_output_folder", ""))
 
         self._build()
+        # Tk otherwise prints a failing click's traceback to a console this
+        # window does not have - so it vanished without a trace
+        self.report_callback_exception = lambda *_exc: self._report_error()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(120, self._drain)
         if self.book_var.get():
@@ -946,37 +949,65 @@ class App(ctk.CTk):
                 self.sheet_edit_btn, self.import_btn)
 
     def _drain(self):
+        """Always reschedules itself, whatever goes wrong: an exception here
+        used to stop this loop for good, and then no job ever finished in the
+        window again (user report 2026-09-22)."""
         try:
             while True:
                 kind, value = self._queue.get_nowait()
                 if kind == "line":
                     self.log_line(value)
-                    self._parse(value)
+                    self._guard(self._parse, value)
                 else:
-                    code, on_done = value
-                    self._proc = None
-                    for b in self._job_buttons():
-                        b.configure(state="normal")
-                    self.stop_btn.configure(state="disabled")
-                    self.status_var.set("" if code == 0 else
-                                        "refused by Google" if code == 3 else f"stopped (exit {code})")
-                    self.refresh_cost()
-                    self._take = None
-                    self._starting = 0.0
-                    self.draw_bar.stop()
-                    self.draw_bar.configure(mode="determinate")
-                    if code == 3:
-                        self.draw_status.configure(text="refused by Google: " + self._refused,
-                                                   text_color=FAIL)
-                    elif code != 0:
-                        self.draw_status.configure(text="stopped", text_color=WARN)
-                    on_done(code)
-                    self._refused = ""
+                    self._job_finished(*value)
         except queue.Empty:
             pass
-        if self._starting or (self._take and not self._take_done):
-            self.update_status()
-        self.after(120, self._drain)
+        except Exception:   # noqa: BLE001 - keep the loop alive, say what broke
+            self._report_error()
+        finally:
+            try:
+                if self._starting or (self._take and not self._take_done):
+                    self.update_status()
+            except Exception:   # noqa: BLE001
+                self._report_error()
+            self.after(120, self._drain)
+
+    def _job_finished(self, code, on_done):
+        # the bookkeeping first, so the buttons come back even if showing the
+        # result fails
+        self._proc = None
+        for b in self._job_buttons():
+            b.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+        self.status_var.set("" if code == 0 else
+                            "refused by Google" if code == 3 else f"stopped (exit {code})")
+        self._take = None
+        self._starting = 0.0
+        self.draw_bar.stop()
+        self.draw_bar.configure(mode="determinate")
+        if code == 3:
+            self.draw_status.configure(text="refused by Google: " + self._refused, text_color=FAIL)
+        elif code != 0:
+            self.draw_status.configure(text="stopped", text_color=WARN)
+        self._guard(self.refresh_cost)
+        self._guard(on_done, code)
+        self._refused = ""
+
+    def _guard(self, fn, *args):
+        try:
+            fn(*args)
+        except Exception:   # noqa: BLE001
+            self._report_error()
+
+    def _report_error(self):
+        import traceback
+        text = traceback.format_exc()
+        self.log_line("-- window error (the run itself is not affected):\n" + text.rstrip())
+        try:
+            with open(os.path.join(SCRIPT_DIR, "window_errors.log"), "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
+        except OSError:
+            pass
 
     def _parse(self, line):
         chapter = CHAPTER_RE.match(line)
@@ -1321,9 +1352,15 @@ class App(ctk.CTk):
             self.working_label.configure(image=self._working_thumb,
                                          text="  working image: " + os.path.basename(path))
         else:
-            self._working_thumb = None
+            # CTkLabel.configure(image=None) never clears the Tk label under it
+            # (_update_image skips None), so the label kept pointing at the
+            # freed thumbnail and the next configure raised "image pyimageN
+            # doesn't exist" - which killed the event loop and left a draw
+            # "starting" forever (user report 2026-09-22). Clear it directly.
+            self.working_label._label.configure(image="")
             self.working_label.configure(image=None,
                                          text="No working image yet - pick one under Samples.")
+            self._working_thumb = None
 
     def _render_chain(self, record):
         if not record["chain"]:

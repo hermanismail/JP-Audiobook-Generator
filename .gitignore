@@ -223,3 +223,4 @@ book-profiler/gui_state.json
 dynamic-repair/settings.json
 # scene-illustrator too
 scene-illustrator/settings.json
+scene-illustrator/window_errors.log
