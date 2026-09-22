@@ -18,6 +18,9 @@ versions, and opens them in the audition tool's Results window.
     scale recipe    1        2        3      duration_scale from the profile's bands
     pace recipe     4        5        6      a fixed length per sentence
 
+A narrow seiyuu's profile (v3 `available_speeds`) offers fewer speeds, and
+only those are rendered - two samples for a default-only profile.
+
 The SCALE recipe is the one stage 4 built: each sentence gets the
 `duration_scale` of its length band, and Irodori's own duration predictor
 decides how long that is.
@@ -156,7 +159,8 @@ def sample_jobs(window, profile, engine, settings):
                  for i, s in enumerate(window)]
     out = {}
     for method in METHODS:
-        for style in STYLES:
+        # A narrow seiyuu's profile offers fewer speeds (v3): only those.
+        for style in [s for s in STYLES if s in profile["available_speeds"]]:
             pieces, _skipped = dynamic_profile.plan_pieces(
                 sentences, profile, f"{method}_{style}", engine, first_gap=None)
             rows = []
@@ -291,22 +295,21 @@ def render_md(book, speaker, chapter, window, samples, results, targets):
          f"Passage: {chapter}, sentences #{window[0]['index']}–#{window[-1]['index']} "
          f"({len(window)} sentences, {sum(s['tts_len'] for s in window)} engine chars).\n",
          f"Pace targets (median pace of the scale recipe per style): "
-         + ", ".join(f"{k} {v} ch/s" for k, v in targets.items()) + ".\n",
+         + ", ".join(f"{s} {targets[s]} ch/s" for m, s in samples if m == "pace") + ".\n",
          "| sample | length | pace range ch/s |", "|---|---|---|"]
     for (method, style), result in results.items():
         paces = [r["pace"] for r in samples[(method, style)] if r.get("pace")]
         o.append(f"| {method} {style} | {result.get('seconds', 0)} s | "
                  f"{min(paces) if paces else '-'}–{max(paces) if paces else '-'} |")
-    o.append("\n| # | gap | chars | " + " | ".join(f"{m} {s}" for m in METHODS for s in STYLES)
-             + " | text |")
-    o.append("|---|---|---|" + "---|" * 6 + "---|")
+    keys = list(samples)
+    o.append("\n| # | gap | chars | " + " | ".join(f"{m} {s}" for m, s in keys) + " | text |")
+    o.append("|---|---|---|" + "---|" * len(keys) + "---|")
     for i, row in enumerate(samples[("scale", "default")]):
         cells = []
-        for m in METHODS:
-            for s in STYLES:
-                r = samples[(m, s)][i]
-                what = f"x{r['duration_scale']}" if m == "scale" else f"{r['seconds']}s"
-                cells.append(f"{what} → {r.get('pace', '')}")
+        for m, s in keys:
+            r = samples[(m, s)][i]
+            what = f"x{r['duration_scale']}" if m == "scale" else f"{r['seconds']}s"
+            cells.append(f"{what} → {r.get('pace', '')}")
         o.append(f"| {row['piece']} | {row['gap'] or ''} | {row['chars']} | "
                  + " | ".join(cells) + f" | {row['text']} |")
     o.append("\nEach cell: what was requested → the pace (engine ch/s) that came out.")
@@ -364,25 +367,24 @@ def open_window(book, speaker, chapter, window, samples, results, targets, setti
     specs, shown = [], []
     silence = (f"silence {settings['silence_section']}/{settings['silence_sentence']}/"
                f"{settings['silence_comma']}")
-    for method in METHODS:
-        for style in STYLES:
-            rows = samples[(method, style)]
-            if method == "scale":
-                scales = sorted({r["duration_scale"] for r in rows})
-                what = f"scale recipe · {style} · x{scales[0]}–{scales[-1]}"
-            else:
-                what = f"pace recipe · {style} · {targets[style]} ch/s"
-            specs.append({"nickname": sweep.nickname_for(speaker),
-                          "summary": f"{what}  ·  {silence}  ·  trim tail on  ·  "
-                                     f"fixed seed per sentence"})
-            result = dict(results[(method, style)])
-            result["chunks"] = [{"index": r["piece"], "gap": r["gap"] or "-", "chars": r["chars"],
-                                 "request": f"x{r['duration_scale']}" if method == "scale"
-                                 else f"{r['seconds']}s",
-                                 "pace": r.get("pace", ""), "display_text": r["text"]}
-                                for r in rows]
-            result["seconds"] = result.get("seconds", 0)
-            shown.append(result)
+    for method, style in samples:
+        rows = samples[(method, style)]
+        if method == "scale":
+            scales = sorted({r["duration_scale"] for r in rows})
+            what = f"scale recipe · {style} · x{scales[0]}–{scales[-1]}"
+        else:
+            what = f"pace recipe · {style} · {targets[style]} ch/s"
+        specs.append({"nickname": sweep.nickname_for(speaker),
+                      "summary": f"{what}  ·  {silence}  ·  trim tail on  ·  "
+                                 f"fixed seed per sentence"})
+        result = dict(results[(method, style)])
+        result["chunks"] = [{"index": r["piece"], "gap": r["gap"] or "-", "chars": r["chars"],
+                             "request": f"x{r['duration_scale']}" if method == "scale"
+                             else f"{r['seconds']}s",
+                             "pace": r.get("pace", ""), "display_text": r["text"]}
+                            for r in rows]
+        result["seconds"] = result.get("seconds", 0)
+        shown.append(result)
 
     ctk.set_appearance_mode("light")
     root = ctk.CTk()

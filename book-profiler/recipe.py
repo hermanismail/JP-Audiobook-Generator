@@ -16,18 +16,29 @@ Without --chapter it uses every chapter that has a score.json. Writes
         profile_chapter_001.json ...   one per chapter
         recipe.md
 
-## The formula (agreed 2026-09-16)
+## The formula (agreed 2026-09-16, window 2026-09-22)
 
 For each length step of a chapter, over the scales that were rendered:
 
 - a scale is CLEAN when none of its takes is flagged and none sits at the
-  ceiling;
-- faster  = the lowest scale that is clean AND has only clean scales above
-  it, plus `safety_margin` (0.1) - three takes a side at the boundary is a
-  small sample;
-- slower  = the highest clean scale (the sweep stops at 1.8, and at the
-  ceiling);
+  ceiling (takes are re-judged by score.flag_takes, the current rules);
+- the WINDOW is the longest run of adjacent clean scales, ties to the
+  slower run. Originally the run had to reach the top of the sweep, which
+  assumed a seiyuu only fails by reading too fast; marinka-03-calm-shonen
+  fails slow too (a tail after the sentence) and got no recipe at all;
+- faster  = the window's lowest scale plus `safety_margin` (0.1) - three
+  takes a side at the boundary is a small sample;
+- slower  = the window's highest scale, no margin (the tail checks find
+  that edge directly);
 - default = midway between faster and slower, rounded to 0.1.
+
+## Fewer speeds
+
+A profile offers "faster" only when every band has it at least `speed_gap`
+(0.1) below default, "slower" likewise above; a dropped speed is written
+equal to default and `available_speeds` lists what remains (profile v3,
+see dynamic_profile). A chapter with no clean scale on its first judged
+step has no bands and no profile; no chapter at all exits NO_WINDOW_EXIT.
 
 A step no longer than `word_span` characters is not judged at all (every
 mismatch in it would count as a word slip) and its lengths use the next
@@ -78,10 +89,13 @@ import text_pipeline as tp  # noqa: E402
 import dynamic_profile  # noqa: E402
 import analyze  # noqa: E402
 import sweep  # noqa: E402
+import score  # noqa: E402
 import repair  # noqa: E402
 
 RECIPE_DEFAULTS = {
     "safety_margin": 0.1,
+    # A speed is offered only this far from default in every band.
+    "speed_gap": 0.1,
     "word_span": 6,
     # Silences dynamic mode renders with (user decisions 2026-09-16).
     "silence_section": 1.5,
@@ -90,6 +104,9 @@ RECIPE_DEFAULTS = {
 }
 # The profile format is the generator's contract, so its version lives there.
 PROFILE_VERSION = dynamic_profile.PROFILE_VERSION
+# Exit code when no chapter has a clean window: nothing to write, and the
+# same score.json files give the same answer - profiler_runner does not retry.
+NO_WINDOW_EXIT = 3
 
 
 def load_settings():
@@ -147,7 +164,10 @@ def word_slips(step_row, settings):
         m = mismatch(step_row["text"], t["heard"])
         # A dropped ending is the abandoned-sentence failure, never a slip:
         # chapter_002's 聞き慣れてもなお我慢のならないじ loses 自分の声だ.
-        if m["truncated"] or max(m["script_chars"], m["heard_chars"]) > settings["word_span"]:
+        # Nor is an ADDED one (score.py's ran_long): marinka's …葉を噛む、噛む。
+        # is a two-character mismatch and was heard as a hallucination.
+        if m["truncated"] or t.get("ran_long") or \
+                max(m["script_chars"], m["heard_chars"]) > settings["word_span"]:
             continue
         t["word_slip"] = True
         entry = words.setdefault(" / ".join(m["words"]) or "(insertion)",
@@ -177,16 +197,40 @@ def step_recipe(step_row, settings):
         flagged = sum(1 for t in takes if t["flags"] and not t["word_slip"])
         capped = sum(1 for t in takes if t["at_ceiling"])
         clean[scale] = flagged == 0 and capped == 0
-    usable = [s for s in scales if all(clean[x] for x in scales if x >= s)]
     base = {"step": step_row["step"], "tts_len": step_row["tts_len"], "text": step_row["text"],
             "clean": {f"{s:.1f}": clean[s] for s in scales}, "word_slips": slips}
-    if not usable:
-        return dict(base, usable=False, judged=True, faster=None, default=None, slower=None)
-    faster_base = min(usable)
-    slower = max(s for s in scales if clean[s])
+    window = clean_window(scales, clean)
+    if not window:
+        return dict(base, usable=False, judged=True, window=None,
+                    faster=None, default=None, slower=None)
+    faster_base, slower = window
     faster = min(r1(faster_base + settings["safety_margin"]), slower)
-    return dict(base, usable=True, judged=True, faster_base=faster_base, faster=faster,
-                slower=slower, default=r1((faster + slower) / 2))
+    return dict(base, usable=True, judged=True, window=list(window), faster_base=faster_base,
+                faster=faster, slower=slower, default=r1((faster + slower) / 2))
+
+
+def clean_window(scales, clean):
+    """(lowest, highest) of the longest run of adjacent clean scales, ties
+    to the slower run - or None when no scale is clean.
+
+    Until 2026-09-22 the run had to reach the top of the sweep, because
+    tanya only ever failed by reading too FAST. marinka-03-calm-shonen also
+    fails SLOW (reads the sentence, then ad-libs a tail), which left her no
+    usable step at all. No margin below the top edge (decision 2026-09-22):
+    score.py's tail checks find that edge directly."""
+    runs, run = [], []
+    for scale in scales:
+        if clean[scale]:
+            run.append(scale)
+        elif run:
+            runs.append(run)
+            run = []
+    if run:
+        runs.append(run)
+    if not runs:
+        return None
+    best = max(runs, key=lambda r: (len(r), r[-1]))
+    return best[0], best[-1]
 
 
 # ------------------------------------------------------------ one chapter
@@ -250,6 +294,25 @@ def book_recipe(chapters, max_len):
                           "default": row["default"], "slower": row["slower"],
                           "viable": row["viable"]})
     return bands, all(r["viable"] for r in rows)
+
+
+def speeds_for(bands, settings):
+    """The speeds a profile of `bands` can offer, and the bands to write.
+
+    Profile-wide (decision 2026-09-22): "faster" stays only when EVERY band
+    has it at least `speed_gap` below default, "slower" likewise above. A
+    dropped speed is written equal to default in every band, so a stale
+    selection still renders at the safe speed."""
+    gap = settings["speed_gap"] - 1e-9
+    speeds = ["default"]
+    if all(b["default"] - b["faster"] >= gap for b in bands):
+        speeds.append("faster")
+    if all(b["slower"] - b["default"] >= gap for b in bands):
+        speeds.append("slower")
+    speeds = [s for s in dynamic_profile.SPEEDS if s in speeds]
+    written = [dict(b, **{s: b["default"] for s in ("faster", "slower") if s not in speeds})
+               for b in bands]
+    return speeds, written
 
 
 def sentences_by_chapter(analysis):
@@ -396,7 +459,7 @@ def pace_targets(scores, bands, settings):
     return {style: round(statistics.median(values), 2) for style, values in paces.items()}
 
 
-def profile(book, speaker, scope, chapters_in, bands, limit, settings, extra, targets):
+def profile(book, speaker, scope, chapters_in, bands, limit, settings, extra, targets, speeds):
     return dict({
         "version": PROFILE_VERSION,
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -412,9 +475,12 @@ def profile(book, speaker, scope, chapters_in, bands, limit, settings, extra, ta
                     "sentence": settings["silence_sentence"],
                     "comma": settings["silence_comma"]},
         "comfortable_length": limit,
-        # Six recipes, both kept on every profile (decision 2026-09-17):
-        # scale_* from the bands, pace_* from pace_targets.
-        "styles": list(dynamic_profile.STYLE_KEYS),
+        # Both methods kept on every profile (decision 2026-09-17): scale_*
+        # from the bands, pace_* from pace_targets. A narrow seiyuu offers
+        # fewer speeds, for both alike (decision 2026-09-22).
+        "available_speeds": speeds,
+        "styles": [k for k in dynamic_profile.STYLE_KEYS
+                   if dynamic_profile.split_style(k)[1] in speeds],
         "bands": bands,
         "pace_targets": targets,
     }, **extra)
@@ -424,13 +490,27 @@ def fmt(value):
     return "–" if value is None else f"{value:.1f}"
 
 
-def render_md(book, speaker, chapters, book_bands, viable, book_limit, apply_book, costs):
+def render_md(book, speaker, chapters, book_bands, viable, book_limit, apply_book, costs,
+              book_speeds, no_window):
     o = [f"# Recipe - {book} / {sweep.nickname_for(speaker)}\n",
-         "faster = lowest clean scale with only clean scales above it, + 0.1; slower = "
-         "highest clean scale; default = midway. A sentence uses the next longer step.\n"]
+         "Clean window = the longest run of adjacent clean scales. faster = its lowest scale "
+         "+ 0.1; slower = its highest; default = midway. A sentence uses the next longer "
+         "step. A speed is offered only when it is at least 0.1 from default in every band.\n"]
+    if no_window:
+        o.append("**No clean window** (no profile): " + ", ".join(
+            f"{c['chapter']} (step {c['limited_by_step']})" for c in no_window) + "\n")
     o.append("## Book recipe\n")
     o.append(f"One recipe for the whole book: **{'viable' if viable else 'NOT viable'}**. "
              f"Comfortable length L = **{book_limit}** engine characters.\n")
+    if not viable:
+        o.append("The chapters' clean windows do not overlap at every length, so "
+                 "**no profile_book.json was written** - use a chapter profile.\n")
+    elif book_speeds and len(book_speeds) < len(dynamic_profile.SPEEDS):
+        dropped = [s for s in dynamic_profile.SPEEDS if s not in book_speeds]
+        o.append(f"**Narrow seiyuu: this profile offers {' and '.join(book_speeds)} only** "
+                 f"({len(book_speeds) * 2} of 6 styles). No room for "
+                 f"{' / '.join(dropped)} at least 0.1 from default in every band - the "
+                 "profile writes them equal to default. The table shows what was measured.\n")
     o.append("| sentence length | faster | default | slower |")
     o.append("|---|---|---|---|")
     for b in book_bands:
@@ -463,6 +543,8 @@ def render_md(book, speaker, chapters, book_bands, viable, book_limit, apply_boo
     o.append("## Chapter recipes\n")
     for c in chapters:
         o.append(f"### {c['chapter']}\n")
+        if len(c.get("speeds") or dynamic_profile.SPEEDS) < len(dynamic_profile.SPEEDS):
+            o.append(f"Chapter profile offers {' and '.join(c['speeds'])} only.\n")
         if c["non_monotone_faster"]:
             o.append("Note: a longer step needs a LOWER faster scale than a shorter one at "
                      + ", ".join(f"steps {a}->{b}" for a, b in c["non_monotone_faster"])
@@ -512,10 +594,30 @@ def main():
             raise SystemExit(f"no score.json for {name}: {path}")
     if not scores:
         raise SystemExit("no scored chapters")
+    # Judge every take by the scorer's CURRENT rules from what score.json
+    # holds - a cleaned chapter has no wavs to re-run score.py on, and its
+    # profile must still follow a rule change (2026-09-22: tails).
+    score_settings = score.load_settings()
+    for s in scores:
+        for row in s["rows"]:
+            score.flag_takes(row["text"], row["takes"], score_settings)
 
     normalize, _path = analyze.load_irodori_normalizer(settings["irodori_root"])
     engine = analyze.make_engine(normalize)
-    chapters = [chapter_recipe(s, settings) for s in scores]
+    every_chapter = [chapter_recipe(s, settings) for s in scores]
+    # A chapter whose first judged step has no clean scale gives no bands at
+    # all: nothing it could recommend. Said plainly, and left out.
+    no_window = [c for c in every_chapter if not c["bands"]]
+    chapters = [c for c in every_chapter if c["bands"]]
+    for c in no_window:
+        print(f"{c['chapter']}: no clean scale range at step {c['limited_by_step']} - "
+              f"this seiyuu has no usable speed for the chapter's shortest sentences; "
+              f"no profile for it")
+    if not chapters:
+        print(f"NO CLEAN WINDOW: not one scored chapter has a clean scale range for "
+              f"{sweep.nickname_for(speaker)} - no profile written. A rerun cannot change "
+              f"this; only different takes can.")
+        sys.exit(NO_WINDOW_EXIT)
     by_chapter = sentences_by_chapter(analysis)
     in_scope = [c["chapter"] for c in chapters]
     book_sentences = [s for name in in_scope for s in by_chapter.get(name, [])]
@@ -546,27 +648,44 @@ def main():
         extra = {"steps": c["steps"],
                  "application": application(c["bands"], c["comfortable_length"],
                                             by_chapter.get(c["chapter"], []), engine)}
-        targets = pace_targets([score_by_chapter[c["chapter"]]], c["bands"], settings)
+        c["speeds"], written = speeds_for(c["bands"], settings)
+        targets = pace_targets([score_by_chapter[c["chapter"]]], written, settings)
         with open(os.path.join(out_dir, f"profile_{c['chapter']}.json"), "w", encoding="utf-8") as f:
-            json.dump(profile(args.book, speaker, "chapter", [c["chapter"]], c["bands"],
-                              c["comfortable_length"], settings, extra, targets),
+            json.dump(profile(args.book, speaker, "chapter", [c["chapter"]], written,
+                              c["comfortable_length"], settings, extra, targets, c["speeds"]),
                       f, ensure_ascii=False, indent=2)
-    book_targets = pace_targets(scores, book_bands, settings)
-    with open(os.path.join(out_dir, "profile_book.json"), "w", encoding="utf-8") as f:
-        json.dump(profile(args.book, speaker, "book", in_scope, book_bands, book_limit, settings,
-                          {"viable": viable, "application": apply_book, "chapter_costs": costs},
-                          book_targets),
-                  f, ensure_ascii=False, indent=2)
+    book_path = os.path.join(out_dir, "profile_book.json")
+    book_speeds = book_targets = None
+    if viable and book_bands:
+        book_speeds, written = speeds_for(book_bands, settings)
+        book_targets = pace_targets(scores, written, settings)
+        with open(book_path, "w", encoding="utf-8") as f:
+            json.dump(profile(args.book, speaker, "book", in_scope, written, book_limit, settings,
+                              {"viable": viable, "application": apply_book,
+                               "chapter_costs": costs, "no_window": [c["chapter"] for c in no_window]},
+                              book_targets, book_speeds),
+                      f, ensure_ascii=False, indent=2)
+    elif os.path.isfile(book_path):
+        # A book profile from an earlier run would read as this run's answer.
+        os.remove(book_path)
     with open(os.path.join(out_dir, "recipe.md"), "w", encoding="utf-8") as f:
         f.write(render_md(args.book, speaker, chapters, book_bands, viable, book_limit,
-                          apply_book, costs))
-        f.write(f"\nEven pace recipe (book): faster {book_targets['faster']} · default "
-                f"{book_targets['default']} · slower {book_targets['slower']} ch/s - the median "
-                f"pace the book bands give each style.\n")
+                          apply_book, costs, book_speeds, no_window))
+        if book_targets:
+            order = [s for s in ("faster", "default", "slower") if s in book_speeds]
+            f.write("\nEven pace recipe (book): " + " · ".join(
+                f"{s} {book_targets[s]}" for s in order) + " ch/s - the median pace the book "
+                "bands give each style.\n")
         table, per_step = pace_view(scores, chapters, settings)
         f.write("\n" + render_pace_md(table, per_step))
+    if not viable:
+        print("book recipe NOT viable: the chapters' clean windows do not overlap at some "
+              "length - no profile_book.json; the chapter profiles are written")
     print(f"recipe for {len(chapters)} chapter(s): book recipe "
-          f"{'viable' if viable else 'NOT viable'}, L={book_limit} -> {out_dir}")
+          f"{'viable' if viable else 'NOT viable'}, L={book_limit}"
+          + (f", speeds {'/'.join(book_speeds)}" if book_speeds else "")
+          + (f", {len(no_window)} chapter(s) with no clean window" if no_window else "")
+          + f" -> {out_dir}")
 
 
 if __name__ == "__main__":
