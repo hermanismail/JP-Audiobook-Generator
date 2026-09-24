@@ -1485,8 +1485,25 @@ def main():
                 # So the credit translates with the spelling you chose.
                 print(f"  glossary.json: added {seiyuu['display_name']} "
                       f"= {seiyuu['translation_name']}")
-            summary = process_chapter_dynamic(chapter_file, assignment, engine, readings, intro,
-                                              furigana_ok, (book or {}).get("slug"))
+            # A furigana decision or a reading may have been made while
+            # only certain chapters were selected; it applies to those and
+            # no further (schema v2, decision 2026-09-24). So each chapter
+            # asks the library what reaches IT - the file's own readings
+            # are shared by all of them, as before.
+            chapter_readings, chapter_furigana = readings, furigana_ok
+            if new_pipeline and suite is not None:
+                scoped = suite_link.readings_for(suite, book, base)
+                extra = [r for r in scoped
+                         if not any(r["word"] == f["word"] for f in readings)]
+                chapter_readings = sorted(readings + extra, key=lambda r: -len(r["word"]))
+                chapter_furigana = suite_link.furigana_applied(suite, book, base)
+                dropped = len(furigana_ok) - len(chapter_furigana)
+                if dropped > 0:
+                    print(f"  {dropped} furigana decision(s) were made for other chapters "
+                          f"and are not applied to {base}")
+            summary = process_chapter_dynamic(chapter_file, assignment, engine,
+                                              chapter_readings, intro, chapter_furigana,
+                                              (book or {}).get("slug"))
             if summary and new_pipeline:
                 record_chapter(suite, book, seiyuu, summary)
         else:

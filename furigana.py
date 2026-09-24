@@ -113,30 +113,60 @@ def sentence_around(text, start, end, limit=70):
 
 def statistics(texts):
     """Per (word, reading): how often it carries furigana, and how often
-    that word appears in the book WITHOUT any - the number that decides
-    whether a whole-book rule is safe.
+    that word appears WITHOUT any - the number that decides whether a rule
+    wider than the annotation itself is safe.
 
-    `texts` is an iterable of chapter texts."""
-    counts, words, examples = {}, {}, {}
-    stripped = []
-    for text in texts:
-        stripped.append(strip(text))
+    `texts` is either an iterable of chapter texts, or {chapter: text} /
+    [(chapter, text)] - and with names, every count is also broken down per
+    chapter, because the review is scoped to the chapters selected for the
+    run (user decision 2026-09-24) and a bare count over the whole book
+    would be evidence the person has not seen.
+
+    Each row carries:
+        with_furigana / bare      totals over what was scanned
+        with_by_chapter           {chapter: n}, annotated
+        bare_by_chapter           {chapter: n}, the same word, no furigana
+        first_chapter             where it is first written
+        example                   (sentence, start, end) from there
+    """
+    if isinstance(texts, dict):
+        items = list(texts.items())
+    else:
+        items = list(texts)
+        if not all(isinstance(t, (tuple, list)) and len(t) == 2 for t in items):
+            items = [(f"text {i + 1}", t) for i, t in enumerate(items)]
+    counts, words, examples, first = {}, {}, {}, {}
+    with_by, bare_by, stripped = {}, {}, []
+    for name, text in items:
+        stripped.append((name, strip(text)))
         for word, reading, start, end in find(text):
             key = (word, reading)
             counts[key] = counts.get(key, 0) + 1
             words[word] = words.get(word, 0) + 1
+            with_by.setdefault(key, {})
+            with_by[key][name] = with_by[key].get(name, 0) + 1
             # where it is FIRST written, for the review window's context
-            examples.setdefault(key, sentence_around(text, start, end))
-    total = {}
+            if key not in examples:
+                examples[key] = sentence_around(text, start, end)
+                first[key] = name
     for word in words:
-        total[word] = sum(t.count(word) for t in stripped)
+        bare_by[word] = {}
+        for name, text in stripped:
+            n = text.count(word) - sum(
+                c.get(name, 0) for (w, _r), c in with_by.items() if w == word)
+            if n > 0:
+                bare_by[word][name] = n
     out = {}
     for (word, reading), n in counts.items():
+        per_chapter = bare_by.get(word, {})
         out[(word, reading)] = {
             "word": word, "reading": reading,
             "with_furigana": n,
             # every occurrence of the word, minus the annotated ones
-            "bare": max(0, total.get(word, 0) - words.get(word, 0)),
+            "bare": sum(per_chapter.values()),
+            "with_by_chapter": dict(with_by.get((word, reading), {})),
+            "bare_by_chapter": dict(per_chapter),
+            "first_chapter": first.get((word, reading), ""),
             "readings_in_book": sorted({r for (w, r) in counts if w == word}),
             # False = probably an aside, not a reading; never applied
             # without being asked, and unticked by default.

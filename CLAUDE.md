@@ -376,10 +376,28 @@ calls for with that seiyuu.
     `main` over 7 chapters x 2 styles). `display()` drops markers for the
     reader, `spoken()` swaps in the reading for the engine.
   - The review window (`furigana_review.py`) shows only pairs with no
-    decision for that book; Save & Run warns if any are left. Each row
-    also shows the SENTENCE the pair is first written in, with the
-    annotation in bold on yellow (`ui_common.mark_tag`), because `下(もと)`
-    cannot be judged on its own.
+    decision; Save & Run warns if any are left. Each card also shows the
+    SENTENCE the pair is first written in, with the annotation in bold on
+    yellow (`ui_common.mark_tag`), because `下(もと)` cannot be judged on
+    its own.
+  - **A decision is only as wide as the evidence** (user, 2026-09-24, after
+    177 readings appeared to render two chapters). The review is scoped to
+    the chapters SELECTED FOR THE RUN: "assign for all" is the whole book
+    as before, Customize scans only what is ticked, and with nothing ticked
+    the button does not open. Counts come back per chapter (`1st written in
+    chapter_001 · without furigana ×1 in chapter_001, ×2 in chapter_002`),
+    the whole-book radio says "everywhere in the 2 chapter(s) selected",
+    and the row stores those chapters (suite schema **v2**, `chapters`
+    JSON, NULL = whole book). The pair comes back for review when a chapter
+    outside that list is selected; deciding again there widens the scope.
+    A chapter-scoped reading CANNOT go into `readings.json` (a global
+    replace), so it stays in the DB and the export writes whole-book rows
+    only - `run_audiobook` asks the library per chapter and merges.
+  - Layout: one TAG per pair, colour-coded (grey undecided, green read as
+    written, red left to the seiyuu, yellow open, orange border for an
+    aside); clicking one opens its card below. Every pair carries its
+    default answer from the start, so Save means "these answers", not
+    "the ones I scrolled to".
 - **Preview Chapters** (`preview.py` + `preview_window.py`, built
   2026-09-24): a button under Profile Path opens what every chosen chapter
   will SEND and SHOW, built with the same `plan_chapter()` the render uses,
@@ -401,6 +419,12 @@ calls for with that seiyuu.
     chapters still to render and removes the rest.
   - An edited TTS line is re-priced from its new text (Phase 3's rule), and
     a small TTS-only change is offered as a book reading.
+  - **Section 1 stays open** (the chapter header and the seiyuu credit, what
+    a run is double-checked on); every later section is a numbered tag in a
+    rounded box, and clicking one opens its two columns - yellow while
+    open, violet when it holds an unsaved edit, green once it is in the
+    plan. Leaving a tag keeps what was typed (`held`), so an edit survives
+    moving between sections and between chapters.
   - Every stretch a reading or a furigana pair decided is bold on yellow -
     the kana in the TTS column, the word it stands for in the reader
     column - taken from the piece's own `readings`, so nothing is guessed.

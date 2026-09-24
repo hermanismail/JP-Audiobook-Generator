@@ -817,10 +817,28 @@ class SettingsApp(ctk.CTk):
         self._refresh_furigana_status()
 
     # ---------- furigana
+    def _selected_chapters(self):
+        """(chapters, why) - the chapters a run would render.
+
+        `None` means every chapter (Assign for all), and the furigana
+        review then covers the whole book exactly as before. A list is what
+        Customize has ticked; an EMPTY list with a reason means nothing has
+        been chosen yet, and the review stays shut until it is (user
+        decision 2026-09-24) - a decision must be as narrow as the
+        chapters it was seen in."""
+        block = dict(self.dynamic_state or {})
+        if block.get("assign") != "custom":
+            return None, ""
+        ticked = [base for base in self.dynamic_chapters
+                  if (block.get("chapters") or {}).get(base, {}).get("enabled")]
+        if not ticked:
+            return [], "Tick the chapters in Customize first - the review covers what you " \
+                       "are rendering."
+        return ticked, ""
+
     def _furigana_state(self):
-        """(stats, undecided, automatic, book) for the chosen input folder.
-        Everything empty when the library has no row for this book: furigana
-        belongs to the new pipeline only."""
+        """(stats, undecided, automatic, book) for the chosen input folder,
+        narrowed to the chapters selected for the run."""
         folder = self.vars["input_folder"].get().strip()
         settings = dict(self.settings, suite_root=self.settings.get("suite_root")
                         or DEFAULT_SETTINGS["suite_root"])
@@ -832,8 +850,11 @@ class SettingsApp(ctk.CTk):
                 suite, self.vars["output_folder"].get().strip())
             if not suite_link.uses_new_pipeline(book):
                 return {}, [], [], book
-            stats = furigana_review.scan_folder(folder)
-            undecided, automatic = furigana_review.pending(stats, suite, book)
+            chapters, _why = self._selected_chapters()
+            if chapters is not None and not chapters:
+                return {}, [], [], book
+            stats = furigana_review.scan_folder(folder, chapters)
+            undecided, automatic = furigana_review.pending(stats, suite, book, chapters)
             return stats, undecided, automatic, book
         finally:
             suite.close()
@@ -843,6 +864,12 @@ class SettingsApp(ctk.CTk):
             return
         if self.generation_mode != "dynamic" or not self.input_parse_ok:
             self.furigana_label.configure(text="")
+            self.furigana_button.pack_forget()
+            return
+        chapters, why = self._selected_chapters()
+        if why:
+            self.furigana_pending = []
+            self.furigana_label.configure(text=why, text_color=dynamic_mode_ui.COLOR_SUBTITLE)
             self.furigana_button.pack_forget()
             return
         stats, undecided, automatic, book = self._furigana_state()
@@ -856,19 +883,24 @@ class SettingsApp(ctk.CTk):
             self.furigana_button.pack_forget()
             return
         total = sum(r["with_furigana"] for r in stats.values())
+        scope = "" if chapters is None else f" in the {len(chapters)} chapter(s) selected"
         if undecided:
             self.furigana_label.configure(
-                text=f"⚠  {total} furigana annotation(s), {len(undecided)} reading(s) still "
-                     f"need a decision.",
+                text=f"⚠  {total} furigana annotation(s){scope}, {len(undecided)} reading(s) "
+                     f"still need a decision.",
                 text_color=dynamic_mode_ui.COLOR_WARN)
         else:
             self.furigana_label.configure(
-                text=f"✔  {total} furigana annotation(s), every reading decided"
+                text=f"✔  {total} furigana annotation(s){scope}, every reading decided"
                      + (f" ({len(automatic)} applied automatically)" if automatic else ""),
                 text_color=dynamic_mode_ui.COLOR_OK)
         self.furigana_button.pack(side="left", padx=(12, 0))
 
     def _open_furigana_review(self):
+        chapters, why = self._selected_chapters()
+        if why:
+            messagebox.showinfo("Furigana", why)
+            return
         stats, undecided, automatic, book = self._furigana_state()
         if book is None or not suite_link.uses_new_pipeline(book):
             messagebox.showinfo("Furigana", "This book is not in the library, so it renders "
@@ -878,7 +910,7 @@ class SettingsApp(ctk.CTk):
                         or DEFAULT_SETTINGS["suite_root"])
         furigana_review.FuriganaReview(
             self, book, stats, undecided, automatic, settings,
-            on_done=lambda _saved: self._refresh_furigana_status())
+            on_done=lambda _saved: self._refresh_furigana_status(), chapters=chapters)
 
     # ---------- preview
     def _preview_chapters(self, data=None):
@@ -934,11 +966,23 @@ class SettingsApp(ctk.CTk):
         readings, furigana_ok = [], set()
         try:
             if suite is not None and suite_link.uses_new_pipeline(book):
-                readings = [dict(r) for r in suite.readings_for_book(book["id"])]
+                readings = suite_link.readings_for(suite, book)
                 furigana_ok = suite_link.furigana_applied(suite, book)
         finally:
             if suite is not None:
                 suite.close()
+
+        def per_chapter(base):
+            """A chapter sees only the decisions whose scope reaches it -
+            the same rule the render applies (schema v2)."""
+            opened = suite_link.open_suite(data)
+            if opened is None:
+                return readings, furigana_ok
+            try:
+                return (suite_link.readings_for(opened, book, base),
+                        suite_link.furigana_applied(opened, book, base))
+            finally:
+                opened.close()
         normalize, path = dynamic_mode_ui.dynamic_profile.load_irodori_normalizer(
             self.vars["uv_project_dir"].get().strip())
         if normalize is None:
@@ -951,7 +995,8 @@ class SettingsApp(ctk.CTk):
         preview_window.PreviewWindow(
             self, chapters, data, book, engine, readings=readings,
             furigana_applied=furigana_ok, temp_dir=data["temp_dir"],
-            on_close=self._preview_closed)
+            on_close=self._preview_closed,
+            per_chapter=per_chapter if book else None)
 
     def _preview_closed(self, saved):
         self.previewed_chapters = set(saved)

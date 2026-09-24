@@ -126,11 +126,21 @@ def intro_line(seiyuu, template="朗読者：{name}"):
     return template.format(name=display), template.format(name=kana)
 
 
-def furigana_applied(suite, book):
-    """{(word, reading)} the person has approved for this book - 'book' and
-    'once' alike, because both are spoken where they are written. Rejected
-    pairs are absent, so their parens are simply stripped."""
+def furigana_applied(suite, book, chapter=None):
+    """{(word, reading)} the person has approved - 'book' and 'once' alike,
+    because both are spoken where they are written. Rejected pairs are
+    absent, so their parens are simply stripped.
+
+    With `chapter`, a decision made while only other chapters were selected
+    is left out: it was taken on evidence from those chapters (schema v2).
+    An older library without the column answers the same as before."""
     if not uses_new_pipeline(book):
+        return set()
+    try:
+        return suite.furigana_applied(book["id"], chapter)
+    except AttributeError:          # a library older than schema v2
+        pass
+    except Exception:
         return set()
     try:
         rows = suite.conn.execute(
@@ -139,6 +149,17 @@ def furigana_applied(suite, book):
         return {(r["word"], r["reading"]) for r in rows}
     except Exception:
         return set()
+
+
+def readings_for(suite, book, chapter=None):
+    """The book's readings as dicts, narrowed to `chapter` - a reading
+    decided from two chapters does not apply to a third."""
+    if suite is None or not uses_new_pipeline(book):
+        return []
+    try:
+        return [dict(r) for r in suite.readings_for_book(book["id"], chapter=chapter)]
+    except Exception:
+        return []
 
 
 def sync_readings(suite, book, output_folder):

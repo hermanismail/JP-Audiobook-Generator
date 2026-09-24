@@ -36,13 +36,22 @@ COLOR_ERROR = "#C4453C"
 COLOR_EDITED = "#6C5DD3"
 COLOR_MARK = "#FFF3A3"          # where a reading or furigana changed the text
 
+# Section 1 always shows (it holds the chapter header and the seiyuu
+# credit, which is what a run is double-checked on); every later section is
+# a tag, and only the one clicked is open. 34 sections of two text boxes
+# meant scrolling to find anything (user, 2026-09-24).
+TAG_IDLE = "#EDEDF2"
+TAG_OPEN = COLOR_MARK
+TAG_DIRTY = "#E3DEFA"           # edited, not saved yet
+TAG_SAVED = "#D8F0E0"           # in the plan on disk
+
 
 class PreviewWindow(ctk.CTkToplevel):
     """`chapters` is [(base, path, assignment)] - assignment as
     resolve_dynamic_plan() builds it: {"profile": profile, "style": key}."""
 
     def __init__(self, parent, chapters, settings, book, engine, readings=None,
-                 furigana_applied=None, temp_dir=None, on_close=None):
+                 furigana_applied=None, temp_dir=None, on_close=None, per_chapter=None):
         super().__init__(parent)
         self.title("Preview Chapters")
         self.geometry("1440x900")
@@ -53,11 +62,20 @@ class PreviewWindow(ctk.CTkToplevel):
         self.engine = engine
         self.readings = readings or []
         self.furigana_applied = furigana_applied or set()
+        # `per_chapter(base)` -> (readings, furigana pairs) for chapters
+        # whose decisions were scoped (schema v2). Without it the same two
+        # apply everywhere, as before.
+        self.per_chapter = per_chapter
         self.temp_dir = temp_dir or settings.get("temp_dir")
         self.on_close_cb = on_close
         self.current = None
         self.boxes = {}                 # (section index, side) -> textbox
         self.built = {}                 # chapter -> sections
+        self.held = {}                  # (section, side) -> (typed, built) when closed
+        self.held_by_chapter = {}       # the same, per chapter left behind
+        self.section_tags = {}
+        self.open_section = None
+        self.rest = []
         self.dirty = set()              # chapters with unsaved edits
         self.saved = set()              # chapters whose plan is on disk
 
@@ -142,9 +160,12 @@ class PreviewWindow(ctk.CTkToplevel):
         if base in self.built:
             return self.built[base]
         assignment = self._assignment(base)
+        readings, furigana_ok = self.readings, self.furigana_applied
+        if self.per_chapter:
+            readings, furigana_ok = self.per_chapter(base)
         sections, skipped, _pieces = preview.build(
             self._raw(base), assignment["profile"], assignment["style"], self.engine,
-            self.readings, self.furigana_applied, self._intro(assignment))
+            readings, furigana_ok, self._intro(assignment))
         self.built[base] = sections
         self.skipped = skipped
         return sections
@@ -154,8 +175,14 @@ class PreviewWindow(ctk.CTkToplevel):
         if self.current == base:
             return
         if self.current is not None:
-            self._collect(self.current)
+            # Every box of the chapter being left, open or closed, so its
+            # edits are still there when it is come back to.
+            for index in list(self.section_tags) + [s["index"] for s in self.built
+                                                    .get(self.current, [])[:1]]:
+                self._remember(index)
+            self.held_by_chapter[self.current] = dict(self.held)
         self.current = base
+        self.held = dict(self.held_by_chapter.get(base, {}))
         for name, button in self.tab_buttons.items():
             edited = " ●" if name in self.dirty else (" ✔" if name in self.saved else "")
             button.configure(
@@ -181,11 +208,83 @@ class PreviewWindow(ctk.CTkToplevel):
         for widget in self.sections_frame.winfo_children():
             widget.destroy()
         self.boxes = {}
-        for section in sections:
-            self._add_section(section)
+        self.section_tags = {}
+        self.open_section = None
+        first = [s for s in sections if s["index"] <= 1] or sections[:1]
+        self.rest = [s for s in sections if s not in first]
+        for section in first:
+            self._add_section(section, self.sections_frame)
+        if self.rest:
+            self._add_tag_strip()
+            self.detail = ctk.CTkFrame(self.sections_frame, fg_color="transparent")
+            self.detail.pack(fill="both", expand=True)
+            self.open_section_at(self.rest[0]["index"])
 
-    def _add_section(self, section):
-        card = ctk.CTkFrame(self.sections_frame, fg_color=COLOR_CARD, corner_radius=10,
+    def _add_tag_strip(self):
+        """One tag per remaining section, in a rounded outlined box - the
+        same shape as the chapters sidebar, so the two read alike."""
+        strip = ctk.CTkFrame(self.sections_frame, fg_color=COLOR_CARD, corner_radius=10,
+                             border_width=1, border_color=COLOR_CARD_BORDER)
+        strip.pack(fill="x", pady=(6, 8))
+        ctk.CTkLabel(strip, text="SECTIONS", text_color=COLOR_SUBTITLE,
+                     font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w", padx=12,
+                                                                    pady=(8, 0))
+        holder = ctk.CTkFrame(strip, fg_color="transparent")
+        holder.pack(fill="x", padx=8, pady=8)
+        for number, section in enumerate(self.rest):
+            tag = ctk.CTkButton(
+                holder, text=str(section["index"]), width=48, height=34, corner_radius=10,
+                fg_color=TAG_IDLE, hover_color="#E2E1F4", text_color=COLOR_ENTRY_TEXT,
+                border_width=1, border_color=COLOR_ENTRY_BORDER,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                command=lambda i=section["index"]: self.open_section_at(i))
+            tag.grid(row=number // 18, column=number % 18, padx=3, pady=3)
+            self.section_tags[section["index"]] = tag
+
+    def open_section_at(self, index):
+        """Show one section's two columns; its tag turns yellow. The boxes
+        of the section being left are remembered, so an edit survives
+        moving between tags exactly as it survives moving between
+        chapters."""
+        if self.open_section == index:
+            return
+        if self.open_section is not None:
+            self._remember(self.open_section)
+        self.open_section = index
+        for widget in self.detail.winfo_children():
+            widget.destroy()
+        section = next(s for s in self.rest if s["index"] == index)
+        self._add_section(section, self.detail)
+        for number, tag in self.section_tags.items():
+            tag.configure(fg_color=self._tag_fill(number))
+
+    def _tag_fill(self, index):
+        if index == self.open_section:
+            return TAG_OPEN
+        if any(key[0] == index for key in self._changed_keys()):
+            return TAG_DIRTY
+        if self.current in self.saved:
+            return TAG_SAVED
+        return TAG_IDLE
+
+    def _changed_keys(self):
+        return set(self._collect(self.current))
+
+    def _remember(self, index):
+        """Keep a section's text when its tag is closed, so `_collect`
+        still sees the edit after the widgets are gone."""
+        for (number, side), (box, original) in list(self.boxes.items()):
+            if number != index:
+                continue
+            try:
+                now = box.get("1.0", "end-1c")
+            except Exception:              # the widget is already gone
+                continue
+            self.held[(number, side)] = (now, original)
+            del self.boxes[(number, side)]
+
+    def _add_section(self, section, parent):
+        card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=10,
                             border_width=1, border_color=COLOR_CARD_BORDER)
         card.pack(fill="x", pady=6)
         header = ctk.CTkFrame(card, fg_color="transparent")
@@ -210,14 +309,18 @@ class PreviewWindow(ctk.CTkToplevel):
                         padx=(0, 8) if side == "tts" else (8, 0))
             ctk.CTkLabel(column, text=title, text_color=COLOR_SUBTITLE, anchor="w",
                          font=ctk.CTkFont(size=11, weight="bold")).pack(fill="x")
+            # A section reopened after an edit shows what was typed, not
+            # what it was built from.
             text = preview.as_text(section, side)
+            held = self.held.get((section["index"], side))
+            shown = held[0] if held else text
             height = max(70, 24 * len(section["lines"]) + 16)
             box = ctk.CTkTextbox(column, height=min(height, 420), corner_radius=8,
                                  border_width=1, border_color=COLOR_ENTRY_BORDER,
                                  fg_color="white", text_color=COLOR_ENTRY_TEXT,
                                  font=ctk.CTkFont(size=13), wrap="word")
             box.pack(fill="both", expand=True)
-            box.insert("1.0", text)
+            box.insert("1.0", shown)
             self._mark_readings(box, section, side)
             box.bind("<KeyRelease>", lambda _e, b=self.current: self._touched(b))
             self.boxes[(section["index"], side)] = (box, text)
@@ -250,13 +353,30 @@ class PreviewWindow(ctk.CTkToplevel):
             self.status.configure(text="unsaved edits", text_color=COLOR_WARN)
 
     def _collect(self, base):
-        """{(section, side): text} for every box whose text changed."""
+        """{(section, side): text} for every box whose text changed -
+        the sections whose tag is closed included."""
         changed = {}
-        for (index, side), (box, original) in self.boxes.items():
-            now = box.get("1.0", "end-1c")
+        for (index, side), (now, original) in self.held.items():
             if now != original:
                 changed[(index, side)] = now
+        for (index, side), (box, original) in self.boxes.items():
+            try:
+                now = box.get("1.0", "end-1c")
+            except Exception:
+                continue
+            if now != original:
+                changed[(index, side)] = now
+            else:
+                changed.pop((index, side), None)
         return changed
+
+    def _original_of(self, key):
+        """The text the preview built for a box, open or closed - what an
+        edit is recorded against."""
+        if key in self.boxes:
+            return self.boxes[key][1]
+        held = self.held.get(key)
+        return held[1] if held else ""
 
     # ------------------------------------------------------------ saving
     def save(self):
@@ -280,7 +400,7 @@ class PreviewWindow(ctk.CTkToplevel):
         if suite is not None and self.book:
             try:
                 for (index, side), text in changed.items():
-                    original = dict(self.boxes)[(index, side)][1]
+                    original = self._original_of((index, side))
                     edit_id = suite.save_edit(self.book["id"], base, index, side, original, text)
                     if edit_id:
                         edit_ids.append(edit_id)
