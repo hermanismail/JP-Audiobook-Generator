@@ -103,6 +103,13 @@ class PreviewWindow(ctk.CTkToplevel):
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             font=ctk.CTkFont(size=13, weight="bold"), command=self.save)
         self.save_button.pack(side="right", padx=(8, 10))
+        # Furigana decisions and readings are saved in ANOTHER window; this
+        # is how they reach a preview that is already open (user,
+        # 2026-09-24) - the alternative was closing and reopening it.
+        ctk.CTkButton(row, text="Refresh", width=110, height=34, corner_radius=8,
+                      fg_color="transparent", border_width=1, border_color=COLOR_ACCENT,
+                      text_color=COLOR_ACCENT, hover_color="#F1F0FC",
+                      command=self.refresh).pack(side="right", padx=(8, 0))
         self.status = ctk.CTkLabel(row, text="", text_color=COLOR_SUBTITLE,
                                    font=ctk.CTkFont(size=12))
         self.status.pack(side="right", padx=(0, 14))
@@ -444,6 +451,34 @@ class PreviewWindow(ctk.CTkToplevel):
             box.tag_add(tag, f"{number}.{at}", f"{number}.{at + len(needle)}")
             at = text.find(needle, at + len(needle))
 
+    def refresh(self):
+        """Rebuild this chapter from the library: furigana decided in the
+        review window, readings added, a seiyuu name corrected. Unsaved
+        edits would be thrown away, so they are asked about first."""
+        base = self.current
+        if not base:
+            return
+        if self._collect(base) and not messagebox.askyesno(
+                "Refresh",
+                "This chapter has edits you have not saved.\n\n"
+                "Refreshing rebuilds it from the chapter file and the library, "
+                "and those edits are lost. Refresh anyway?"):
+            return
+        open_at = self.open_section
+        self.built.pop(base, None)
+        self.held = {}
+        self.held_by_chapter.pop(base, None)
+        self.dirty.discard(base)
+        self.current = None
+        self.show(base)
+        if open_at is not None and open_at in self.section_tags:
+            self.open_section_at(open_at)
+        marks = sum(len(line.get("readings") or {}) for section in self.built[base]
+                    for line in section["lines"])
+        self.status.configure(
+            text=f"refreshed · {marks} reading(s) applied · {len(self.undecided)} furigana "
+                 f"pair(s) still undecided", text_color=COLOR_OK)
+
     def _touched(self, base):
         if base and base not in self.dirty:
             self.dirty.add(base)
@@ -494,6 +529,10 @@ class PreviewWindow(ctk.CTkToplevel):
             return
         preview.remeasure(sections, assignment["profile"], assignment["style"], self.engine)
 
+        # What the preview BUILT for each edited box, kept before
+        # self.built is replaced below - _offer_readings needs to compare
+        # against it, not against the edit itself.
+        was = {key: self._original_of(key) for key in changed}
         suite = suite_link.open_suite(self.settings)
         edit_ids = []
         if suite is not None and self.book:
@@ -518,12 +557,18 @@ class PreviewWindow(ctk.CTkToplevel):
         self.status.configure(
             text=f"saved {len(changed)} box(es) · plan written · {len(edit_ids)} recorded",
             text_color=COLOR_OK)
-        self._offer_readings(base, changed)
+        self._offer_readings(base, changed, was)
         print(f"preview plan: {path}")
 
-    def _offer_readings(self, base, changed):
+    def _offer_readings(self, base, changed, was):
         """A TTS-only edit is usually a reading. Offer to remember it for
-        the whole book (user decision 2026-09-24: check and offer)."""
+        the whole book (user decision 2026-09-24: check and offer).
+
+        An edit is compared with the TTS text the preview BUILT, never with
+        the reader column: every line where a reading is already applied
+        differs from the reader text, and comparing the two offered the
+        seiyuu credit (`早見沙織 → はやみさおり`) as a book reading on a
+        save that had not touched it."""
         suite = suite_link.open_suite(self.settings)
         if suite is None or not self.book:
             return
@@ -532,10 +577,11 @@ class PreviewWindow(ctk.CTkToplevel):
             for (index, side), text in changed.items():
                 if side != "tts":
                     continue
-                before = [line["display"] for line in self.built[base][index - 1]["lines"]] \
-                    if 0 < index <= len(self.built[base]) else []
+                before = [t for t in (was.get((index, side)) or "").splitlines() if t.strip()]
                 for old, new in zip(before, [t for t in text.splitlines() if t.strip()]):
                     pairs.extend(_word_changes(old, new))
+            if self._offer_seiyuu(base, pairs, suite):
+                return
             pairs = [p for p in pairs if suite.reading_get(self.book["id"], p[0]) is None]
             if not pairs:
                 return
@@ -553,6 +599,41 @@ class PreviewWindow(ctk.CTkToplevel):
                                       text_color=COLOR_OK)
         finally:
             suite.close()
+
+    def _offer_seiyuu(self, base, pairs, suite):
+        """A change to how the CREDIT is spoken belongs to the voice, not
+        to the book's readings (user, 2026-09-24): it is one row in the
+        library and every book that uses that voice follows it. Returns
+        True when it handled the edit."""
+        seiyuu = suite_link.seiyuu_for_profile(suite, self._assignment(base)["profile"])
+        if not seiyuu or not pairs:
+            return False
+        spoken = (seiyuu.get("reading_kana") or "").strip()
+        wanted = [new for old, new in pairs if old and spoken and old in spoken]
+        if not wanted:
+            return False
+        # A diff gives the stretches that changed, not the whole name
+        # (`はやみさおり` -> `はやみさをり` comes back as お -> を), so the
+        # new kana is built by putting each stretch back in place.
+        kana = spoken
+        for old, new in pairs:
+            if old and old in kana:
+                kana = kana.replace(old, new, 1)
+        if kana == spoken:
+            return False
+        if messagebox.askyesno(
+                "Update the voice?",
+                f"{seiyuu.get('display_name') or seiyuu['nickname']} is spoken as "
+                f"{spoken} in the library.\n\nChange it to {kana}?\n\n"
+                f"This is the voice's own entry, so every book that uses it - and every "
+                f"chapter of this one - reads the credit that way. The chapter's own text "
+                f"is not touched."):
+            suite.seiyuu_upsert(seiyuu["speaker_path"], reading_kana=kana)
+            self.status.configure(text=f"the library now speaks "
+                                       f"{seiyuu.get('display_name')} as {kana} - "
+                                       f"press Refresh to see it",
+                                  text_color=COLOR_OK)
+        return True
 
     def _close(self):
         if self.dirty and not messagebox.askyesno(

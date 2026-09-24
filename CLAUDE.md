@@ -423,7 +423,19 @@ calls for with that seiyuu.
   - After a failed or stopped run, `preview.salvage()` keeps the plans of
     chapters still to render and removes the rest.
   - An edited TTS line is re-priced from its new text (Phase 3's rule), and
-    a small TTS-only change is offered as a book reading.
+    a small TTS-only change is offered as a book reading - compared against
+    the TTS text the preview BUILT, never against the reader column, which
+    differs on every line a reading touched and offered the seiyuu credit
+    (`早見沙織 → はやみさおり`) on a save that had not touched it.
+  - A change to how the CREDIT is spoken updates the VOICE's row instead
+    (user, 2026-09-24): it belongs to the seiyuu, not to one book's
+    readings, so every book using that voice follows it. The diff gives
+    stretches, not the whole name (`お → を`), so the new kana is built by
+    putting each stretch back into the stored one.
+  - **Refresh** rebuilds the open chapter from the chapter file and the
+    library, which is how decisions saved in the furigana review reach a
+    preview that is already open; unsaved edits are asked about first, and
+    the section that was open stays open.
   - The two columns **scroll together** (user, 2026-09-24 - a request is
     one line on each side, so reading them apart defeats the point): each
     box's `yscrollcommand` moves its partner as well as its own scrollbar,
