@@ -58,6 +58,7 @@ import importlib.util
 import json
 import os
 
+import furigana
 import text_pipeline as tp
 
 PROFILE_VERSION = 3
@@ -291,7 +292,8 @@ def apply_readings(text, readings):
 
 # ------------------------------------------------------------ a chapter
 
-def plan_pieces(sentences, profile, style_key, engine, first_gap="section", readings=None):
+def plan_pieces(sentences, profile, style_key, engine, first_gap="section", readings=None,
+                spans=None):
     """The requests for a run of sentences.
 
     `sentences` is [(text, gap_before)] - gap_before being
@@ -316,7 +318,10 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section", read
     after cutting and measuring: band, cuts and an Even-pace length stay
     keyed to the book's own wording, as in dynamic-repair. Each piece
     records the ones it used in "readings"."""
-    measure = lambda text: len(engine(text))
+    # Measured on the text WITHOUT furigana markers: a marker must not move
+    # a cut or change a band.
+    measure = lambda text: len(engine(furigana.display(text)))
+    spans = spans or []
     limit = profile["comfortable_length"]
     out, skipped = [], []
     for number, item in enumerate(sentences, start=1):
@@ -324,8 +329,9 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section", read
         text, gap_before = item[0], item[1]
         removed_before = item[2] if len(item) > 2 else ""
         removed_after = item[3] if len(item) > 3 else ""
-        if not engine(text) or tp.PUNCT_ONLY_RE.fullmatch(engine(text)):
-            skipped.append(text)
+        shown_sentence = furigana.display(text)
+        if not engine(shown_sentence) or tp.PUNCT_ONLY_RE.fullmatch(engine(shown_sentence)):
+            skipped.append(shown_sentence)
             continue
         if gap_before in (None, "chapter_start"):
             gap = first_gap if not out else "sentence"
@@ -334,13 +340,18 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section", read
         length = measure(text)
         cuts = tp.split_for_length(text, limit, measure) if length > limit else [(text, None)]
         for piece_number, (piece, cut_kind) in enumerate(cuts, start=1):
-            piece_len = measure(piece)
+            # Furigana markers are invisible to cutting and measuring; they
+            # decide only what the reader sees and what the engine hears.
+            shown = furigana.display(piece)
+            piece_len = measure(shown)
             band, beyond = band_for(profile, piece_len)
-            tts_text, used = apply_readings(tp.prepare_tts_text_dynamic(piece), readings)
+            tts_text, used = apply_readings(
+                tp.prepare_tts_text_dynamic(furigana.spoken(piece, spans)), readings)
+            used = dict(furigana.applied_in(piece, spans), **used)
             out.append({
                 "sentence": number,
                 "piece": piece_number,
-                "display_text": piece,
+                "display_text": shown,
                 "tts_text": tts_text,
                 "readings": used,
                 "engine_len": piece_len,
@@ -357,8 +368,13 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section", read
     return out, skipped
 
 
-def plan_chapter(raw_text, profile, style_key, engine, readings=None):
-    """plan_pieces() over a whole chapter's text. Returns (pieces, skipped)."""
-    units = tp.dynamic_sentences(raw_text)
+def plan_chapter(raw_text, profile, style_key, engine, readings=None, furigana_applied=None):
+    """plan_pieces() over a whole chapter's text. Returns (pieces, skipped).
+
+    `furigana_applied` is the set of (word, reading) pairs to speak as
+    written; the rest of the annotations are stripped. See furigana.py."""
+    marked, spans = furigana.mark(raw_text, furigana_applied or set())
+    units = tp.dynamic_sentences(marked)
     return plan_pieces([(u["text"], u["gap_before"], u["removed_before"], u["removed_after"])
-                        for u in units], profile, style_key, engine, readings=readings)
+                        for u in units], profile, style_key, engine, readings=readings,
+                       spans=spans)

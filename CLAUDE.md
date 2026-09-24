@@ -353,6 +353,30 @@ calls for with that seiyuu.
   one template serves both columns. The name is added to `glossary.json`
   once, so the credit translates with the spelling you chose; hand edits are
   never overwritten. `render.json` gains `intro_line`.
+- **Furigana** (built 2026-09-24, dynamic + DB-tracked books only). The
+  extractor can keep readings as `踝(くるぶし)`. Before this, those files
+  were unrenderable: `(` is a cut point and `prepare_tts_text_dynamic`
+  turns `()` into `、`, so the engine received `踝、くるぶし、` and said
+  both. `furigana.py` now decides what happens:
+  - a word carrying furigana is ALWAYS read as written - no question;
+  - the question is the same word where it is NOT annotated, because a
+    reading is a global replace: in wall, `下(もと)` is annotated once
+    while a bare `下` appears **264** times. 180 of 266 pairs are like
+    that, and two words take two readings (`瞬`, `滴`);
+  - `once` applies where written and stays OUT of `readings.json` (which
+    cannot express it); `book` also becomes a reading row and is exported;
+    rejected pairs are stripped and the seiyuu decides.
+  - **Not every `kanji(kana)` is furigana**: wall writes asides the same
+    way (`夢(のようなもの)`), and applying those would replace the word.
+    `looks_like_reading()` (phrase markers, and at most 4 kana per kanji)
+    marks them, the review never auto-applies one and starts it unticked.
+  - Mechanically: an applied occurrence becomes the word plus a private
+    use MARKER, so sentence boundaries, cuts and band lengths come out
+    exactly as from the stripped text (proven: 14 of 14 plans identical to
+    `main` over 7 chapters x 2 styles). `display()` drops markers for the
+    reader, `spoken()` swaps in the reading for the engine.
+  - The review window (`furigana_review.py`) shows only pairs with no
+    decision for that book; Save & Run warns if any are left.
 - **The suite library** (`suite_link.py` -> `F:\AUDIOBOOK-CREATION-SUITE`):
   best-effort in every call, so a missing library never stops a render. A
   book is matched by its OUTPUT FOLDER; a book the database does not know,

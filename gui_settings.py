@@ -48,6 +48,8 @@ from tkinter import filedialog, messagebox
 from progress_window import ProgressWindow, default_log_path
 from subtitle_window import SubtitleWindow
 import dynamic_mode_ui
+import furigana_review
+import suite_link
 from ui_common import (
     COLOR_BG, COLOR_CARD, COLOR_CARD_BORDER, COLOR_TITLE, COLOR_SUBTITLE,
     COLOR_ENTRY_BORDER, COLOR_ENTRY_TEXT, COLOR_ACCENT, COLOR_ACCENT_HOVER,
@@ -691,6 +693,19 @@ class SettingsApp(ctk.CTk):
             self.dynamic_state.get("style"), on_change=self._on_main_profile_changed)
         self.profile_panel.pack(side="left", fill="x", expand=True)
 
+        # Furigana found in the chosen chapters, and whether any of it still
+        # needs a decision (see furigana_review.py).
+        furigana_row = ctk.CTkFrame(source_card, fg_color="transparent")
+        furigana_row.pack(fill="x", padx=(80, 22), pady=(0, 6))
+        self.furigana_label = ctk.CTkLabel(furigana_row, text="", anchor="w", justify="left",
+                                           wraplength=520, font=ctk.CTkFont(size=12))
+        self.furigana_label.pack(side="left")
+        self.furigana_button = ctk.CTkButton(
+            furigana_row, text="Review furigana…", width=150, height=30, corner_radius=8,
+            fg_color="transparent", hover_color="#F1F0FC", border_width=1,
+            border_color=COLOR_ACCENT, text_color=COLOR_ACCENT,
+            command=self._open_furigana_review)
+
         # The seiyuu's names for the introduction line, under the assign
         # toggle. It hides itself as soon as the library knows the voice.
         self.seiyuu_panel = dynamic_mode_ui.SeiyuuPanel(
@@ -784,6 +799,71 @@ class SettingsApp(ctk.CTk):
             text_color=dynamic_mode_ui.COLOR_OK if ok else dynamic_mode_ui.COLOR_ERROR)
         if self.dynamic_state.get("assign") == "custom":
             self._update_customize_status()
+        self._refresh_furigana_status()
+
+    # ---------- furigana
+    def _furigana_state(self):
+        """(stats, undecided, automatic, book) for the chosen input folder.
+        Everything empty when the library has no row for this book: furigana
+        belongs to the new pipeline only."""
+        folder = self.vars["input_folder"].get().strip()
+        settings = dict(self.settings, suite_root=self.settings.get("suite_root")
+                        or DEFAULT_SETTINGS["suite_root"])
+        suite = suite_link.open_suite(settings)
+        if suite is None:
+            return {}, [], [], None
+        try:
+            book = suite_link.book_for_output(
+                suite, self.vars["output_folder"].get().strip())
+            if not suite_link.uses_new_pipeline(book):
+                return {}, [], [], book
+            stats = furigana_review.scan_folder(folder)
+            undecided, automatic = furigana_review.pending(stats, suite, book)
+            return stats, undecided, automatic, book
+        finally:
+            suite.close()
+
+    def _refresh_furigana_status(self):
+        if not hasattr(self, "furigana_label"):
+            return
+        if self.generation_mode != "dynamic" or not self.input_parse_ok:
+            self.furigana_label.configure(text="")
+            self.furigana_button.pack_forget()
+            return
+        stats, undecided, automatic, book = self._furigana_state()
+        self.furigana_pending = undecided
+        if not stats:
+            self.furigana_label.configure(
+                text=("No furigana in these chapters." if book is not None
+                      else "This book is not in the library - furigana and the seiyuu "
+                           "introduction are off (legacy behaviour)."),
+                text_color=dynamic_mode_ui.COLOR_SUBTITLE)
+            self.furigana_button.pack_forget()
+            return
+        total = sum(r["with_furigana"] for r in stats.values())
+        if undecided:
+            self.furigana_label.configure(
+                text=f"⚠  {total} furigana annotation(s), {len(undecided)} reading(s) still "
+                     f"need a decision.",
+                text_color=dynamic_mode_ui.COLOR_WARN)
+        else:
+            self.furigana_label.configure(
+                text=f"✔  {total} furigana annotation(s), every reading decided"
+                     + (f" ({len(automatic)} applied automatically)" if automatic else ""),
+                text_color=dynamic_mode_ui.COLOR_OK)
+        self.furigana_button.pack(side="left", padx=(12, 0))
+
+    def _open_furigana_review(self):
+        stats, undecided, automatic, book = self._furigana_state()
+        if book is None or not suite_link.uses_new_pipeline(book):
+            messagebox.showinfo("Furigana", "This book is not in the library, so it renders "
+                                            "the legacy way and furigana is left alone.")
+            return
+        settings = dict(self.settings, suite_root=self.settings.get("suite_root")
+                        or DEFAULT_SETTINGS["suite_root"])
+        furigana_review.FuriganaReview(
+            self, book, stats, undecided, automatic, settings,
+            on_done=lambda _saved: self._refresh_furigana_status())
 
     def _open_customize(self):
         if not self.input_parse_ok:
@@ -1958,6 +2038,18 @@ class SettingsApp(ctk.CTk):
             error, chapters = self._validate_dynamic(data)
             if error:
                 messagebox.showerror("Dynamic Profile Mode", error)
+                return
+            # Undecided furigana is not fatal - unreviewed annotations are
+            # simply stripped - but it is almost never what you meant.
+            undecided = getattr(self, "furigana_pending", [])
+            if undecided and not messagebox.askyesno(
+                    "Furigana not reviewed",
+                    f"{len(undecided)} furigana reading(s) in these chapters have no decision "
+                    f"yet:\n\n"
+                    + ", ".join(f"{r['word']}({r['reading']})" for r in undecided[:8])
+                    + ("\n…" if len(undecided) > 8 else "")
+                    + "\n\nWithout a decision their parentheses are removed and the seiyuu "
+                      "decides how to read them.\n\nRun anyway?"):
                 return
             chapter_files = [os.path.join(data["input_folder"], f"{base}.txt")
                              for base in chapters]

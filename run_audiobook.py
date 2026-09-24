@@ -8,6 +8,7 @@ import shutil
 
 import text_pipeline
 import dynamic_profile
+import furigana
 import suite_link
 
 # This script prints Japanese - chapter text, readings, the seiyuu credit -
@@ -1024,7 +1025,8 @@ def insert_intro_line(raw_text, line):
     return "\n".join(lines[:at] + [line] + lines[at:]) + "\n"
 
 
-def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, intro=None):
+def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, intro=None,
+                            furigana_applied=None):
     """One chapter in dynamic profile mode. `assignment` comes from
     resolve_dynamic_plan(); `engine` is dynamic_profile.make_engine();
     `readings` is dynamic_profile.load_readings() - TTS text only.
@@ -1052,7 +1054,19 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
         readings = sorted((readings or []) + [{"word": intro_display, "reading": intro_tts}],
                           key=lambda r: -len(r["word"]))
         print(f"Intro line: {intro_display}  (spoken: {intro_tts})")
-    pieces, skipped = dynamic_profile.plan_chapter(raw_text, profile, style, engine, readings)
+
+    # Furigana: approved annotations are spoken as written, the rest are
+    # stripped so the engine never sees the parens (which it would read as
+    # a pause and then the reading - see furigana.py).
+    found = furigana.pairs(raw_text)
+    if found:
+        approved = {p: n for p, n in found.items() if p in (furigana_applied or set())}
+        print(f"Furigana: {sum(found.values())} annotation(s), "
+              f"{sum(approved.values())} applied, "
+              f"{sum(found.values()) - sum(approved.values())} stripped "
+              f"(the seiyuu decides those)")
+    pieces, skipped = dynamic_profile.plan_chapter(raw_text, profile, style, engine, readings,
+                                                   furigana_applied)
     if not pieces:
         print(f"Error: No sentences produced for {base} - is the file empty?")
         return
@@ -1187,6 +1201,8 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
         "sync_entries": len(rendered),
         "intro_line": intro_display,
         "readings_applied": {w: r for p in pieces for w, r in (p["readings"] or {}).items()},
+        "furigana_applied": sum(n for pair, n in furigana.pairs(raw_text).items()
+                                if pair in (furigana_applied or set())),
         "seconds": round(sum(wav_duration(p["wav"]) for p in rendered
                              if os.path.exists(p["wav"])), 2),
         "render_json_path": os.path.join(OUTPUT_FOLDER, f"{base}.render.json"),
@@ -1214,6 +1230,7 @@ def record_chapter(suite, book, seiyuu, summary):
             profile_path=summary["profile_path"], style=summary["style"],
             sync_entries=summary["sync_entries"], intro_line=summary["intro_line"],
             readings_applied=summary["readings_applied"], seconds=summary["seconds"],
+            furigana_applied=summary.get("furigana_applied"),
             render_json_path=summary["render_json_path"])
         if seiyuu:
             suite.record_usage(seiyuu["id"], book["id"], summary["chapter"],
@@ -1310,7 +1327,7 @@ def main():
     # Dynamic profile mode: resolve and check every chapter's profile before
     # any GPU time is spent, and drop the chapters left unticked in Customize.
     dynamic_plan, engine, readings = None, None, []
-    suite, book, new_pipeline = None, None, False
+    suite, book, new_pipeline, furigana_ok = None, None, False, set()
     if GENERATION_MODE == "dynamic":
         print("Mode: dynamic profile")
         normalize, normalizer_path = dynamic_profile.load_irodori_normalizer(UV_PROJECT_DIR)
@@ -1347,6 +1364,13 @@ def main():
                     print(f"  ! {clash['word']}: the file says {clash['file']}, the library "
                           f"says {clash['db']} - the library's reading is used")
                 print(f"  {synced['exported']} reading(s) written back to readings.json")
+
+        furigana_ok = suite_link.furigana_applied(suite, book)
+        if new_pipeline:
+            print(f"Furigana decisions: {len(furigana_ok)} approved for this book"
+                  if furigana_ok else
+                  "Furigana decisions: none yet - any annotations are stripped and the "
+                  "seiyuu decides (review them in the generator window)")
 
         try:
             readings = dynamic_profile.load_readings(readings_path)
@@ -1415,7 +1439,8 @@ def main():
                 # So the credit translates with the spelling you chose.
                 print(f"  glossary.json: added {seiyuu['display_name']} "
                       f"= {seiyuu['translation_name']}")
-            summary = process_chapter_dynamic(chapter_file, assignment, engine, readings, intro)
+            summary = process_chapter_dynamic(chapter_file, assignment, engine, readings, intro,
+                                              furigana_ok)
             if summary and new_pipeline:
                 record_chapter(suite, book, seiyuu, summary)
         else:
