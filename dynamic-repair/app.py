@@ -143,6 +143,8 @@ class RepairApp(ctk.CTk):
         self.info = None
         self.chapter = None
         self.readings = []
+        self.file_readings = []
+        self.library_note = ""
         self.scan_rows = {}
         self.result_widgets = []
         self.selected = None
@@ -421,7 +423,11 @@ class RepairApp(ctk.CTk):
             ctk.CTkLabel(self.chapter_lines, text=line, anchor="w", justify="left",
                          text_color=colour, font=ctk.CTkFont(size=11), wraplength=960,
                          height=16).pack(fill="x")
-        self.readings = self.info["readings"] or []
+        # The folder's own readings.json. What actually applies to a
+        # chapter is decided when the chapter is loaded, because the
+        # library scopes readings per chapter (schema v2).
+        self.file_readings = self.info["readings"] or []
+        self.readings = list(self.file_readings)
         ready = self.info["ready"] if ok else []
         self.chapter_menu.configure(values=ready or ["(none)"])
         self.chapter_var.set(ready[0] if ready else "(none)")
@@ -436,6 +442,7 @@ class RepairApp(ctk.CTk):
         self.scan_rows = {}
         self.selected = None
         self.part_readings, self.part_text, self.queued = {}, {}, {}
+        self.readings = list(self.file_readings)
         if not self.info or base not in (self.info.get("ready") or []):
             self._render_results([], "")
             self._render_part()
@@ -448,11 +455,17 @@ class RepairApp(ctk.CTk):
             messagebox.showerror("Chapter", f"Could not read {base}: {e}")
             return
         problem = self.chapter.check_audio()
+        # What the library says about THIS chapter: its readings, scoped,
+        # and which of them came from furigana (2026-09-25).
+        library = self.chapter.read_library()
+        self.library_note = library["note"]
+        self.readings = self.chapter.readings_in_play(self.file_readings)
         style = dr.dynamic_profile.STYLE_LABELS.get(self.chapter.style, self.chapter.style)
         self.chapter_facts.configure(
             text=(f"✕ {problem}" if problem else
                   f"{self.chapter.total} parts · {dr.clock(self.chapter.chunks()[-1]['end'])} · "
-                  f"{dr.dynamic_profile.nickname(self.chapter.profile)} · {style}"),
+                  f"{dr.dynamic_profile.nickname(self.chapter.profile)} · {style}"
+                  + (f"\nlibrary: {self.library_note}" if self.library_note else "")),
             text_color=FAIL if problem else SUBTITLE)
         if problem:
             self.chapter = None
@@ -614,21 +627,36 @@ class RepairApp(ctk.CTk):
         row = self.scan_rows.get(part["index"])
         self.part_heard.configure(text="heard   " + (row["heard"] if row else "(not scanned)"))
         self.text_box.insert("1.0", self.part_text[part["index"]])
+        # Typing changes the length, and so the request - since 2026-09-25.
+        self.text_box.bind("<KeyRelease>", lambda _e: self._update_request())
         self._update_readings_note()
         self._update_request()
         self._render_takes()
 
     def _update_readings_note(self):
+        part = self.chapter.part(self.selected) if self.chapter else {}
         used = self.part_readings.get(self.selected) or {}
+        notes = []
+        if part.get("is_intro"):
+            notes.append("This Part is the seiyuu introduction. Its kana belongs to the "
+                         "voice's entry in the library, not to this chapter - change it "
+                         "there and re-render, rather than editing it here.")
+        if part.get("edited"):
+            notes.append("This line was written by hand in Preview Chapters - it is not "
+                         "what the planner produced.")
         if not used:
-            self.readings_note.configure(text="No reading applied to this Part.")
-            return
-        known = {r["word"] for r in self.readings}
-        rendered = self.chapter.part(self.selected)["readings"] if self.chapter else {}
-        self.readings_note.configure(text="Readings in this text: " + ",  ".join(
-            f"{w} → {r}" + (" (rendered with it)" if rendered.get(w) == r else "")
-            + ("" if w in known else " (new - saved to readings.json on Apply)")
-            for w, r in used.items()))
+            notes.append("No reading applied to this Part.")
+        else:
+            known = {r["word"] for r in self.readings}
+            from_furigana = set(part.get("from_furigana") or [])
+            rendered = part.get("readings") or {}
+            notes.append("Readings in this text: " + ",  ".join(
+                f"{w} → {r}"
+                + (" (furigana)" if w in from_furigana else "")
+                + (" (rendered with it)" if rendered.get(w) == r else "")
+                + ("" if w in known else " (new - saved on Apply)")
+                for w, r in used.items()))
+        self.readings_note.configure(text="\n".join(notes))
 
     def _remember_text(self):
         if self.selected is not None:
@@ -679,21 +707,39 @@ class RepairApp(ctk.CTk):
         except ValueError:
             self.request_label.configure(text="type a scale, e.g. 1.6", text_color=FAIL)
             return
-        rendered = self.chapter.part(self.selected)["request"]
+        part = self.chapter.part(self.selected)
+        rendered = part["request"]
+        length = self.chapter.length_for(self.selected, self._edited_text())
         self.request_label.configure(
             text=f"asks {describe_request(request)}"
                  + ("  (as rendered)" if request == rendered else
-                    f"  (rendered with {describe_request(rendered)})"),
+                    f"  (rendered with {describe_request(rendered)})")
+                 + (f"  ·  {length} chars, was {part['engine_len']}"
+                    if length != part["engine_len"] else ""),
             text_color=SUBTITLE)
 
     def _request(self):
+        """The request for what is in the box NOW. Since 2026-09-25 an
+        edited line is re-priced from its own text, like the generator -
+        see DynChapter.length_for()."""
         style = self._style()
+        text = self._edited_text()
         if style == dr.CUSTOM_STYLE:
             scale = float(self.scale_var.get())
             if not 0.5 <= scale <= 3.0:
                 raise ValueError("scale out of range")
-            return self.chapter.request_for(self.selected, style, scale)
-        return self.chapter.request_for(self.selected, style)
+            return self.chapter.request_for(self.selected, style, scale, tts_text=text)
+        return self.chapter.request_for(self.selected, style, tts_text=text)
+
+    def _edited_text(self):
+        """What is in the text box, or None when it is untouched."""
+        if self.selected is None:
+            return None
+        try:
+            text = self.text_box.get("1.0", "end").strip()
+        except Exception:
+            return None
+        return text or None
 
     def on_play_part(self):
         if self._busy or not self.chapter or self.selected is None:

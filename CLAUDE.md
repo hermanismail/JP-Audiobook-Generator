@@ -817,6 +817,22 @@ the piece. The user copies the book's `readings.json` from the output
 folder into the repair folder; `load_readings`/`apply_readings` are
 `dynamic_profile`'s, so both tools apply the file identically.
 
+**It reads the suite library too** (2026-09-25, phase B of three).
+`suite_root` is a setting; everything is best-effort, so a machine without
+the library works exactly as before, from `readings.json` alone. Per
+chapter it asks for the readings **scoped to that chapter** (schema v2 - a
+reading decided while other chapters were selected does not reach this
+one), marks which came from furigana, and keeps any word only the file
+knows. The book is found by `render.json`'s `book_slug`, then the
+profile's book name (which covers every render made before 2026-09-25),
+then the folder's name - a repair folder is a COPY, so the output folder
+never matches. The credit Part is recognised from `intro_line` and says
+so: its kana belongs to the voice's row, not to the chapter. **An edited
+line is now re-priced from its new text** (user decision 2026-09-25),
+reversing the 2026-09-18 rule, because the generator has measured the
+spoken text since Phase 3 and the two must not disagree; with no Irodori
+normaliser on the machine it falls back to the recorded length.
+
 **`translation.json` carries its own `start`/`end` per chunk** (copied
 from `sync.json`), so it must be re-timed with the `.srt` - otherwise a
 later re-emit of the `.srt` would bring back the old times.

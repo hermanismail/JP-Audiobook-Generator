@@ -67,9 +67,14 @@ for _path in (GENERATOR_DIR, REPAIR_DIR):
         sys.path.insert(0, _path)
 import dynamic_profile  # noqa: E402
 import repair  # noqa: E402  - chapter-repair's engine, reused one-way
+import suite_link  # noqa: E402  - the generator's door to the library
 
 DEFAULT_SETTINGS = {
     "irodori_root": "C:\\Irodori-TTS",
+    # The Audiobook Creation Suite library. Best-effort everywhere: a
+    # missing library leaves this tool exactly as it was before
+    # 2026-09-25, working from readings.json alone.
+    "suite_root": "F:\\AUDIOBOOK-CREATION-SUITE",
     "batch_script": "",
     "whisper_exe": "C:\\Transcribe\\.venv\\Scripts\\whisper.exe",
     "whisper_model": "large-v3-turbo",
@@ -242,6 +247,67 @@ def parse_folder(folder, settings):
     return out
 
 
+# ------------------------------------------------------------- the library
+
+def open_library(settings):
+    """The suite library, or None. Never raises: this tool has to keep
+    working on a machine that has no library at all."""
+    return suite_link.open_suite(settings)
+
+
+def book_for(suite, *candidates):
+    """The library's row for a chapter's book, from the first candidate
+    that matches.
+
+    A repair folder is a COPY, so `book_by_output_folder` cannot find it.
+    render.json carries `book_slug` since 2026-09-25; a render from before
+    that falls back to the PROFILE's book name (which the profiler wrote
+    from the book folder) and then to the repair folder's own name."""
+    if suite is None:
+        return None
+    for slug in candidates:
+        if not slug:
+            continue
+        try:
+            row = suite.book_by_slug(slug)
+        except Exception:
+            row = None
+        if row is not None:
+            return row
+    return None
+
+
+def library_readings(suite, book, chapter):
+    """[{word, reading, from_furigana}] that apply to THIS chapter.
+
+    Scoped: a reading decided while other chapters were selected does not
+    reach this one (suite schema v2). Longest word first, the order they
+    must be applied in."""
+    if suite is None or book is None:
+        return []
+    rows = suite_link.readings_for(suite, book, chapter)
+    furigana = {word for word, _reading in
+                suite_link.furigana_applied(suite, book, chapter)}
+    out = [{"word": r["word"], "reading": r["reading"],
+            "from_furigana": r["word"] in furigana or r.get("origin") == "furigana",
+            "chapters": r.get("chapters")}
+           for r in rows]
+    return sorted(out, key=lambda r: -len(r["word"]))
+
+
+def merge_library_and_file(db_readings, file_readings):
+    """The library first, the file second (the generator's transition rule
+    since 2026-09-24). A word the file alone knows is kept, so a folder
+    carrying an older readings.json loses nothing."""
+    out = [dict(r) for r in db_readings or []]
+    known = {r["word"] for r in out}
+    for r in file_readings or []:
+        if r["word"] not in known:
+            out.append({"word": r["word"], "reading": r["reading"],
+                        "from_furigana": False, "from_file_only": True})
+    return sorted(out, key=lambda r: -len(r["word"]))
+
+
 # ------------------------------------------------------------ readings
 
 def load_readings(path):
@@ -315,6 +381,46 @@ class DynChapter:
         self.style = self.render.get("style", dynamic_profile.DEFAULT_STYLE)
         self._pieces = {p["sync_index"]: p for p in self.render["pieces"]
                         if p.get("sync_index") is not None}
+        # What the render recorded about the book and its credit line.
+        self.book_slug = self.render.get("book_slug") or ""
+        self.intro_line = self.render.get("intro_line") or ""
+        self.library = {"connected": False, "book": None, "readings": [], "note": ""}
+
+    def read_library(self):
+        """Ask the library what applies to THIS chapter: its readings and
+        which of them came from furigana. Best-effort - a failure leaves
+        the tool working from readings.json alone, as before."""
+        suite = open_library(self.settings)
+        if suite is None:
+            self.library["note"] = f"library not reachable ({suite_link.load_error()})"
+            return self.library
+        try:
+            book = book_for(suite, self.book_slug, (self.profile or {}).get("book"), self.book)
+            if book is None:
+                self.library["note"] = (f"the library does not know a book called "
+                                        f"'{self.book_slug or self.book}' - readings.json only")
+                return self.library
+            if not suite_link.uses_new_pipeline(book):
+                self.library["note"] = (f"{book['slug']} is a legacy book - it keeps the "
+                                        f"file-only behaviour")
+                return self.library
+            readings = library_readings(suite, book, self.base)
+            self.library = {
+                "connected": True, "book": book, "readings": readings,
+                "note": (f"{book['slug']}: {len(readings)} reading(s) apply to {self.base}"
+                         + (f", {sum(1 for r in readings if r['from_furigana'])} from furigana"
+                            if any(r["from_furigana"] for r in readings) else "")),
+            }
+        except Exception as e:
+            self.library["note"] = f"library not read ({type(e).__name__}: {e})"
+        finally:
+            suite.close()
+        return self.library
+
+    def readings_in_play(self, file_readings=None):
+        """Every reading that applies here: the library's first, then any
+        the folder's readings.json alone knows."""
+        return merge_library_and_file(self.library.get("readings"), file_readings)
 
     def audio_source(self):
         return self.flac
@@ -341,6 +447,21 @@ class DynChapter:
             # Readings already inside tts_text: applied by the generator at
             # render time, or by an earlier repair ({} for older renders).
             "readings": dict(piece.get("readings") or {}),
+            # Which of them the library says came from furigana - those were
+            # decided in the review window, not typed here.
+            "from_furigana": sorted(
+                word for word in (piece.get("readings") or {})
+                if any(r["word"] == word and r["from_furigana"]
+                       for r in self.library.get("readings") or [])),
+            # The source section, and whether a person wrote this line in
+            # Preview Chapters - a repair must not undo that (2026-09-25).
+            "section": piece.get("section"),
+            "edited": bool(piece.get("edited")),
+            # The seiyuu credit is not ordinary prose: the reader sees the
+            # written name and the engine is sent kana, and the pairing
+            # belongs to the voice's row in the library.
+            "is_intro": bool(self.intro_line
+                             and _squeeze(chunk.get("text")) == _squeeze(self.intro_line)),
         }
 
     def check_audio(self):
@@ -377,7 +498,7 @@ class DynChapter:
         return out
 
     # --- requests
-    def request_for(self, index, style, custom_scale=None):
+    def request_for(self, index, style, custom_scale=None, tts_text=None):
         """What to ask the engine for, from the piece's recorded
         `engine_len`. For a chapter rendered before 2026-09-24 that is the
         book's own wording; for one rendered after, it is the text as it
@@ -392,7 +513,57 @@ class DynChapter:
         if style == CUSTOM_STYLE:
             return {"duration_scale": round(float(custom_scale), 2)}
         return dynamic_profile.request_for(self.profile, style,
-                                           self._pieces[index]["engine_len"])
+                                           self.length_for(index, tts_text))
+
+    def length_for(self, index, tts_text=None):
+        """The engine length a request is priced from.
+
+        Until 2026-09-25 an edited line kept the ORIGINAL length, on the
+        reasoning that spelling a word out changes characters, not
+        speaking time. It now re-prices from the new text (user decision),
+        because the generator has measured the text as it will be SPOKEN
+        since Phase 3 and the two tools must not disagree - kana is longer
+        than kanji, so the old rule asked for less time than a fresh
+        render would.
+
+        Falls back to the recorded length when Irodori's normaliser is not
+        on this machine, which is the old behaviour exactly."""
+        recorded = self._pieces[index]["engine_len"]
+        if tts_text is None or tts_text == self._pieces[index]["tts_text"]:
+            return recorded
+        engine = engine_for(self.settings)
+        if engine is None:
+            return recorded
+        try:
+            return len(engine(tts_text))
+        except Exception:
+            return recorded
+
+
+def _squeeze(text):
+    """Text with every space removed. render.json records the credit as
+    the display name is WRITTEN (`朗読者：早見 沙織`), while sync.json holds
+    what the pipeline produced, and split_paragraphs() collapses runs of
+    whitespace - so the two differ for any name with a space in it."""
+    return "".join((text or "").split())
+
+
+_ENGINE = {}
+
+
+def engine_for(settings):
+    """len(engine(text)) in the characters Irodori really receives - the
+    same measurement the generator prices a request with. Built once;
+    None when Irodori's normaliser is not on this machine, and then a
+    re-priced edit falls back to the recorded length."""
+    root = (settings or {}).get("irodori_root") or ""
+    if root not in _ENGINE:
+        try:
+            normalize, _path = dynamic_profile.load_irodori_normalizer(root)
+            _ENGINE[root] = dynamic_profile.make_engine(normalize) if normalize else None
+        except Exception:
+            _ENGINE[root] = None
+    return _ENGINE[root]
 
 
 def parse_time(text):
