@@ -27,12 +27,14 @@ import suite_link
 from ui_common import (
     COLOR_BG, COLOR_CARD, COLOR_CARD_BORDER, COLOR_TITLE, COLOR_SUBTITLE,
     COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_ENTRY_BORDER, COLOR_ENTRY_TEXT,
+    mark_tag,
 )
 
 COLOR_OK = "#1E8B4E"
 COLOR_WARN = "#B7791F"
 COLOR_ERROR = "#C4453C"
 COLOR_EDITED = "#6C5DD3"
+COLOR_MARK = "#FFF3A3"          # where a reading or furigana changed the text
 
 
 class PreviewWindow(ctk.CTkToplevel):
@@ -216,8 +218,29 @@ class PreviewWindow(ctk.CTkToplevel):
                                  font=ctk.CTkFont(size=13), wrap="word")
             box.pack(fill="both", expand=True)
             box.insert("1.0", text)
+            self._mark_readings(box, section, side)
             box.bind("<KeyRelease>", lambda _e, b=self.current: self._touched(b))
             self.boxes[(section["index"], side)] = (box, text)
+
+    def _mark_readings(self, box, section, side):
+        """Highlight every stretch a reading or a furigana pair decided:
+        the kana in the TTS column, the word it stands for in the reader
+        column (user, 2026-09-24 - it is what the review is about).
+
+        A piece records what it used in `readings` ({word: reading}), so
+        nothing has to be guessed from the text."""
+        mark_tag(box, "reading", COLOR_MARK)
+        for number, line in enumerate(section["lines"], start=1):
+            text = line["display" if side == "reader" else "tts"]
+            for word, reading in (line.get("readings") or {}).items():
+                needle = word if side == "reader" else reading
+                if not needle:
+                    continue
+                at = text.find(needle)
+                while at >= 0:
+                    box.tag_add("reading", f"{number}.{at}",
+                                f"{number}.{at + len(needle)}")
+                    at = text.find(needle, at + len(needle))
 
     def _touched(self, base):
         if base and base not in self.dirty:

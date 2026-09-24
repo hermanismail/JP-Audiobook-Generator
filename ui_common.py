@@ -43,3 +43,22 @@ class IconBadge(ctk.CTkFrame):
         ctk.CTkLabel(self, text=glyph, text_color=text_color,
                      font=ctk.CTkFont(size=font_size, weight="bold")).place(
             relx=0.5, rely=0.5, anchor="center")
+
+
+COLOR_MARK = "#FFF3A3"          # highlighted stretch inside a text box
+
+
+def mark_tag(textbox, name="mark", background=COLOR_MARK):
+    """Configure a bold, highlighted tag on a CTkTextbox.
+
+    `CTkTextbox.tag_config` refuses a font outright (it would fight the
+    widget's own scaling), so the tag goes on the tk.Text underneath and
+    is built from the font the widget is ALREADY showing - which is the
+    scaled one. Use `textbox.tag_add(name, ...)` as usual afterwards."""
+    import tkinter.font as tkfont
+    inner = textbox._textbox
+    bold = tkfont.Font(font=inner.cget("font"))
+    bold.configure(weight="bold")
+    inner.tag_config(name, background=background, font=bold)
+    textbox._mark_font = bold          # keep a reference alive
+    return name

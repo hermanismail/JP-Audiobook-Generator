@@ -85,20 +85,48 @@ def strip(text):
     return FURIGANA_RE.sub(lambda m: m.group(1), text or "")
 
 
+SENTENCE_BREAKS = "。？！?!\n"
+SENTENCE_ENDS = "。？！?!"
+
+
+def sentence_around(text, start, end, limit=70):
+    """(sentence, start, end) - the sentence holding text[start:end], with
+    the span of the annotation inside it.
+
+    The review window shows this so a reading can be judged in context:
+    `下(もと)` means nothing on its own. Long lines are cut at `limit`
+    characters either side rather than shown whole."""
+    text = text or ""
+    left = start
+    while left > 0 and text[left - 1] not in SENTENCE_BREAKS and start - left < limit:
+        left -= 1
+    right = end
+    while right < len(text) and text[right] not in SENTENCE_BREAKS and right - end < limit:
+        right += 1
+    if right < len(text) and text[right] in SENTENCE_ENDS:
+        right += 1
+    raw = text[left:right]
+    lead = len(raw) - len(raw.lstrip())
+    sentence = raw.strip()
+    return sentence, start - left - lead, end - left - lead
+
+
 def statistics(texts):
     """Per (word, reading): how often it carries furigana, and how often
     that word appears in the book WITHOUT any - the number that decides
     whether a whole-book rule is safe.
 
     `texts` is an iterable of chapter texts."""
-    counts, words = {}, {}
+    counts, words, examples = {}, {}, {}
     stripped = []
     for text in texts:
         stripped.append(strip(text))
-        for (word, reading), n in pairs(text).items():
-            counts[(word, reading)] = counts.get((word, reading), 0) + n
-            words.setdefault(word, 0)
-            words[word] += n
+        for word, reading, start, end in find(text):
+            key = (word, reading)
+            counts[key] = counts.get(key, 0) + 1
+            words[word] = words.get(word, 0) + 1
+            # where it is FIRST written, for the review window's context
+            examples.setdefault(key, sentence_around(text, start, end))
     total = {}
     for word in words:
         total[word] = sum(t.count(word) for t in stripped)
@@ -113,6 +141,8 @@ def statistics(texts):
             # False = probably an aside, not a reading; never applied
             # without being asked, and unticked by default.
             "is_reading": looks_like_reading(word, reading),
+            # (sentence, start, end) of the first place it is written
+            "example": examples.get((word, reading), ("", 0, 0)),
         }
     return out
 

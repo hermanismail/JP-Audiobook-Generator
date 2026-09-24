@@ -31,12 +31,14 @@ import furigana
 import suite_link
 from ui_common import (
     COLOR_BG, COLOR_CARD, COLOR_CARD_BORDER, COLOR_TITLE, COLOR_SUBTITLE,
-    COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_ENTRY_TEXT,
+    COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_ENTRY_TEXT, COLOR_ENTRY_BORDER,
+    mark_tag,
 )
 
 COLOR_OK = "#1E8B4E"
 COLOR_WARN = "#B7791F"
 COLOR_ERROR = "#C4453C"
+COLOR_MARK = "#FFF3A3"          # the stretch being judged, in context
 
 
 def scan_folder(folder):
@@ -157,6 +159,8 @@ class FuriganaReview(ctk.CTkToplevel):
                                f"the same word without furigana ×{row['bare']}",
                      text_color=COLOR_SUBTITLE, font=ctk.CTkFont(size=12)).pack(side="left")
 
+        self._add_example(inner, row)
+
         choices = ctk.CTkFrame(inner, fg_color="transparent")
         choices.pack(fill="x", padx=(28, 0), pady=(6, 0))
         once = ctk.CTkRadioButton(choices, text="only where it is written", variable=scope_var,
@@ -196,6 +200,24 @@ class FuriganaReview(ctk.CTkToplevel):
         self.rows[(row["word"], row["reading"])] = {
             "apply": apply_var, "scope": scope_var, "global": global_var,
             "widgets": (once, every, other), "many": many, "row": row}
+
+    def _add_example(self, parent, row):
+        """The sentence where the reading is first written, with the
+        annotation itself marked - a reading cannot be judged alone
+        (user, 2026-09-24)."""
+        sentence, start, end = row.get("example") or ("", 0, 0)
+        if not sentence:
+            return
+        box = ctk.CTkTextbox(parent, height=54, corner_radius=8, border_width=1,
+                             border_color=COLOR_CARD_BORDER, fg_color="white",
+                             text_color=COLOR_ENTRY_TEXT, wrap="word",
+                             font=ctk.CTkFont(size=13), activate_scrollbars=False)
+        box.pack(fill="x", padx=(28, 0), pady=(6, 0))
+        box.insert("1.0", sentence)
+        mark_tag(box, "mark", COLOR_MARK)
+        if 0 <= start < end <= len(sentence):
+            box.tag_add("mark", f"1.{start}", f"1.{end}")
+        box.configure(state="disabled")
 
     def _toggle(self, word, reading):
         state = self.rows[(word, reading)]

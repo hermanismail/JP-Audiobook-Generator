@@ -376,7 +376,10 @@ calls for with that seiyuu.
     `main` over 7 chapters x 2 styles). `display()` drops markers for the
     reader, `spoken()` swaps in the reading for the engine.
   - The review window (`furigana_review.py`) shows only pairs with no
-    decision for that book; Save & Run warns if any are left.
+    decision for that book; Save & Run warns if any are left. Each row
+    also shows the SENTENCE the pair is first written in, with the
+    annotation in bold on yellow (`ui_common.mark_tag`), because `下(もと)`
+    cannot be judged on its own.
 - **Preview Chapters** (`preview.py` + `preview_window.py`, built
   2026-09-24): a button under Profile Path opens what every chosen chapter
   will SEND and SHOW, built with the same `plan_chapter()` the render uses,
@@ -398,6 +401,11 @@ calls for with that seiyuu.
     chapters still to render and removes the rest.
   - An edited TTS line is re-priced from its new text (Phase 3's rule), and
     a small TTS-only change is offered as a book reading.
+  - Every stretch a reading or a furigana pair decided is bold on yellow -
+    the kana in the TTS column, the word it stands for in the reader
+    column - taken from the piece's own `readings`, so nothing is guessed.
+    `CTkTextbox.tag_config` refuses a font, so `ui_common.mark_tag` puts
+    the tag on the tk.Text underneath, built from the font already shown.
 - **The suite library** (`suite_link.py` -> `F:\AUDIOBOOK-CREATION-SUITE`):
   best-effort in every call, so a missing library never stops a render. A
   book is matched by its OUTPUT FOLDER; a book the database does not know,
