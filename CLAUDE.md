@@ -984,6 +984,37 @@ profiles byte-identical in bands/L/pace targets; marinka -> default only
 tail used to void the whole step, so L 76 -> 98 with a new 77-98 band
 x1.1/1.4/1.7, all her other bands identical.
 
+### Does the Whisper model version change the shortlist? (2026-09-25)
+
+Never measured until now: `large-v3-turbo` is the default in
+chapter-repair, book-profiler and dynamic-repair alike, so every flag
+rate, the pace table and hayamin's window rest on one transcriber. One
+real chapter (wall/chapter_009, hayamin, 126 parts judged), transcribed
+twice and scored identically:
+
+| | large-v3-turbo | large-v3 |
+|---|---|---|
+| time for the chapter | **81 s** | 2,072 s (25x) |
+| parts flagged | 5 | 11 |
+| mean similarity | 0.9269 | 0.9247 |
+| transcripts identical to the other model | 2 of 126 | |
+
+**They agree on 3 flags out of 13.** The two models produce different text
+almost everywhere (124 of 126 parts differ), yet the same mean similarity.
+More interesting, `large-v3` is not the better judge here: it **loops**
+(part 48: `まるでカーテンの隙間から無人の影が見えた` three times), returns
+EMPTY for a clean part (71), drops an opening clause (70) and adds
+`だったのだ` where nothing was said (63, 69) - the failure modes we hunt in
+the TTS, coming from the transcriber. turbo's own miss is the opposite
+kind: an empty transcript for part 30.
+
+**So: keep turbo.** It is 25x faster and, on this sample, produces fewer
+false alarms. The real lesson is that an ABSOLUTE flag rate is a property
+of the model as much as of the seiyuu - only comparisons made with one
+model are meaningful, which is what every measurement here has been.
+Report: `scratchpad/whisper-compare/report.json`. One chapter, one voice -
+enough to settle "should we switch", not enough for a general claim.
+
 ### Whisper spells differently - two rules (2026-09-24)
 
 Found while validating the spoken-text measurement on hayamin: wall's
