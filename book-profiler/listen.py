@@ -154,7 +154,10 @@ def sample_jobs(window, profile, engine, settings):
     generator's dynamic mode renders a chapter with - so what is heard here
     is what a chapter would get. The passage's first piece has no silence
     before it: a sample starts on speech."""
-    sentences = [(s["text"], "chapter_start" if i == 0 else s["gap_before"])
+    # The spoken form (furigana applied) when the analysis has one: the
+    # listening test must render what a chapter would actually be sent.
+    sentences = [(s.get("spoken_text") or s["text"],
+                  "chapter_start" if i == 0 else s["gap_before"])
                  for i, s in enumerate(window)]
     out = {}
     for method in METHODS:

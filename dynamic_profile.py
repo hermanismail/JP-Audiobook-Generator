@@ -314,14 +314,20 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section", read
                  (build_chunks skips empty TTS text); here they are
                  returned so the caller can record them.
 
-    `readings` (load_readings()) change ONLY the text sent to the engine,
-    after cutting and measuring: band, cuts and an Even-pace length stay
-    keyed to the book's own wording, as in dynamic-repair. Each piece
-    records the ones it used in "readings"."""
-    # Measured on the text WITHOUT furigana markers: a marker must not move
-    # a cut or change a band.
-    measure = lambda text: len(engine(furigana.display(text)))
+    `readings` (load_readings()) change the text sent to the engine, and
+    since 2026-09-24 the MEASUREMENT too: cuts, `engine_len`, the band and
+    an Even-pace length all describe the piece as it will be spoken, not as
+    the book writes it. (Until then they were keyed to the book's wording;
+    the user's reasoning is that how a word is read decides how long it
+    takes to say, so the band should be chosen on that.) Each piece records
+    the readings and furigana it used in "readings"."""
+    # Measured as the piece will be SPOKEN - furigana applied, then the
+    # book's readings (user decision 2026-09-24: "judge the band and length
+    # near to what is actually going to be said"). 踝 is one character,
+    # くるぶし is four, and it is the four the seiyuu has to fit.
     spans = spans or []
+    measure = lambda text: len(engine(
+        apply_readings(furigana.spoken(text, spans), readings)[0]))
     limit = profile["comfortable_length"]
     out, skipped = [], []
     for number, item in enumerate(sentences, start=1):
@@ -343,7 +349,7 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section", read
             # Furigana markers are invisible to cutting and measuring; they
             # decide only what the reader sees and what the engine hears.
             shown = furigana.display(piece)
-            piece_len = measure(shown)
+            piece_len = measure(piece)
             band, beyond = band_for(profile, piece_len)
             tts_text, used = apply_readings(
                 tp.prepare_tts_text_dynamic(furigana.spoken(piece, spans)), readings)

@@ -378,7 +378,14 @@ class DynChapter:
 
     # --- requests
     def request_for(self, index, style, custom_scale=None):
-        """What to ask the engine for, keyed to the ORIGINAL text: its band,
+        """What to ask the engine for, from the piece's recorded
+        `engine_len`. For a chapter rendered before 2026-09-24 that is the
+        book's own wording; for one rendered after, it is the text as it
+        was SPOKEN (furigana and readings applied), because the generator
+        now measures that. Either way this tool reuses the number the
+        render recorded, so the request matches what was rendered.
+
+        Keyed to the recorded length: its band,
         and for an even-pace style its length (decision 2026-09-18 - an
         edited reading changes the characters, not the meaning or the
         speaking time)."""

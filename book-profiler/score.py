@@ -186,7 +186,7 @@ def score_chapter(root, steps, speaker, settings):
         state = sweep.step_state(root, step, speaker, settings)
         sweep.classify(step, state, settings)
         # Judged against what was meant to be HEARD: the readings applied.
-        spoken = sweep.analyze.spoken_text(step["text"], settings)
+        spoken = sweep.analyze.spoken_text(step.get("spoken_text") or step["text"], settings)
         takes = []
         for scale in sorted(state):
             for marker in state[scale]:
