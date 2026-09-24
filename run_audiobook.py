@@ -1063,7 +1063,7 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
         # The reader shows the written name, the engine is sent the kana.
         # A reading does that without a special case in plan_pieces; it is
         # the longest word in play, so it is applied first.
-        readings = sorted((readings or []) + [{"word": intro_display, "reading": intro_tts}],
+        readings = sorted((readings or []) + suite_link.intro_readings(intro),
                           key=lambda r: -len(r["word"]))
         print(f"Intro line: {intro_display}  (spoken: {intro_tts})")
 

@@ -42,6 +42,7 @@ import os
 import re
 
 import dynamic_profile
+import suite_link
 import text_pipeline as tp
 
 PLAN_VERSION = 1
@@ -72,7 +73,7 @@ def build(raw_text, profile, style, engine, readings=None, furigana_applied=None
     intro_display, intro_tts = intro if intro else (None, None)
     if intro_display:
         raw_text = insert_intro(raw_text, intro_display)
-        readings = sorted((readings or []) + [{"word": intro_display, "reading": intro_tts}],
+        readings = sorted((readings or []) + suite_link.intro_readings(intro),
                           key=lambda r: -len(r["word"]))
     pieces, skipped = dynamic_profile.plan_chapter(raw_text, profile, style, engine, readings,
                                                    furigana_applied)

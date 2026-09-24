@@ -347,7 +347,12 @@ calls for with that seiyuu.
   with no header the name goes first, then a blank line, then the prose. It
   becomes its own `sync.json` entry at a 1.0 s sentence gap, the reader sees
   the written name and the engine is sent the kana - done with a reading
-  pair, so no special case in `plan_pieces`. Measured 2026-09-24: `：`
+  pair, so no special case in `plan_pieces` - as TWO pairs
+  (`suite_link.intro_readings`), the written name AND its
+  whitespace-collapsed form, because `split_paragraphs()` collapses runs of
+  whitespace: `早見 沙織` reaches `plan_pieces` as `早見沙織`, a pair keyed
+  to the spaced name matched nothing, and hayamin's credit went to the
+  engine in kanji (found 2026-09-24 in the preview). Measured 2026-09-24: `：`
   survives the engine's normaliser as `:` and is spoken as a short pause,
   not a word (three variants, same transcript, 3.60 / 3.40 / 3.32 s), so
   one template serves both columns. The name is added to `glossary.json`

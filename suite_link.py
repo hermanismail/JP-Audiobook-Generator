@@ -27,6 +27,7 @@ Stdlib only - this is imported from the Irodori venv.
 """
 
 import os
+import re
 import sys
 
 DEFAULT_SUITE_ROOT = r"F:\AUDIOBOOK-CREATION-SUITE"
@@ -160,6 +161,23 @@ def readings_for(suite, book, chapter=None):
         return [dict(r) for r in suite.readings_for_book(book["id"], chapter=chapter)]
     except Exception:
         return []
+
+
+def intro_readings(intro):
+    """[{word, reading}] that turns the written credit into kana.
+
+    Both the form written into the text AND its whitespace-collapsed form,
+    because `split_paragraphs()` collapses runs of whitespace: a display
+    name with a space in it (`早見 沙織`) reaches `plan_pieces` as
+    `朗読者：早見沙織`, and a pair keyed to the spaced form never matched -
+    the engine was sent the kanji. Found 2026-09-24 in the preview, on
+    hayamin."""
+    display, tts = intro if intro else (None, None)
+    if not display or not tts:
+        return []
+    forms = {display, re.sub(r"\s+", "", display)}
+    return [{"word": word, "reading": tts}
+            for word in sorted(forms, key=len, reverse=True)]
 
 
 def sync_readings(suite, book, output_folder):
