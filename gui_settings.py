@@ -49,6 +49,7 @@ from progress_window import ProgressWindow, default_log_path
 from subtitle_window import SubtitleWindow
 import dynamic_mode_ui
 import furigana_review
+import preview_window
 import suite_link
 from ui_common import (
     COLOR_BG, COLOR_CARD, COLOR_CARD_BORDER, COLOR_TITLE, COLOR_SUBTITLE,
@@ -693,6 +694,20 @@ class SettingsApp(ctk.CTk):
             self.dynamic_state.get("style"), on_change=self._on_main_profile_changed)
         self.profile_panel.pack(side="left", fill="x", expand=True)
 
+        # What every chapter will send and show, before any GPU time.
+        preview_row = ctk.CTkFrame(source_card, fg_color="transparent")
+        preview_row.pack(fill="x", padx=(80, 22), pady=(6, 2))
+        self.preview_button = ctk.CTkButton(
+            preview_row, text="Preview Chapters", width=160, height=34, corner_radius=8,
+            fg_color="transparent", hover_color="#F1F0FC", border_width=1,
+            border_color=COLOR_ACCENT, text_color=COLOR_ACCENT,
+            font=ctk.CTkFont(size=13, weight="bold"), command=self._open_preview)
+        self.preview_button.pack(side="left")
+        self.preview_label = ctk.CTkLabel(preview_row, text="", anchor="w", justify="left",
+                                          text_color=dynamic_mode_ui.COLOR_SUBTITLE,
+                                          font=ctk.CTkFont(size=12), wraplength=520)
+        self.preview_label.pack(side="left", padx=(12, 0))
+
         # Furigana found in the chosen chapters, and whether any of it still
         # needs a decision (see furigana_review.py).
         furigana_row = ctk.CTkFrame(source_card, fg_color="transparent")
@@ -864,6 +879,86 @@ class SettingsApp(ctk.CTk):
         furigana_review.FuriganaReview(
             self, book, stats, undecided, automatic, settings,
             on_done=lambda _saved: self._refresh_furigana_status())
+
+    # ---------- preview
+    def _preview_chapters(self, data=None):
+        """[(base, path, assignment)] for the chapters a run would render,
+        or (None, message) when something is missing."""
+        data = data or self._current_dynamic_settings()
+        if not self.input_parse_ok:
+            return None, "Choose an Input Folder that parses first."
+        bases = list(self.dynamic_chapters)
+        block = data["dynamic"]
+        if block.get("assign") == "custom":
+            ticked, _ready, problems = dynamic_mode_ui.plan_status(
+                bases, block.get("chapters") or {})
+            if problems:
+                return None, "These ticked chapters have no usable profile:\n\n" + \
+                    "\n".join(problems[:8])
+            bases = ticked
+        if not bases:
+            return None, "No chapters are selected."
+        out = []
+        for base in bases:
+            entry = (block.get("chapters") or {}).get(base) or {} \
+                if block.get("assign") == "custom" else {}
+            path = entry.get("profile_path") or block.get("profile_path")
+            style = entry.get("style") or block.get("style") \
+                or dynamic_mode_ui.dynamic_profile.DEFAULT_STYLE
+            try:
+                profile = dynamic_mode_ui.dynamic_profile.load_profile(path)
+                dynamic_mode_ui.dynamic_profile.check_style(profile, style)
+            except dynamic_mode_ui.dynamic_profile.ProfileError as e:
+                return None, f"{base}: {e}"
+            out.append((base, os.path.join(data["input_folder"], f"{base}.txt"),
+                        {"profile": profile, "style": style}))
+        return out, None
+
+    def _current_dynamic_settings(self):
+        """The settings as they stand in the window, without saving them."""
+        return {"input_folder": self.vars["input_folder"].get().strip(),
+                "output_folder": self.vars["output_folder"].get().strip(),
+                "temp_dir": self.vars["temp_dir"].get().strip(),
+                "suite_root": self.settings.get("suite_root")
+                or DEFAULT_SETTINGS["suite_root"],
+                "dynamic": dict(self.dynamic_state)}
+
+    def _open_preview(self):
+        data = self._current_dynamic_settings()
+        chapters, problem = self._preview_chapters(data)
+        if problem:
+            messagebox.showerror("Preview Chapters", problem)
+            return
+        suite = suite_link.open_suite(data)
+        book = suite_link.book_for_output(suite, data["output_folder"]) if suite else None
+        readings, furigana_ok = [], set()
+        try:
+            if suite is not None and suite_link.uses_new_pipeline(book):
+                readings = [dict(r) for r in suite.readings_for_book(book["id"])]
+                furigana_ok = suite_link.furigana_applied(suite, book)
+        finally:
+            if suite is not None:
+                suite.close()
+        normalize, path = dynamic_mode_ui.dynamic_profile.load_irodori_normalizer(
+            self.vars["uv_project_dir"].get().strip())
+        if normalize is None:
+            messagebox.showerror("Preview Chapters",
+                                 f"Irodori's text normaliser was not found at {path}. The "
+                                 f"preview measures sentences the way the engine does and "
+                                 f"cannot run without it.")
+            return
+        engine = dynamic_mode_ui.dynamic_profile.make_engine(normalize)
+        preview_window.PreviewWindow(
+            self, chapters, data, book, engine, readings=readings,
+            furigana_applied=furigana_ok, temp_dir=data["temp_dir"],
+            on_close=self._preview_closed)
+
+    def _preview_closed(self, saved):
+        self.previewed_chapters = set(saved)
+        self.preview_label.configure(
+            text=(f"✔  {len(saved)} chapter(s) have a saved preview - the run will use them"
+                  if saved else "No preview saved; the run plans the chapters itself."),
+            text_color=dynamic_mode_ui.COLOR_OK if saved else dynamic_mode_ui.COLOR_SUBTITLE)
 
     def _open_customize(self):
         if not self.input_parse_ok:

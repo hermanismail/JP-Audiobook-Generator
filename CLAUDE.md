@@ -377,6 +377,27 @@ calls for with that seiyuu.
     reader, `spoken()` swaps in the reading for the engine.
   - The review window (`furigana_review.py`) shows only pairs with no
     decision for that book; Save & Run warns if any are left.
+- **Preview Chapters** (`preview.py` + `preview_window.py`, built
+  2026-09-24): a button under Profile Path opens what every chosen chapter
+  will SEND and SHOW, built with the same `plan_chapter()` the render uses,
+  so furigana, readings and the seiyuu credit are all in it. Chapters down
+  the left, a non-editable summary on top, then one box per SOURCE SECTION
+  split into two columns (TTS left, reader right), one line per request.
+  Both columns are editable; the two must keep the same number of lines,
+  because a request is one line on each side.
+  - **Save never touches the chapter's .txt** (user decision): it writes a
+    PLAN into `<temp>/preview/<book>/<chapter>.plan.json` and records every
+    changed box in the library's `chapter_edits` (with the hash of the
+    section it was made against). The next render of that chapter uses the
+    plan INSTEAD of planning, then deletes it.
+  - A plan is bound to the chapter text, the profile and the style by
+    `source_hash`: change any of them and it is ignored and removed, so an
+    edited preview can never be applied to different text. A corrupt plan
+    is treated as no plan.
+  - After a failed or stopped run, `preview.salvage()` keeps the plans of
+    chapters still to render and removes the rest.
+  - An edited TTS line is re-priced from its new text (Phase 3's rule), and
+    a small TTS-only change is offered as a book reading.
 - **The suite library** (`suite_link.py` -> `F:\AUDIOBOOK-CREATION-SUITE`):
   best-effort in every call, so a missing library never stops a render. A
   book is matched by its OUTPUT FOLDER; a book the database does not know,
