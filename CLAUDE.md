@@ -485,6 +485,27 @@ calls for with that seiyuu.
   the file has, then write the database back over it), and records the
   chapter and the seiyuu's usage afterwards; re-rendering the same chapter
   with the same voice increments its count.
+- **QA scan at the end of a run** (`qa_scan.py`, 2026-09-25, dynamic only,
+  setting `scan_after_run`, default ON): Whisper listens to every chapter
+  the run produced and reports the Parts worth a human ear, BEFORE
+  translation - "is any of this worth re-rendering" is settled before an
+  hour of subtitles goes into it. It writes `<chapter>.qa.json` beside the
+  audio in dynamic-repair's cache format, so copying the folder gives that
+  tool its shortlist with no GPU spent. Its own process (`uv run
+  --project`, `-u`), and any failure only prints: a finished render is
+  never reported as failed because the scan stumbled.
+  - **The verify pass is the point.** The chapter-wide transcription
+    credits each Whisper segment to the Part its midpoint falls in, so a
+    segment starting late or swallowing a silence strips its neighbours
+    and flags perfect audio. Every flagged Part is therefore transcribed
+    AGAIN on its own - all of them in one whisper call - and dropped if it
+    comes back clean, keeping both transcripts. Measured on
+    wall/chapter_008: 5 flagged by the old scan, 4 of them artefacts
+    (43 `(nothing)`->`ドゥルーブラック`, 75, 162, 189 all clean alone), and
+    the real fault (37) was MISSED. After: `flagged [37, 190], dropped
+    [43, 75, 162, 189]` in 145 s for 204 parts.
+  - A bigger model does not fix it: large-v3 made part 75 worse (0.90 ->
+    0.71) at 25x the time. See the model comparison above.
 - **Output**: `process_chapter_dynamic()` -> the same `finish_chapter()`
   tail as normal mode (stitch, FLAC master, `sync.json`, tags) plus
   `<chapter>.render.json` - per `sync.json` entry the display and engine

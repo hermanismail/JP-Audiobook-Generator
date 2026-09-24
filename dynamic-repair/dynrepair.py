@@ -69,6 +69,7 @@ for _path in (GENERATOR_DIR, REPAIR_DIR):
 import dynamic_profile  # noqa: E402
 import repair  # noqa: E402  - chapter-repair's engine, reused one-way
 import suite_link  # noqa: E402  - the generator's door to the library
+import qa_scan  # noqa: E402  - the shared scan: transcribe, score, verify
 
 # book-profiler's scoring, by file path (its folder is not a package and
 # importing it as `score` must not drag the profiler's settings in).
@@ -614,55 +615,67 @@ def scan_cache_path(chapter):
 
 def load_scan(chapter):
     """The cached scan, only if it was taken of THIS audio - a repair
-    changes the FLAC and every time after it."""
-    try:
-        data = _read_json(scan_cache_path(chapter))
-    except (OSError, ValueError):
-        return None
-    return data if data.get("flac_stamp") == _stamp(chapter.flac) else None
+    changes the FLAC and every time after it.
+
+    Two places are looked at: this tool's work folder, and the chapter's
+    own folder, where the generator writes `<chapter>.qa.json` at the end
+    of a run (2026-09-25). So a folder copied straight from a finished
+    render opens with its scan already done."""
+    for path in (scan_cache_path(chapter), qa_scan.qa_path(chapter.folder, chapter.base)):
+        try:
+            data = _read_json(path)
+        except (OSError, ValueError):
+            continue
+        if data.get("flac_stamp") == _stamp(chapter.flac):
+            return data
+    return None
 
 
 def scan(chapter, log, on_proc=None):
-    """Whisper over the whole chapter (chapter-repair's pass), scored per
-    part, cached against the FLAC's size and mtime."""
+    """Whisper over the whole chapter, scored per part, then the VERIFY
+    pass over whatever was flagged - see qa_scan.py. Cached against the
+    audio's size and mtime.
+
+    The generator runs the same function at the end of a render, so a
+    folder copied from a finished run already carries its scan and this
+    spends no GPU at all."""
     transcript = os.path.join(chapter.work_dir, chapter.base + ".json")
     cached = load_scan(chapter)
     if cached is None and os.path.isfile(transcript):
         os.remove(transcript)           # a transcript of audio that no longer exists
-    segments = repair.transcribe_chapter(chapter, log, on_proc)
-    rows = repair.score_chapter(chapter, segments)
-    for row in rows:
-        row["part"] = row["index"] + 1
-    data = {"chapter": chapter.name, "scanned": time.strftime("%Y-%m-%d %H:%M"),
-            "flac_stamp": _stamp(chapter.flac), "rows": rows}
+    data = qa_scan.scan_chapter(chapter.folder, chapter.base, chapter.settings, log,
+                                work_dir=chapter.work_dir)
+    data["chapter"] = chapter.name
     os.makedirs(chapter.work_dir, exist_ok=True)
     _write_json(scan_cache_path(chapter), data)
     return data
 
 
 def flagged(rows, threshold, min_chars):
-    """Worst first - minus the parts too short to judge. A shortlist, never
-    a verdict: Whisper mishears too.
+    """Worst first - minus the parts too short to judge, and minus the ones
+    the VERIFY pass cleared. A shortlist, never a verdict.
 
-    Since 2026-09-25 it uses book-profiler's scoring where that is
-    available (user decision): kana is FOLDED before comparing, so a
-    transcript's `リンゴ` matches a script's `りんご` instead of scoring
-    0.55, and `overrun` catches a tail spoken after the sentence ended,
-    which a similarity alone misses. Without the profiler on the machine
-    it falls back to exactly the old rule."""
+    Scoring is book-profiler's (kana folded, plus `overrun`), and where a
+    row carries a `verified` block - the part transcribed again on its own
+    - that is what decides, because the chapter-wide pass mangles short
+    parts next to silences. On wall/chapter_008 it cleared 4 of 5."""
     out = []
     for row in rows:
         if len(repair.normalise_for_compare(row["text"])) < min_chars:
             continue
+        verified = row.get("verified")
+        if verified is not None:
+            if verified.get("flagged"):
+                out.append(row)
+            continue
         if score is not None:
-            judged = rescore(row)
-            if judged["flagged"]:
+            if rescore(row)["flagged"]:
                 out.append(row)
             continue
         lr = row["length_ratio"]
         if row["similarity"] < threshold or lr is None or not (0.65 <= lr <= 1.45):
             out.append(row)
-    return sorted(out, key=lambda r: r["similarity"])
+    return sorted(out, key=lambda r: (r.get("verified") or r)["similarity"])
 
 
 def rescore(row):
