@@ -45,6 +45,12 @@ TAG_OPEN = COLOR_MARK
 TAG_DIRTY = "#E3DEFA"           # edited, not saved yet
 TAG_SAVED = "#D8F0E0"           # in the plan on disk
 
+# Yellow says "a reading was applied here". Blue says "furigana nobody has
+# decided yet" - it is stripped in this text and the seiyuu will read the
+# word however it comes out, which is the thing being judged in the
+# furigana review (user, 2026-09-24).
+COLOR_CANDIDATE = "#CFE4FF"
+
 
 class PreviewWindow(ctk.CTkToplevel):
     """`chapters` is [(base, path, assignment)] - assignment as
@@ -62,9 +68,10 @@ class PreviewWindow(ctk.CTkToplevel):
         self.engine = engine
         self.readings = readings or []
         self.furigana_applied = furigana_applied or set()
-        # `per_chapter(base)` -> (readings, furigana pairs) for chapters
-        # whose decisions were scoped (schema v2). Without it the same two
-        # apply everywhere, as before.
+        self.undecided = set()
+        # `per_chapter(base)` -> (readings, furigana pairs, undecided pairs)
+        # for chapters whose decisions were scoped (schema v2). Without it
+        # the same readings apply everywhere and nothing is marked blue.
         self.per_chapter = per_chapter
         self.temp_dir = temp_dir or settings.get("temp_dir")
         self.on_close_cb = on_close
@@ -172,11 +179,13 @@ class PreviewWindow(ctk.CTkToplevel):
             return self.built[base]
         assignment = self._assignment(base)
         readings, furigana_ok = self.readings, self.furigana_applied
+        undecided = set()
         if self.per_chapter:
-            readings, furigana_ok = self.per_chapter(base)
+            readings, furigana_ok, undecided = self.per_chapter(base)
+        self.undecided = undecided or set()
         sections, skipped, _pieces = preview.build(
             self._raw(base), assignment["profile"], assignment["style"], self.engine,
-            readings, furigana_ok, self._intro(assignment))
+            readings, furigana_ok, self._intro(assignment), self.undecided)
         self.built[base] = sections
         self.skipped = skipped
         return sections
@@ -215,7 +224,11 @@ class PreviewWindow(ctk.CTkToplevel):
                   + (f"introduction: {intro}" if intro
                      else "no introduction line (this seiyuu has no name in the library)")
                   + f"  ·  {seconds} request(s) priced  ·  edits are saved to the run's temp "
-                    f"folder, never to the chapter file"))
+                    f"folder, never to the chapter file"
+                  + ("\nyellow = a reading or furigana applied"
+                     + (f"  ·  blue = {len(self.undecided)} furigana pair(s) with no decision "
+                        f"yet - stripped here, the seiyuu reads the word as written"
+                        if self.undecided else ""))))
         for widget in self.sections_frame.winfo_children():
             widget.destroy()
         self.boxes = {}
@@ -337,6 +350,7 @@ class PreviewWindow(ctk.CTkToplevel):
             box.pack(fill="both", expand=True)
             box.insert("1.0", shown)
             self._mark_readings(box, section, side)
+            box.tag_raise("reading")
             box.bind("<KeyRelease>", lambda _e, b=self.current: self._touched(b))
             self.boxes[(section["index"], side)] = (box, text)
         self._link_scroll(section["index"])
@@ -410,17 +424,25 @@ class PreviewWindow(ctk.CTkToplevel):
         A piece records what it used in `readings` ({word: reading}), so
         nothing has to be guessed from the text."""
         mark_tag(box, "reading", COLOR_MARK)
+        mark_tag(box, "candidate", COLOR_CANDIDATE)
         for number, line in enumerate(section["lines"], start=1):
             text = line["display" if side == "reader" else "tts"]
             for word, reading in (line.get("readings") or {}).items():
                 needle = word if side == "reader" else reading
-                if not needle:
-                    continue
-                at = text.find(needle)
-                while at >= 0:
-                    box.tag_add("reading", f"{number}.{at}",
-                                f"{number}.{at + len(needle)}")
-                    at = text.find(needle, at + len(needle))
+                self._tag_every(box, "reading", number, text, needle)
+            # An undecided pair reads the same on both sides: it was
+            # stripped, so the word itself is what is there.
+            for word in (line.get("candidates") or {}):
+                self._tag_every(box, "candidate", number, text, word)
+
+    @staticmethod
+    def _tag_every(box, tag, number, text, needle):
+        if not needle:
+            return
+        at = text.find(needle)
+        while at >= 0:
+            box.tag_add(tag, f"{number}.{at}", f"{number}.{at + len(needle)}")
+            at = text.find(needle, at + len(needle))
 
     def _touched(self, base):
         if base and base not in self.dirty:

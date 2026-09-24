@@ -973,14 +973,20 @@ class SettingsApp(ctk.CTk):
                 suite.close()
 
         def per_chapter(base):
-            """A chapter sees only the decisions whose scope reaches it -
-            the same rule the render applies (schema v2)."""
+            """(readings, applied furigana, undecided furigana) for ONE
+            chapter: only the decisions whose scope reaches it (schema v2),
+            plus the pairs still waiting on the review, so the preview can
+            show what a decision would affect BEFORE it is made."""
             opened = suite_link.open_suite(data)
             if opened is None:
-                return readings, furigana_ok
+                return readings, furigana_ok, set()
             try:
+                stats = furigana_review.scan_folder(self.vars["input_folder"].get().strip(),
+                                                    [base])
+                waiting, automatic = furigana_review.pending(stats, opened, book, [base])
                 return (suite_link.readings_for(opened, book, base),
-                        suite_link.furigana_applied(opened, book, base))
+                        suite_link.furigana_applied(opened, book, base),
+                        {(r["word"], r["reading"]) for r in waiting + automatic})
             finally:
                 opened.close()
         normalize, path = dynamic_mode_ui.dynamic_profile.load_irodori_normalizer(

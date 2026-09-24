@@ -433,6 +433,12 @@ calls for with that seiyuu.
     open, violet when it holds an unsaved edit, green once it is in the
     plan. Leaving a tag keeps what was typed (`held`), so an edit survives
     moving between sections and between chapters.
+  - **Blue = furigana with no decision yet** (user, 2026-09-24): those pairs
+    are STRIPPED from this text, so without marking them the preview could
+    not be used to judge the review - which is what it is for. Marked by
+    word, EVERY occurrence, because bare occurrences are exactly what the
+    review asks about. wall chapter_001: 12 pairs waiting, 15 stretches.
+    Yellow wins where both would apply (`tag_raise`).
   - Every stretch a reading or a furigana pair decided is bold on yellow -
     the kana in the TTS column, the word it stands for in the reader
     column - taken from the piece's own `readings`, so nothing is guessed.

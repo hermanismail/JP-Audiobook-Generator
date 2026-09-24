@@ -63,7 +63,7 @@ def section_hash(text):
 # ------------------------------------------------------------ building
 
 def build(raw_text, profile, style, engine, readings=None, furigana_applied=None,
-          intro=None):
+          intro=None, undecided=None):
     """[{index, gap, lines: [{display, tts, gap, engine_len, band, request}]}]
 
     `intro` is (display line, tts line) - injected exactly as
@@ -89,8 +89,26 @@ def build(raw_text, profile, style, engine, readings=None, furigana_applied=None
             "band": piece["band"],
             "request": piece["request"],
             "readings": piece["readings"],
+            # Furigana nobody has ruled on yet. It is STRIPPED from this
+            # text - the seiyuu decides - so without marking it the preview
+            # cannot be used to judge the review (user, 2026-09-24).
+            "candidates": candidates_in(piece["display_text"], undecided),
         })
     return sections, skipped, pieces
+
+
+def candidates_in(text, undecided):
+    """{word: reading} for the undecided pairs whose word is in `text`.
+
+    EVERY occurrence counts, not only the annotated one, because that is
+    exactly the question the review asks: the annotation is read as
+    written either way, and what is being decided is the bare occurrences
+    elsewhere."""
+    found = {}
+    for word, reading in (undecided or ()):
+        if word and word in (text or ""):
+            found[word] = reading
+    return found
 
 
 def insert_intro(raw_text, line):
@@ -148,6 +166,7 @@ def apply_edits(sections, edits):
                 "gap": old["gap"] if old else "sentence",
                 "engine_len": None, "band": None, "request": None,
                 "readings": old["readings"] if old else {},
+                "candidates": old.get("candidates", {}) if old else {},
                 # Only a line that really changed counts as edited - the
                 # rest of the box is the text the preview built.
                 "edited": old is None or shown != old["display"] or spoken != old["tts"]
