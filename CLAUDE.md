@@ -49,6 +49,19 @@ The user is slowly re-rendering older books in dynamic mode.
    `gcloud auth application-default login`; their trial credits cannot pay
    for AI Studio, only Agent Platform.
 
+**The tunnel (2026-09-25).** The `audiobook` Cloudflare tunnel
+(`C:\Users\herma\.cloudflared\config.yml`, started by hand - there is no
+Windows service) now routes **creator.shamareader.online -> localhost:3232**,
+alongside `audiobook.shamareader.online -> 3939`. Port 3232 is the SHAMA log
+monitor's, and the monitor is being **shelved**: the suite takes the port
+over, and the `monitor-log` hostname comes out of the config once the suite
+serves something. Until then creator answers 502.
+**It still needs its own Access app** (owner only, like `monitor-log`) - a
+hostname with no app is public, and the suite holds the whole library. The
+generator side of the monitor (the `%LOCALAPPDATA%\SHAMA-Monitor\state.json`
+file `progress_window.py` wrote) was never merged; its branch is deleted and
+the commit is `9ea0b09` if it is ever wanted back.
+
 **Player side (user decision 2026-09-18): the Android app is FROZEN.**
 Development goes into the web client first, then the server. Player
 changes this repo needs (e.g. reading the images sidecar) are handed over
