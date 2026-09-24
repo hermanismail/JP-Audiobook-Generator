@@ -126,6 +126,21 @@ def intro_line(seiyuu, template="朗読者：{name}"):
     return template.format(name=display), template.format(name=kana)
 
 
+def furigana_applied(suite, book):
+    """{(word, reading)} the person has approved for this book - 'book' and
+    'once' alike, because both are spoken where they are written. Rejected
+    pairs are absent, so their parens are simply stripped."""
+    if not uses_new_pipeline(book):
+        return set()
+    try:
+        rows = suite.conn.execute(
+            "SELECT word, reading FROM furigana_decisions WHERE book_id = ?"
+            " AND decision IN ('book', 'once')", (book["id"],))
+        return {(r["word"], r["reading"]) for r in rows}
+    except Exception:
+        return set()
+
+
 def sync_readings(suite, book, output_folder):
     """Import anything only the file has, then write the DB back over it.
     Returns the import result, or None when there is nothing to sync."""
