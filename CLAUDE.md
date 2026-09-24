@@ -284,6 +284,11 @@ is deliberate.
   Metadata, Advanced) plus a bottom bar with Import / Export / Save & Run.
   A sidebar switch picks **normal** or **dynamic profile** mode - see the
   next section. `dynamic_mode_ui.py` holds the dynamic-only widgets.
+- `suite_link.py` — the door to the Audiobook Creation Suite library
+  (`F:\AUDIOBOOK-CREATION-SUITE`, its own repo and SQLite file). Loads
+  `creator_suite.client` BY PATH, and returns None for everything when the
+  library is absent. `suite_root` is a setting with no widget; the dynamic
+  General page shows the connection instead.
 - `dynamic_profile.py` — the profile contract shared by the generator, the
   profiler and dynamic-repair: loading/validating `profile_*.json` (v2),
   the six styles, `request_for()` (length -> duration scale or seconds),
@@ -336,6 +341,29 @@ calls for with that seiyuu.
   used. Proof (34 checks, stubbed worker, scratch folders): with no file
   the plan is identical to `main` over 7 yojo-senki chapters x 2 styles;
   with one, 562 pieces change TTS text and nothing else.
+- **Seiyuu introduction line** (built 2026-09-24, dynamic + DB-tracked books
+  only): `朗読者：<display name>` is injected at RENDER time after the
+  chapter number and its title (`insert_intro_line`, `looks_like_header`);
+  with no header the name goes first, then a blank line, then the prose. It
+  becomes its own `sync.json` entry at a 1.0 s sentence gap, the reader sees
+  the written name and the engine is sent the kana - done with a reading
+  pair, so no special case in `plan_pieces`. Measured 2026-09-24: `：`
+  survives the engine's normaliser as `:` and is spoken as a short pause,
+  not a word (three variants, same transcript, 3.60 / 3.40 / 3.32 s), so
+  one template serves both columns. The name is added to `glossary.json`
+  once, so the credit translates with the spelling you chose; hand edits are
+  never overwritten. `render.json` gains `intro_line`.
+- **The suite library** (`suite_link.py` -> `F:\AUDIOBOOK-CREATION-SUITE`):
+  best-effort in every call, so a missing library never stops a render. A
+  book is matched by its OUTPUT FOLDER; a book the database does not know,
+  or one whose row says `legacy`, keeps the pre-2026-09-24 behaviour
+  exactly - no intro line, no records, `readings.json` as before. That is
+  what keeps the published library repairable with today's
+  `dynamic-repair`, which has not been taught the database. For a
+  DB-tracked book the run syncs readings both ways first (import what only
+  the file has, then write the database back over it), and records the
+  chapter and the seiyuu's usage afterwards; re-rendering the same chapter
+  with the same voice increments its count.
 - **Output**: `process_chapter_dynamic()` -> the same `finish_chapter()`
   tail as normal mode (stitch, FLAC master, `sync.json`, tags) plus
   `<chapter>.render.json` - per `sync.json` entry the display and engine

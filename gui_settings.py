@@ -79,6 +79,11 @@ DEFAULT_SETTINGS = {
     "silence_duration_section": 1.5,
     "clean_temp_after_run": True,
     "uv_project_dir": r"C:\Irodori-TTS",
+    # The suite library's folder (creator.db lives inside it). There is no
+    # widget for it: the path rarely changes and the General page shows the
+    # connection instead. A hand edit in settings.json survives a save,
+    # because _collect_and_validate() writes this value back.
+    "suite_root": r"F:\AUDIOBOOK-CREATION-SUITE",
     "author_name": "",
     "book_title": "",
     "genre": "Audiobook",
@@ -686,6 +691,12 @@ class SettingsApp(ctk.CTk):
             self.dynamic_state.get("style"), on_change=self._on_main_profile_changed)
         self.profile_panel.pack(side="left", fill="x", expand=True)
 
+        # The seiyuu's names for the introduction line, under the assign
+        # toggle. It hides itself as soon as the library knows the voice.
+        self.seiyuu_panel = dynamic_mode_ui.SeiyuuPanel(
+            source_card, on_saved=lambda _p: self._refresh_seiyuu_panel())
+        self.seiyuu_panel.pack(fill="x", padx=(80, 22), pady=(0, 4))
+
         assign_row = ctk.CTkFrame(source_card, fg_color="transparent")
         assign_row.pack(fill="x", padx=(80, 22), pady=(4, 16))
         self.assign_switcher = ctk.CTkSegmentedButton(
@@ -731,6 +742,17 @@ class SettingsApp(ctk.CTk):
     def _on_main_profile_changed(self, path, style):
         self.dynamic_state["profile_path"] = path
         self.dynamic_state["style"] = style
+        self._refresh_seiyuu_panel()
+
+    def _refresh_seiyuu_panel(self):
+        """The names panel follows whichever profile is chosen for all
+        chapters. In Customize each row carries its own."""
+        if not hasattr(self, "seiyuu_panel"):
+            return
+        if self.dynamic_state.get("assign") == "custom":
+            self.seiyuu_panel.pack_forget()
+            return
+        self.seiyuu_panel.set_profile(self.dynamic_state.get("profile_path", ""))
 
     def _on_assign_changed(self, value, open_window=True):
         custom = value == "Customize"
@@ -744,6 +766,7 @@ class SettingsApp(ctk.CTk):
         else:
             self.customize_button.pack_forget()
             self.customize_status_label.pack_forget()
+        self._refresh_seiyuu_panel()
 
     def _schedule_input_parse(self):
         if self._parse_pending:
@@ -1693,6 +1716,8 @@ class SettingsApp(ctk.CTk):
             "silence_duration_section": silences["silence_duration_section"],
             "clean_temp_after_run": not bool(self.keep_temp_var.get()),
             "uv_project_dir": self.vars["uv_project_dir"].get().strip(),
+            "suite_root": str(self.settings.get("suite_root")
+                              or DEFAULT_SETTINGS["suite_root"]).strip(),
             "author_name": self.metadata_vars["author_name"].get().strip(),
             "book_title": self.metadata_vars["book_title"].get().strip(),
             "genre": self.metadata_vars["genre"].get().strip(),
@@ -1975,6 +2000,12 @@ class SettingsApp(ctk.CTk):
                 cwd=uv_project_dir,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
+                # The log carries Japanese (chapter text, readings, the
+                # seiyuu credit). Decode it as UTF-8, which is what the
+                # child writes; text=True alone would decode with the
+                # locale's cp1252 and show mojibake.
+                encoding="utf-8", errors="replace",
+                env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1"),
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except FileNotFoundError:
