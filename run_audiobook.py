@@ -7,6 +7,7 @@ import shutil
 
 import text_pipeline
 import dynamic_profile
+import suite_link
 
 # --- Configuration ---
 # Settings are now stored in settings.json (same folder as this script)
@@ -44,6 +45,10 @@ DEFAULT_SETTINGS = {
     # bitrate is a setting. See AAC_BITRATE below.
     "aac_bitrate": "64k",
     "keep_flac_master": True,
+    # The Audiobook Creation Suite library (its own repo and SQLite file).
+    # Absent or unreachable = every book behaves the legacy way; see
+    # suite_link.py.
+    "suite_root": r"F:\AUDIOBOOK-CREATION-SUITE",
     # Translation subtitles. See translate_pipeline.py.
     "auto_translate_after_run": False,
     "translation_backend": "vntl",
@@ -977,10 +982,43 @@ def wav_duration(path):
         return get_audio_duration(path)
 
 
-def process_chapter_dynamic(chapter_path, assignment, engine, readings=None):
+CHAPTER_HEADER_MAX = 40
+
+
+def looks_like_header(line):
+    """A chapter number or title line, not prose: short and with no
+    sentence terminator. The extractor writes one for every chapter now;
+    a file without one is still handled (see insert_intro_line)."""
+    text = (line or "").strip()
+    if not text or len(text) > CHAPTER_HEADER_MAX:
+        return False
+    return not any(mark in text for mark in ("。", "？", "！", "……"))
+
+
+def insert_intro_line(raw_text, line):
+    """`朗読者：…` after the chapter number and its title, as its own line -
+    so text_pipeline gives it a 1.0 s sentence gap and the prose after it
+    keeps the 1.5 s section gap (user decision 2026-09-24).
+
+    With no header at all the name goes first, then a blank line, then the
+    prose."""
+    lines = raw_text.splitlines()
+    if not lines or not looks_like_header(lines[0]):
+        return "\n".join([line, ""] + lines) + "\n"
+    at = 1
+    if len(lines) > 1 and lines[1].strip() and looks_like_header(lines[1]):
+        at = 2                      # the chapter has a title as well
+    return "\n".join(lines[:at] + [line] + lines[at:]) + "\n"
+
+
+def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, intro=None):
     """One chapter in dynamic profile mode. `assignment` comes from
     resolve_dynamic_plan(); `engine` is dynamic_profile.make_engine();
-    `readings` is dynamic_profile.load_readings() - TTS text only."""
+    `readings` is dynamic_profile.load_readings() - TTS text only.
+
+    `intro` is (display line, tts line) for the seiyuu credit, or None for a
+    legacy book. Returns the chapter's record for the suite library, or None
+    when nothing was produced."""
     base = os.path.splitext(os.path.basename(chapter_path))[0]
     profile, style = assignment["profile"], assignment["style"]
     print(f"\n>>> Processing: {base}")
@@ -992,6 +1030,15 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None):
 
     with open(chapter_path, "r", encoding="utf-8") as f:
         raw_text = f.read()
+    intro_display, intro_tts = intro if intro else (None, None)
+    if intro_display:
+        raw_text = insert_intro_line(raw_text, intro_display)
+        # The reader shows the written name, the engine is sent the kana.
+        # A reading does that without a special case in plan_pieces; it is
+        # the longest word in play, so it is applied first.
+        readings = sorted((readings or []) + [{"word": intro_display, "reading": intro_tts}],
+                          key=lambda r: -len(r["word"]))
+        print(f"Intro line: {intro_display}  (spoken: {intro_tts})")
     pieces, skipped = dynamic_profile.plan_chapter(raw_text, profile, style, engine, readings)
     if not pieces:
         print(f"Error: No sentences produced for {base} - is the file empty?")
@@ -1079,6 +1126,9 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None):
             "style": style,
             "style_label": dynamic_profile.STYLE_LABELS[style],
             "chapter_was_profiled": base in (profile.get("chapters") or []),
+            # The seiyuu credit this render put in front of the chapter, or
+            # null for a legacy book (see suite_link.py).
+            "intro_line": intro_display,
             # The book's readings as they were at render time; each piece
             # lists the ones its TTS text used.
             "readings": [{"word": r["word"], "reading": r["reading"]} for r in readings or []],
@@ -1111,13 +1161,55 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None):
                           [p["gap"] for p in rendered],
                           [p["display_text"] for p in rendered],
                           silence_wavs, after_sync=write_render_json):
-        return
+        return None
+
+    # What the suite library records; the caller writes it, because only
+    # main() knows whether this book uses the database at all. Measured
+    # before the cleanup, while the per-piece wavs still exist.
+    summary = {
+        "chapter": base,
+        "profile_path": profile["_path"],
+        "style": style,
+        "speaker_path": profile["speaker_path"],
+        "sync_entries": len(rendered),
+        "intro_line": intro_display,
+        "readings_applied": {w: r for p in pieces for w, r in (p["readings"] or {}).items()},
+        "seconds": round(sum(wav_duration(p["wav"]) for p in rendered
+                             if os.path.exists(p["wav"])), 2),
+        "render_json_path": os.path.join(OUTPUT_FOLDER, f"{base}.render.json"),
+    }
 
     if CLEAN_TEMP_AFTER_RUN:
         print(f"Cleaning up temporary files in {TEMP_DIR}...")
         clean_temp_dir()
     else:
         print(f"Skipping temp cleanup (clean_temp_after_run is disabled). Files remain in {TEMP_DIR}")
+    return summary
+
+
+def record_chapter(suite, book, seiyuu, summary):
+    """One rendered chapter into the suite library: the record, and the
+    seiyuu's usage count (re-rendering the same chapter with the same voice
+    increments it - user decision 2026-09-24). Never fatal: a library
+    problem must not lose a chapter that rendered fine."""
+    if suite is None or not book:
+        return
+    try:
+        suite.add_chapter_record(
+            book["id"], summary["chapter"],
+            seiyuu_id=(seiyuu or {}).get("id"),
+            profile_path=summary["profile_path"], style=summary["style"],
+            sync_entries=summary["sync_entries"], intro_line=summary["intro_line"],
+            readings_applied=summary["readings_applied"], seconds=summary["seconds"],
+            render_json_path=summary["render_json_path"])
+        if seiyuu:
+            suite.record_usage(seiyuu["id"], book["id"], summary["chapter"],
+                               summary["profile_path"], summary["style"])
+        print(f"  library: recorded {summary['chapter']}"
+              + (f" for {seiyuu['nickname']}" if seiyuu else ""))
+    except Exception as e:
+        print(f"  ! could not record {summary['chapter']} in the library "
+              f"({type(e).__name__}: {e}) - the chapter itself is fine")
 
 
 def snapshot_filename(when=None):
@@ -1205,6 +1297,7 @@ def main():
     # Dynamic profile mode: resolve and check every chapter's profile before
     # any GPU time is spent, and drop the chapters left unticked in Customize.
     dynamic_plan, engine, readings = None, None, []
+    suite, book, new_pipeline = None, None, False
     if GENERATION_MODE == "dynamic":
         print("Mode: dynamic profile")
         normalize, normalizer_path = dynamic_profile.load_irodori_normalizer(UV_PROJECT_DIR)
@@ -1219,6 +1312,30 @@ def main():
             # The book's readings, beside glossary.json in the OUTPUT folder
             # (decision 2026-09-22). No file = nothing changes.
             readings_path = os.path.join(OUTPUT_FOLDER, dynamic_profile.READINGS_FILE)
+        except dynamic_profile.ProfileError as e:
+            print(f"Error: {e}")
+            return
+
+        # The suite library. A book it does not know - or one marked
+        # legacy - runs exactly as before: no intro line, no records.
+        suite = suite_link.open_suite(SETTINGS)
+        book = suite_link.book_for_output(suite, OUTPUT_FOLDER)
+        new_pipeline = suite_link.uses_new_pipeline(book)
+        print("Library: " + suite_link.describe(suite, book, SETTINGS))
+        if new_pipeline:
+            synced = suite_link.sync_readings(suite, book, OUTPUT_FOLDER)
+            if synced:
+                if synced["added"]:
+                    print(f"  readings.json had {len(synced['added'])} reading(s) the library "
+                          f"did not: " + ", ".join(f"{a['word']}→{a['reading']}"
+                                                   for a in synced["added"][:6])
+                          + " - imported")
+                for clash in synced["conflicts"]:
+                    print(f"  ! {clash['word']}: the file says {clash['file']}, the library "
+                          f"says {clash['db']} - the library's reading is used")
+                print(f"  {synced['exported']} reading(s) written back to readings.json")
+
+        try:
             readings = dynamic_profile.load_readings(readings_path)
         except dynamic_profile.ProfileError as e:
             print(f"Error: {e}")
@@ -1273,7 +1390,21 @@ def main():
     for chapter_file in pending:
         if dynamic_plan is not None:
             base = os.path.splitext(os.path.basename(chapter_file))[0]
-            process_chapter_dynamic(chapter_file, dynamic_plan[base], engine, readings)
+            assignment = dynamic_plan[base]
+            seiyuu = (suite_link.seiyuu_for_profile(suite, assignment["profile"])
+                      if new_pipeline else None)
+            intro = suite_link.intro_line(seiyuu) if new_pipeline else (None, None)
+            if new_pipeline and not intro[0]:
+                nickname = dynamic_profile.nickname(assignment["profile"])
+                print(f"  ! no name for {nickname} in the library - {base} gets no intro line. "
+                      f"Add it in the generator window (Verify seiyuu name).")
+            elif new_pipeline and suite_link.merge_glossary_entry(OUTPUT_FOLDER, seiyuu):
+                # So the credit translates with the spelling you chose.
+                print(f"  glossary.json: added {seiyuu['display_name']} "
+                      f"= {seiyuu['translation_name']}")
+            summary = process_chapter_dynamic(chapter_file, assignment, engine, readings, intro)
+            if summary and new_pipeline:
+                record_chapter(suite, book, seiyuu, summary)
         else:
             process_chapter(chapter_file)
 

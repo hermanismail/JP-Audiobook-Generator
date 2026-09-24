@@ -15,12 +15,14 @@ actually use.
 """
 
 import glob
+import json
 import os
 
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 import dynamic_profile
+import suite_link
 import text_pipeline
 from ui_common import (
     COLOR_BG, COLOR_CARD, COLOR_CARD_BORDER, COLOR_TITLE, COLOR_SUBTITLE,
@@ -91,6 +93,165 @@ def check_profile(path, style=None):
         return None, [f"Not usable: {e}"], False
     ok, _note = dynamic_profile.speaker_status(profile)
     return profile, dynamic_profile.summary_lines(profile), ok
+
+
+# ------------------------------------------------------------ seiyuu names
+
+class SeiyuuPanel(ctk.CTkFrame):
+    """The three names the seiyuu intro line needs, and Verify.
+
+    Temporary by design (user decision 2026-09-24): the onboarder will write
+    these rows itself once it knows the database, and then this panel goes.
+    Until then a seiyuu trained before the database existed is named here,
+    once - the boxes disappear as soon as the library knows the voice.
+
+    Identity is the SPEAKER FILE PATH, so the same voice named in one place
+    is known everywhere. Verify reports 'verified' when the library already
+    agrees, 'added' when it did not know the voice, and asks before
+    overwriting names that differ."""
+
+    def __init__(self, parent, on_saved=None, compact=False):
+        super().__init__(parent, fg_color="transparent")
+        self.on_saved = on_saved
+        self.speaker_path = ""
+        self.nickname = ""
+        self.display_var = ctk.StringVar()
+        self.kana_var = ctk.StringVar()
+        self.translation_var = ctk.StringVar()
+
+        self.status = ctk.CTkLabel(self, text="", anchor="w", justify="left",
+                                   font=ctk.CTkFont(size=11 if compact else 12),
+                                   text_color=COLOR_SUBTITLE, wraplength=560)
+        self.status.pack(fill="x", pady=(4, 0))
+
+        self.fields = ctk.CTkFrame(self, fg_color="transparent")
+        line = ctk.CTkFrame(self.fields, fg_color="transparent")
+        line.pack(fill="x", pady=(4, 0))
+        for label, var, width in (("Name", self.display_var, 150),
+                                  ("Reading (kana)", self.kana_var, 150),
+                                  ("Translation", self.translation_var, 150)):
+            ctk.CTkLabel(line, text=label, text_color=COLOR_TITLE,
+                         font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
+            ctk.CTkEntry(line, textvariable=var, width=width, height=30, corner_radius=8,
+                         border_width=1, border_color=COLOR_ENTRY_BORDER,
+                         text_color=COLOR_ENTRY_TEXT, fg_color="white").pack(
+                side="left", padx=(0, 10))
+        self.verify_button = ctk.CTkButton(
+            line, text="Verify seiyuu name", width=150, height=30, corner_radius=8,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"), command=self.verify)
+        self.verify_button.pack(side="left")
+
+    # --- state
+    def set_profile(self, profile_path):
+        """Point the panel at whatever seiyuu this profile uses. Hides
+        itself entirely when there is no profile, or when the library
+        already has the voice's three names."""
+        self.speaker_path = ""
+        self.nickname = ""
+        profile = None
+        if profile_path and profile_path.strip():
+            try:
+                profile = dynamic_profile.load_profile(profile_path.strip())
+            except dynamic_profile.ProfileError:
+                profile = None
+        if profile is None:
+            self.pack_forget()
+            return False
+        self.speaker_path = profile["speaker_path"]
+        self.nickname = dynamic_profile.nickname(profile)
+        return self.refresh()
+
+    def refresh(self):
+        """True when the panel is showing (i.e. this seiyuu still needs
+        names). Also the place that reports a library that is not there."""
+        suite = suite_link.open_suite(_settings())
+        if suite is None:
+            self._show(False, f"Library not connected ({suite_link.load_error()}) - "
+                              f"chapters render without a seiyuu introduction.", COLOR_WARN)
+            return False
+        row = suite.seiyuu_by_path(self.speaker_path) if self.speaker_path else None
+        if row and suite.seiyuu_complete(row):
+            self._show(False, f"{self.nickname} is in the library as {row['display_name']} · "
+                              f"{row['reading_kana']} · {row['translation_name']}", COLOR_OK)
+            suite.close()
+            return False
+        if row:
+            self.display_var.set(row.get("display_name") or "")
+            self.kana_var.set(row.get("reading_kana") or "")
+            self.translation_var.set(row.get("translation_name") or "")
+        suite.close()
+        self._show(True, f"{self.nickname} is not in the library yet. Its chapters would have "
+                         f"no introduction line - add the names and Verify.", COLOR_WARN)
+        return True
+
+    def _show(self, fields, message, colour):
+        self.status.configure(text=message, text_color=colour)
+        if fields:
+            self.fields.pack(fill="x")
+        else:
+            self.fields.pack_forget()
+        self.pack(fill="x")
+
+    # --- verify
+    def verify(self):
+        display = self.display_var.get().strip()
+        kana = self.kana_var.get().strip()
+        translation = self.translation_var.get().strip()
+        if not self.speaker_path:
+            messagebox.showerror("Seiyuu", "Choose a usable profile first.")
+            return
+        if not (display and kana and translation):
+            messagebox.showerror("Seiyuu", "All three are needed: the name the reader shows, "
+                                           "its reading in kana for the TTS, and the name for "
+                                           "the subtitles.")
+            return
+        suite = suite_link.open_suite(_settings())
+        if suite is None:
+            messagebox.showerror("Library", f"The library is not reachable "
+                                            f"({suite_link.load_error()}).")
+            return
+        try:
+            row, what = suite.seiyuu_upsert(self.speaker_path, nickname=self.nickname,
+                                            display_name=display, reading_kana=kana,
+                                            translation_name=translation, overwrite=False)
+            if what == "conflict":
+                keep = (f"{row['display_name']} · {row['reading_kana']} · "
+                        f"{row['translation_name']}")
+                if not messagebox.askyesno(
+                        "Seiyuu name differs",
+                        f"The library already knows this speaker file as:\n\n{keep}\n\n"
+                        f"You typed:\n\n{display} · {kana} · {translation}\n\n"
+                        f"Overwrite the library's names?\n"
+                        f"(No keeps them - point the profile at another speaker file if this "
+                        f"is a different voice.)"):
+                    self.status.configure(text=f"Kept the library's names: {keep}",
+                                          text_color=COLOR_SUBTITLE)
+                    return
+                row, what = suite.seiyuu_upsert(self.speaker_path, nickname=self.nickname,
+                                                display_name=display, reading_kana=kana,
+                                                translation_name=translation, overwrite=True)
+            messages = {"added": "Seiyuu name added.", "unchanged": "Seiyuu name verified.",
+                        "updated": "Seiyuu name updated."}
+            self.status.configure(text=messages.get(what, what) + f"  {display} · {kana} · "
+                                                                  f"{translation}",
+                                  text_color=COLOR_OK)
+            self.fields.pack_forget()
+        finally:
+            suite.close()
+        if self.on_saved:
+            self.on_saved(self.speaker_path)
+
+
+def _settings():
+    """The generator's settings, for suite_root. Read lazily and never
+    written: this module must not touch settings.json."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "settings.json"), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
 # ------------------------------------------------------------ profile panel
@@ -311,7 +472,11 @@ class CustomizeWindow(ctk.CTkToplevel):
                              on_change=lambda path, style, b=base: self._assigned(b, path, style),
                              compact=True)
         panel.pack(side="left", fill="x", expand=True)
-        self.rows[base] = {"var": var, "label": label, "panel": panel}
+        # Names for the intro line, on the FIRST chapter that uses a seiyuu
+        # the library does not know; the rest of that seiyuu's chapters show
+        # nothing (user decision 2026-09-24).
+        seiyuu = SeiyuuPanel(card, on_saved=lambda _p: self._refresh_seiyuu_rows(), compact=True)
+        self.rows[base] = {"var": var, "label": label, "panel": panel, "seiyuu": seiyuu}
         self._apply_enabled(base)
 
     def _apply_enabled(self, base):
@@ -319,6 +484,21 @@ class CustomizeWindow(ctk.CTkToplevel):
         enabled = bool(row["var"].get())
         row["label"].configure(text_color=COLOR_TITLE if enabled else COLOR_DISABLED)
         row["panel"].set_enabled(enabled)
+
+    def _refresh_seiyuu_rows(self):
+        """One names panel per distinct profile among the TICKED rows, on
+        its first chapter. Profiles are looked at once each, not once per
+        row - a book can have seventy chapters on one profile."""
+        seen = set()
+        for base in sorted(self.rows):
+            row = self.rows[base]
+            path = (self.plan.get(base) or {}).get("profile_path", "")
+            key = os.path.normcase(os.path.abspath(path)) if path else ""
+            if not bool(row["var"].get()) or not key or key in seen:
+                row["seiyuu"].pack_forget()
+                continue
+            seen.add(key)
+            row["seiyuu"].set_profile(path)
 
     def _toggled(self, base):
         row = self.rows[base]
@@ -349,6 +529,7 @@ class CustomizeWindow(ctk.CTkToplevel):
         ready = [b for b in ticked if self.rows[b]["panel"].ok]
         self.count_label.configure(
             text=f"{len(ticked)} of {len(self.rows)} ticked · {len(ready)} ready")
+        self._refresh_seiyuu_rows()
         if self.on_change:
             self.on_change()
 
