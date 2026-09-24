@@ -191,7 +191,17 @@ def step_recipe(step_row, settings):
     if len(repair.normalise_for_compare(step_row["text"])) <= settings["word_span"]:
         return {"step": step_row["step"], "tts_len": step_row["tts_len"],
                 "text": step_row["text"], "clean": {}, "word_slips": slips,
-                "usable": True, "judged": False,
+                "usable": True, "judged": False, "why_not": "too short",
+                "faster": None, "default": None, "slower": None}
+    # Whisper and the book spell this sentence differently at every scale
+    # (score.flag_takes' low_agreement), so nothing it says about this step
+    # is about the seiyuu. Not judged, exactly like a too-short step: its
+    # lengths take the next longer step's recipe, and spelling noise cannot
+    # set a band (user decision 2026-09-24).
+    if any(t.get("low_agreement") for t in step_row["takes"]):
+        return {"step": step_row["step"], "tts_len": step_row["tts_len"],
+                "text": step_row["text"], "clean": {}, "word_slips": slips,
+                "usable": True, "judged": False, "why_not": "script and transcript never agree",
                 "faster": None, "default": None, "slower": None}
     clean = {}
     for scale in scales:
@@ -561,8 +571,8 @@ def render_md(book, speaker, chapters, book_bands, viable, book_limit, apply_boo
             if not s["usable"]:
                 note = "no clean scale - the seiyuu stops coping here"
             if not s["judged"]:
-                note = ("too short to judge - uses the next step's recipe"
-                        + (f"; {note}" if note else ""))
+                note = (f"{s.get('why_not', 'too short')} - not judged, uses the next step's "
+                        f"recipe" + (f"; {note}" if note else ""))
             o.append(f"| {s['step']} | {s['tts_len']} | {marks} | {fmt(s['faster'])} | "
                      f"{fmt(s['default'])} | {fmt(s['slower'])} | {note} |")
         o.append("")

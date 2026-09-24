@@ -166,7 +166,7 @@ def fingerprint(step, arm, scale, take, speaker, settings):
         # With the book's readings (2026-09-22): a step holding a reading
         # word no longer matches its old takes and is re-rendered (decision);
         # every other step's fingerprint is unchanged.
-        "tts_text": analyze.tts_text(step["text"], settings),
+        "tts_text": analyze.tts_text(step.get("spoken_text") or step["text"], settings),
         "scale": round(scale, 2),
         "arm": arm,
         "take": take,
@@ -324,7 +324,8 @@ def render_round(jobs, speaker, settings, root, log):
             os.remove(job["marker"])
         seed = settings["fixed_seeds"][job["take"] - 1] if job["arm"] == "seeded" else None
         payload_jobs.append({"index": index,
-                             "text": analyze.tts_text(job["step"]["text"], settings),
+                             "text": analyze.tts_text(job["step"].get("spoken_text") or job["step"]["text"],
+                                                      settings),
                              "output_wav": job["wav"],
                              "duration_scale": job["scale"],
                              "seed": seed})

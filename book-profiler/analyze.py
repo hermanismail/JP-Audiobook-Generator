@@ -61,6 +61,8 @@ if GENERATOR_DIR not in sys.path:
     sys.path.insert(0, GENERATOR_DIR)
 import text_pipeline as tp  # noqa: E402
 import dynamic_profile  # noqa: E402
+import furigana  # noqa: E402
+import suite_link  # noqa: E402
 
 DEFAULT_SETTINGS = {
     "irodori_root": "C:\\Irodori-TTS",
@@ -131,6 +133,10 @@ def add_run_options(parser, takes=False):
     # which the profiler does not know). TTS text and Whisper comparison
     # only - lengths stay the book's own, as in the generator.
     parser.add_argument("--readings", help="the book's readings.json (optional)")
+    # The furigana decisions live in the suite library, keyed by book slug.
+    # Without this the annotations are stripped before measuring, which is
+    # what an undecided book renders as anyway.
+    parser.add_argument("--furigana-book", help="book slug in the suite library (optional)")
     if takes:
         parser.add_argument("--arms", help="comma list, e.g. 'random' or 'seeded,random'")
         parser.add_argument("--takes", type=int, help="takes per arm per scale")
@@ -147,6 +153,19 @@ def apply_run_options(settings, args):
             settings["readings"] = dynamic_profile.load_readings(args.readings)
         except dynamic_profile.ProfileError as e:
             raise SystemExit(f"--readings: {e}")
+    settings["furigana"] = set()
+    if getattr(args, "furigana_book", None):
+        suite = suite_link.open_suite(settings)
+        if suite is None:
+            raise SystemExit(f"--furigana-book: the suite library is not reachable "
+                             f"({suite_link.load_error()})")
+        try:
+            book = suite.book_by_slug(args.furigana_book)
+            if book is None:
+                raise SystemExit(f"--furigana-book: no book '{args.furigana_book}' in the library")
+            settings["furigana"] = suite_link.furigana_applied(suite, book)
+        finally:
+            suite.close()
     if getattr(args, "arms", None):
         arms = [a.strip() for a in args.arms.split(",") if a.strip()]
         unknown = [a for a in arms if a not in ("seeded", "random")]
@@ -302,10 +321,18 @@ HEADING_END_OK = "。？…！!?、" + tp.CLOSING_BRACKETS
 TERMINATOR_END_RE = re.compile(r"(?:。|？|……)[" + re.escape(tp.CLOSING_BRACKETS) + r"]*$")
 
 
-def analyse_chapter(path, engine):
+def analyse_chapter(path, engine, settings=None):
+    """`settings` carries the book's readings and furigana decisions; with
+    none, the text is measured as the author wrote it."""
+    settings = settings or {}
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read()
     name = os.path.splitext(os.path.basename(path))[0]
+
+    # Furigana is applied (or stripped) before anything is measured - the
+    # generator sends the reading, so the profiler must measure the
+    # reading (user decision 2026-09-22/24).
+    raw, spans = furigana.mark(raw, settings.get("furigana") or set())
 
     sections = tp.split_sections(raw)
     lines_per_section = [tp.split_lines(s) for s in sections]
@@ -318,8 +345,11 @@ def analyse_chapter(path, engine):
 
     sentences, skipped = [], []
     for unit in units:
-        text = unit["text"]
-        engine_text = engine(text)
+        marked = unit["text"]
+        text = furigana.display(marked)              # the book's wording
+        # Measured as it will be SPOKEN: furigana applied, then the book's
+        # readings. Lengths pick the band, so they must match the request.
+        engine_text = engine(spoken_text(furigana.spoken(marked, spans), settings))
         if not engine_text or tp.PUNCT_ONLY_RE.fullmatch(engine_text):
             skipped.append(text)
             continue
@@ -330,6 +360,7 @@ def analyse_chapter(path, engine):
             "line": unit["line"],
             "gap_before": unit["gap_before"],
             "text": text,
+            "spoken_text": furigana.spoken(marked, spans),
             "engine_text": engine_text,
             "display_len": len(text),
             "tts_len": len(engine_text),
@@ -401,12 +432,13 @@ def histogram(values, width=10):
 
 # ------------------------------------------------------------ splitting
 
-def split_table(sentences, limits, engine):
+def split_table(sentences, limits, engine, settings=None):
     """For each candidate comfortable length L: how many sentences exceed
     it, what cutting them does, and which ones cannot be brought under it.
 
-    Every cut is checked to rejoin byte-identically; `split_drift` must be 0."""
-    measure = lambda text: len(engine(text))
+    Every cut is checked to rejoin byte-identically; `split_drift` must be 0.
+    Cuts are measured as the sentence will be SPOKEN, like the bands."""
+    measure = lambda text: len(engine(spoken_text(text, settings or {})))
     rows = []
     for limit in limits:
         over = [s for s in sentences if s["tts_len"] > limit]
@@ -574,6 +606,10 @@ def choose_length_steps(sentences, unmeasured, steps, min_spoken):
             "chapter": pick["chapter"],
             "sentence_index": pick["index"],
             "text": pick["text"],
+            # As it will be SPOKEN (furigana applied); the sweep renders
+            # this and the scorer compares Whisper against it, so a step
+            # measures the same text the generator would send.
+            "spoken_text": pick["spoken_text"],
             "engine_text": pick["engine_text"],
         })
     chosen.sort(key=lambda c: c["tts_len"])
@@ -628,7 +664,7 @@ def run(args, settings):
     if not paths:
         raise SystemExit("No .txt chapter files found.")
 
-    chapters = [analyse_chapter(p, engine) for p in paths]
+    chapters = [analyse_chapter(p, engine, settings) for p in paths]
     symbols, alnum = symbol_inventory(chapters, engine)
     unmeasured = {s["char"] for s in symbols if s["status"] == "unmeasured"}
     years, leftover_zero = kanji_years(chapters)
@@ -659,7 +695,7 @@ def run(args, settings):
             "normal_mode_tts_len": length_stats(chapter["normal_lengths"]),
             "histogram": histogram(lengths),
             "split": [{k: v for k, v in row.items() if k != "stuck"}
-                      for row in split_table(sents, limits, engine)],
+                      for row in split_table(sents, limits, engine, settings)],
             "usable_sentences": len(usable),
             "longest_overall": None if not longest else {
                 "tts_len": longest["tts_len"], "index": longest["index"],
@@ -686,7 +722,7 @@ def run(args, settings):
                 [v for c in chapters for v in c["normal_lengths"]]),
             "histogram": histogram(lengths),
             "drift": sum(c["drift"] for c in chapters),
-            "split": split_table(all_sentences, limits, engine),
+            "split": split_table(all_sentences, limits, engine, settings),
         },
         "chapters": per_chapter,
         "symbols": symbols,
