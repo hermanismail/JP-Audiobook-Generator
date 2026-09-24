@@ -80,6 +80,12 @@ SCORE_DEFAULTS = {
     "overrun_chars": 2,
     # A take this far below its step's median similarity is flagged too.
     "step_drop": 0.15,
+    # When the best take of a step scores below this, Whisper and the book
+    # simply spell the sentence differently (林檎 vs リンゴ): similarity and
+    # a long length ratio stop meaning anything for that step. See
+    # flag_takes(). Chosen from the data: 54 of 56 steps measured on tanya
+    # and hayamin have a best take at 0.88 or above.
+    "step_agreement": 0.85,
 }
 
 
@@ -159,6 +165,23 @@ def read_transcript(wav):
     }
 
 
+def fold_kana(text):
+    """Katakana folded to hiragana, so a transcript that writes リンゴ for a
+    script's りんご is not counted as a mismatch (user decision 2026-09-24).
+    Whisper chooses a script of its own; only the sounds are comparable."""
+    out = []
+    for ch in text or "":
+        code = ord(ch)
+        # Full-width katakana ァ..ヶ -> hiragana; ー and ヽ are left alone.
+        out.append(chr(code - 0x60) if 0x30A1 <= code <= 0x30F6 else ch)
+    return "".join(out)
+
+
+def compare(script, heard):
+    """similarity() on kana-folded text."""
+    return repair.similarity(fold_kana(script), fold_kana(heard))
+
+
 def overrun(script, heard, k=3):
     """How many transcript characters follow the point where the script's
     last `k` characters were heard (punctuation stripped from both). 0 when
@@ -167,8 +190,8 @@ def overrun(script, heard, k=3):
 
     The ending is matched at its own occurrence count, so a sentence that
     says its last word twice on purpose is not a repeat."""
-    a = repair.normalise_for_compare(script)
-    b = repair.normalise_for_compare(heard)
+    a = fold_kana(repair.normalise_for_compare(script))
+    b = fold_kana(repair.normalise_for_compare(heard))
     if len(a) < k:
         return 0
     ending = a[-k:]
@@ -193,7 +216,7 @@ def score_chapter(root, steps, speaker, settings):
                 fp = marker["fingerprint"]
                 wav, _m = sweep.take_paths(root, step, fp["arm"], scale, fp["take"])
                 t = read_transcript(wav)
-                ratio, length_ratio = repair.similarity(spoken, t["heard"])
+                ratio, length_ratio = compare(spoken, t["heard"])
                 takes.append(dict(t, scale=scale, arm=fp["arm"], take=fp["take"],
                                   wav=wav, seconds=marker["seconds"],
                                   used_seed=marker["used_seed"],
@@ -213,6 +236,16 @@ def flag_takes(text, takes, settings):
     `ran_long` in place; return the step's median similarity. Needs only
     what a score.json take already holds, so it can re-judge old scores."""
     median = statistics.median(t["similarity"] for t in takes) if takes else 0
+    # A step where even the BEST take disagrees with its script is one
+    # Whisper spells differently, not one the seiyuu read badly: wall's
+    # 林檎をもいだり…, transcribed リンゴ / りんご, never scores above 0.84
+    # although the reads are correct. Every signal is then noise -
+    # similarity, the length ratio (kana is longer than kanji) and the
+    # step's own median alike - so recipe.py does not judge such a step at
+    # all; it is recorded here and the flags below stay as a shortlist for
+    # a person (user decision 2026-09-24).
+    low_agreement = bool(takes) and max(t["similarity"] for t in takes) \
+        < settings.get("step_agreement", 0.85)
     for t in takes:
         reasons = []
         if t["similarity"] < settings["similarity_threshold"]:
@@ -229,6 +262,7 @@ def flag_takes(text, takes, settings):
         t["ran_long"] = (lr is not None and lr > settings["length_ratio_high"]) or \
             t["overrun"] >= settings["overrun_chars"]
         t["step_median"] = round(median, 4)
+        t["low_agreement"] = low_agreement
         t["flags"] = reasons
     return median
 
@@ -254,7 +288,10 @@ def render_md(book, chapter, speaker, settings, rows):
          f"`similarity()`. Flagged when similarity < {settings['similarity_threshold']}, "
          f"length ratio outside {settings['length_ratio_low']}-{settings['length_ratio_high']}, "
          f"{settings['overrun_chars']}+ characters heard after the sentence's ending, "
-         f"or more than {settings['step_drop']} below the step's own median. A shortlist, "
+         f"or more than {settings['step_drop']} below the step's own median. Kana is folded "
+         f"before comparing, and a step whose best take scores below "
+         f"{settings['step_agreement']} is judged without the similarity and long-ratio "
+         f"tests - Whisper spells it differently. A shortlist, "
          "not a verdict.\n",
          f"**{len(every)} takes, {sum(1 for t in every if t['flags'])} flagged.**\n"]
 

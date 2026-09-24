@@ -852,6 +852,25 @@ profiles byte-identical in bands/L/pace targets; marinka -> default only
 tail used to void the whole step, so L 76 -> 98 with a new 77-98 band
 x1.1/1.4/1.7, all her other bands identical.
 
+### Whisper spells differently - two rules (2026-09-24)
+
+Found while validating the spoken-text measurement on hayamin: wall's
+`林檎をもいだり、獣の世話をしたり……` is transcribed `リンゴ` or all in
+kana, so **correct reads scored 0.55-0.84** and the step's band was set to
+x0.8, which made the book recipe non-viable. The audio was fine.
+
+- **Kana is folded** (katakana -> hiragana) before comparing, so a
+  transcript's `リンゴ` matches a script's `りんご`. Kanji against kana it
+  cannot fix.
+- **A step whose BEST take scores below `step_agreement` (0.85) is not
+  judged at all**, like a too-short step: similarity, the length ratio
+  (kana is longer than kanji) and the step's own median are all noise
+  there, so its lengths take the next longer step's recipe and spelling
+  noise cannot set a band. 54 of the 56 steps measured on tanya and
+  hayamin have a best take at 0.88 or above, so this is rare.
+
+With both, hayamin's book recipe came out viable, L=115, default + faster.
+
 ### Readings in the profiler (2026-09-22)
 
 `--readings <the book's readings.json>` on every stage, and an optional
