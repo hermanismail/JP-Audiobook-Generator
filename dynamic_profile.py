@@ -355,6 +355,10 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section", read
                 tp.prepare_tts_text_dynamic(furigana.spoken(piece, spans)), readings)
             used = dict(furigana.applied_in(piece, spans), **used)
             out.append({
+                # The source section this came from (blank-line separated),
+                # so Preview Chapters can group requests the way the book
+                # is written. 0 when the caller did not say.
+                "section": item[4] if len(item) > 4 else 0,
                 "sentence": number,
                 "piece": piece_number,
                 "display_text": shown,
@@ -381,6 +385,7 @@ def plan_chapter(raw_text, profile, style_key, engine, readings=None, furigana_a
     written; the rest of the annotations are stripped. See furigana.py."""
     marked, spans = furigana.mark(raw_text, furigana_applied or set())
     units = tp.dynamic_sentences(marked)
-    return plan_pieces([(u["text"], u["gap_before"], u["removed_before"], u["removed_after"])
+    return plan_pieces([(u["text"], u["gap_before"], u["removed_before"], u["removed_after"],
+                         u.get("section", 0))
                         for u in units], profile, style_key, engine, readings=readings,
                        spans=spans)

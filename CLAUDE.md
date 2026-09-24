@@ -347,7 +347,12 @@ calls for with that seiyuu.
   with no header the name goes first, then a blank line, then the prose. It
   becomes its own `sync.json` entry at a 1.0 s sentence gap, the reader sees
   the written name and the engine is sent the kana - done with a reading
-  pair, so no special case in `plan_pieces`. Measured 2026-09-24: `：`
+  pair, so no special case in `plan_pieces` - as TWO pairs
+  (`suite_link.intro_readings`), the written name AND its
+  whitespace-collapsed form, because `split_paragraphs()` collapses runs of
+  whitespace: `早見 沙織` reaches `plan_pieces` as `早見沙織`, a pair keyed
+  to the spaced name matched nothing, and hayamin's credit went to the
+  engine in kanji (found 2026-09-24 in the preview). Measured 2026-09-24: `：`
   survives the engine's normaliser as `:` and is spoken as a short pause,
   not a word (three variants, same transcript, 3.60 / 3.40 / 3.32 s), so
   one template serves both columns. The name is added to `glossary.json`
@@ -376,7 +381,86 @@ calls for with that seiyuu.
     `main` over 7 chapters x 2 styles). `display()` drops markers for the
     reader, `spoken()` swaps in the reading for the engine.
   - The review window (`furigana_review.py`) shows only pairs with no
-    decision for that book; Save & Run warns if any are left.
+    decision; Save & Run warns if any are left. Each card also shows the
+    SENTENCE the pair is first written in, with the annotation in bold on
+    yellow (`ui_common.mark_tag`), because `下(もと)` cannot be judged on
+    its own.
+  - **A decision is only as wide as the evidence** (user, 2026-09-24, after
+    177 readings appeared to render two chapters). The review is scoped to
+    the chapters SELECTED FOR THE RUN: "assign for all" is the whole book
+    as before, Customize scans only what is ticked, and with nothing ticked
+    the button does not open. Counts come back per chapter (`1st written in
+    chapter_001 · without furigana ×1 in chapter_001, ×2 in chapter_002`),
+    the whole-book radio says "everywhere in the 2 chapter(s) selected",
+    and the row stores those chapters (suite schema **v2**, `chapters`
+    JSON, NULL = whole book). The pair comes back for review when a chapter
+    outside that list is selected; deciding again there widens the scope.
+    A chapter-scoped reading CANNOT go into `readings.json` (a global
+    replace), so it stays in the DB and the export writes whole-book rows
+    only - `run_audiobook` asks the library per chapter and merges.
+  - Layout: one TAG per pair, colour-coded (grey undecided, green read as
+    written, red left to the seiyuu, yellow open, orange border for an
+    aside); clicking one opens its card below. Every pair carries its
+    default answer from the start, so Save means "these answers", not
+    "the ones I scrolled to".
+- **Preview Chapters** (`preview.py` + `preview_window.py`, built
+  2026-09-24): a button under Profile Path opens what every chosen chapter
+  will SEND and SHOW, built with the same `plan_chapter()` the render uses,
+  so furigana, readings and the seiyuu credit are all in it. Chapters down
+  the left, a non-editable summary on top, then one box per SOURCE SECTION
+  split into two columns (TTS left, reader right), one line per request.
+  Both columns are editable; the two must keep the same number of lines,
+  because a request is one line on each side.
+  - **Save never touches the chapter's .txt** (user decision): it writes a
+    PLAN into `<temp>/preview/<book>/<chapter>.plan.json` and records every
+    changed box in the library's `chapter_edits` (with the hash of the
+    section it was made against). The next render of that chapter uses the
+    plan INSTEAD of planning, then deletes it.
+  - A plan is bound to the chapter text, the profile and the style by
+    `source_hash`: change any of them and it is ignored and removed, so an
+    edited preview can never be applied to different text. A corrupt plan
+    is treated as no plan.
+  - After a failed or stopped run, `preview.salvage()` keeps the plans of
+    chapters still to render and removes the rest.
+  - An edited TTS line is re-priced from its new text (Phase 3's rule), and
+    a small TTS-only change is offered as a book reading - compared against
+    the TTS text the preview BUILT, never against the reader column, which
+    differs on every line a reading touched and offered the seiyuu credit
+    (`早見沙織 → はやみさおり`) on a save that had not touched it.
+  - A change to how the CREDIT is spoken updates the VOICE's row instead
+    (user, 2026-09-24): it belongs to the seiyuu, not to one book's
+    readings, so every book using that voice follows it. The diff gives
+    stretches, not the whole name (`お → を`), so the new kana is built by
+    putting each stretch back into the stored one.
+  - **Refresh** rebuilds the open chapter from the chapter file and the
+    library, which is how decisions saved in the furigana review reach a
+    preview that is already open; unsaved edits are asked about first, and
+    the section that was open stays open.
+  - The two columns **scroll together** (user, 2026-09-24 - a request is
+    one line on each side, so reading them apart defeats the point): each
+    box's `yscrollcommand` moves its partner as well as its own scrollbar,
+    and the partner's callback stops because the fractions already match.
+  - The open section's boxes **fill the window** rather than a fixed 420 px,
+    re-fitted on resize. The room is measured in SCREEN coordinates: inside
+    a CTkScrollableFrame `winfo_y()` is relative to an inner canvas as tall
+    as its contents, so it does not shrink with the window.
+  - **Section 1 stays open** (the chapter header and the seiyuu credit, what
+    a run is double-checked on); every later section is a numbered tag in a
+    rounded box, and clicking one opens its two columns - yellow while
+    open, violet when it holds an unsaved edit, green once it is in the
+    plan. Leaving a tag keeps what was typed (`held`), so an edit survives
+    moving between sections and between chapters.
+  - **Blue = furigana with no decision yet** (user, 2026-09-24): those pairs
+    are STRIPPED from this text, so without marking them the preview could
+    not be used to judge the review - which is what it is for. Marked by
+    word, EVERY occurrence, because bare occurrences are exactly what the
+    review asks about. wall chapter_001: 12 pairs waiting, 15 stretches.
+    Yellow wins where both would apply (`tag_raise`).
+  - Every stretch a reading or a furigana pair decided is bold on yellow -
+    the kana in the TTS column, the word it stands for in the reader
+    column - taken from the piece's own `readings`, so nothing is guessed.
+    `CTkTextbox.tag_config` refuses a font, so `ui_common.mark_tag` puts
+    the tag on the tk.Text underneath, built from the font already shown.
 - **The suite library** (`suite_link.py` -> `F:\AUDIOBOOK-CREATION-SUITE`):
   best-effort in every call, so a missing library never stops a render. A
   book is matched by its OUTPUT FOLDER; a book the database does not know,
@@ -1274,6 +1358,12 @@ block-buffers stdout when it is a pipe. Without `-u` the per-chunk progress
 sits in an 8KB buffer and arrives hours later, in one lump. `gui_settings.py`
 passes it when launching `run_audiobook.py`; `run_audiobook.py` passes it when
 launching `translate_pipeline.py`.
+
+**A file dialog with no `parent` belongs to the ROOT window.** When it
+closes Windows raises its owner, so Browse inside the Customize window
+sent Customize behind the settings window (2026-09-24). Pass
+`parent=self.winfo_toplevel()` - `subtitle_window.py` always did - and
+lift that window afterwards.
 
 **Tk packing order decides who gets space.** `_title_block` packs its frame
 immediately, so a title packed before a right-hand control with

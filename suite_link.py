@@ -27,6 +27,7 @@ Stdlib only - this is imported from the Irodori venv.
 """
 
 import os
+import re
 import sys
 
 DEFAULT_SUITE_ROOT = r"F:\AUDIOBOOK-CREATION-SUITE"
@@ -126,11 +127,21 @@ def intro_line(seiyuu, template="朗読者：{name}"):
     return template.format(name=display), template.format(name=kana)
 
 
-def furigana_applied(suite, book):
-    """{(word, reading)} the person has approved for this book - 'book' and
-    'once' alike, because both are spoken where they are written. Rejected
-    pairs are absent, so their parens are simply stripped."""
+def furigana_applied(suite, book, chapter=None):
+    """{(word, reading)} the person has approved - 'book' and 'once' alike,
+    because both are spoken where they are written. Rejected pairs are
+    absent, so their parens are simply stripped.
+
+    With `chapter`, a decision made while only other chapters were selected
+    is left out: it was taken on evidence from those chapters (schema v2).
+    An older library without the column answers the same as before."""
     if not uses_new_pipeline(book):
+        return set()
+    try:
+        return suite.furigana_applied(book["id"], chapter)
+    except AttributeError:          # a library older than schema v2
+        pass
+    except Exception:
         return set()
     try:
         rows = suite.conn.execute(
@@ -139,6 +150,34 @@ def furigana_applied(suite, book):
         return {(r["word"], r["reading"]) for r in rows}
     except Exception:
         return set()
+
+
+def readings_for(suite, book, chapter=None):
+    """The book's readings as dicts, narrowed to `chapter` - a reading
+    decided from two chapters does not apply to a third."""
+    if suite is None or not uses_new_pipeline(book):
+        return []
+    try:
+        return [dict(r) for r in suite.readings_for_book(book["id"], chapter=chapter)]
+    except Exception:
+        return []
+
+
+def intro_readings(intro):
+    """[{word, reading}] that turns the written credit into kana.
+
+    Both the form written into the text AND its whitespace-collapsed form,
+    because `split_paragraphs()` collapses runs of whitespace: a display
+    name with a space in it (`早見 沙織`) reaches `plan_pieces` as
+    `朗読者：早見沙織`, and a pair keyed to the spaced form never matched -
+    the engine was sent the kanji. Found 2026-09-24 in the preview, on
+    hayamin."""
+    display, tts = intro if intro else (None, None)
+    if not display or not tts:
+        return []
+    forms = {display, re.sub(r"\s+", "", display)}
+    return [{"word": word, "reading": tts}
+            for word in sorted(forms, key=len, reverse=True)]
 
 
 def sync_readings(suite, book, output_folder):

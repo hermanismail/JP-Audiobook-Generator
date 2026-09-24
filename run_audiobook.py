@@ -9,6 +9,7 @@ import shutil
 import text_pipeline
 import dynamic_profile
 import furigana
+import preview
 import suite_link
 
 # This script prints Japanese - chapter text, readings, the seiyuu credit -
@@ -1026,7 +1027,7 @@ def insert_intro_line(raw_text, line):
 
 
 def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, intro=None,
-                            furigana_applied=None):
+                            furigana_applied=None, book_slug=None):
     """One chapter in dynamic profile mode. `assignment` comes from
     resolve_dynamic_plan(); `engine` is dynamic_profile.make_engine();
     `readings` is dynamic_profile.load_readings() - TTS text only.
@@ -1045,13 +1046,24 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
 
     with open(chapter_path, "r", encoding="utf-8") as f:
         raw_text = f.read()
+    # A preview plan is bound to the FILE's text, before the credit is put
+    # in front of it - the plan already contains that line.
+    plan, note = (preview.usable_plan(TEMP_DIR, book_slug, base, raw_text, profile["_path"],
+                                      style) if book_slug else (None, None))
+    if note:
+        print(f"Preview: {note}")
+    if plan is None and book_slug:
+        preview.discard_plan(TEMP_DIR, book_slug, base)
+
     intro_display, intro_tts = intro if intro else (None, None)
-    if intro_display:
+    if plan is not None:
+        intro_display = plan.get("intro_line")
+    elif intro_display:
         raw_text = insert_intro_line(raw_text, intro_display)
         # The reader shows the written name, the engine is sent the kana.
         # A reading does that without a special case in plan_pieces; it is
         # the longest word in play, so it is applied first.
-        readings = sorted((readings or []) + [{"word": intro_display, "reading": intro_tts}],
+        readings = sorted((readings or []) + suite_link.intro_readings(intro),
                           key=lambda r: -len(r["word"]))
         print(f"Intro line: {intro_display}  (spoken: {intro_tts})")
 
@@ -1059,14 +1071,20 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
     # stripped so the engine never sees the parens (which it would read as
     # a pause and then the reading - see furigana.py).
     found = furigana.pairs(raw_text)
-    if found:
+    if found and plan is None:
         approved = {p: n for p, n in found.items() if p in (furigana_applied or set())}
         print(f"Furigana: {sum(found.values())} annotation(s), "
               f"{sum(approved.values())} applied, "
               f"{sum(found.values()) - sum(approved.values())} stripped "
               f"(the seiyuu decides those)")
-    pieces, skipped = dynamic_profile.plan_chapter(raw_text, profile, style, engine, readings,
-                                                   furigana_applied)
+    # The plan already holds the text as the preview showed it - furigana,
+    # readings and the credit included - so it is rendered as it stands.
+    if plan is not None:
+        pieces = preview.pieces_from_plan(plan, profile, style, engine)
+        skipped = []
+    else:
+        pieces, skipped = dynamic_profile.plan_chapter(raw_text, profile, style, engine, readings,
+                                                       furigana_applied)
     if not pieces:
         print(f"Error: No sentences produced for {base} - is the file empty?")
         return
@@ -1203,10 +1221,20 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
         "readings_applied": {w: r for p in pieces for w, r in (p["readings"] or {}).items()},
         "furigana_applied": sum(n for pair, n in furigana.pairs(raw_text).items()
                                 if pair in (furigana_applied or set())),
+        "edits_applied": sum(1 for p in pieces if p.get("edited")),
+        "edit_ids": (plan or {}).get("edit_ids") or [],
         "seconds": round(sum(wav_duration(p["wav"]) for p in rendered
                              if os.path.exists(p["wav"])), 2),
         "render_json_path": os.path.join(OUTPUT_FOLDER, f"{base}.render.json"),
     }
+
+    # The plan has been rendered, so it goes (user decision 2026-09-24:
+    # the temp file lives only until the chapter is generated). What was
+    # changed stays in the library's chapter_edits.
+    if plan is not None and book_slug:
+        preview.discard_plan(TEMP_DIR, book_slug, base)
+        print(f"Preview: plan for {base} used and removed "
+              f"({summary['edits_applied']} edited line(s))")
 
     if CLEAN_TEMP_AFTER_RUN:
         print(f"Cleaning up temporary files in {TEMP_DIR}...")
@@ -1224,14 +1252,18 @@ def record_chapter(suite, book, seiyuu, summary):
     if suite is None or not book:
         return
     try:
-        suite.add_chapter_record(
+        record_id = suite.add_chapter_record(
             book["id"], summary["chapter"],
             seiyuu_id=(seiyuu or {}).get("id"),
             profile_path=summary["profile_path"], style=summary["style"],
             sync_entries=summary["sync_entries"], intro_line=summary["intro_line"],
             readings_applied=summary["readings_applied"], seconds=summary["seconds"],
             furigana_applied=summary.get("furigana_applied"),
+            edits_applied=summary.get("edits_applied"),
             render_json_path=summary["render_json_path"])
+        # The preview edits that went into this render now point at it.
+        if summary.get("edit_ids"):
+            suite.mark_edits_applied(summary["edit_ids"], record_id)
         if seiyuu:
             suite.record_usage(seiyuu["id"], book["id"], summary["chapter"],
                                summary["profile_path"], summary["style"])
@@ -1422,6 +1454,20 @@ def main():
 
     print(f"Found {len(chapter_files)} chapters, {len(pending)} to process.")
 
+    # Preview plans left behind by a run that failed or was stopped
+    # (user decision 2026-09-24: salvage what is usable, clean up the
+    # rest). A plan for a chapter this run is not rendering, or one that
+    # cannot be read, can never be used again.
+    if new_pipeline and book:
+        kept, removed = preview.salvage(
+            TEMP_DIR, book["slug"],
+            {os.path.splitext(os.path.basename(f))[0] for f in pending})
+        if kept:
+            print(f"Preview plans found from an earlier run: {', '.join(kept)} - they will be "
+                  f"used unless the text, profile or style has changed since")
+        if removed:
+            print(f"Preview plans that can no longer be used were removed: {', '.join(removed)}")
+
     write_settings_snapshot(len(pending), dynamic_plan)
 
     for chapter_file in pending:
@@ -1439,8 +1485,25 @@ def main():
                 # So the credit translates with the spelling you chose.
                 print(f"  glossary.json: added {seiyuu['display_name']} "
                       f"= {seiyuu['translation_name']}")
-            summary = process_chapter_dynamic(chapter_file, assignment, engine, readings, intro,
-                                              furigana_ok)
+            # A furigana decision or a reading may have been made while
+            # only certain chapters were selected; it applies to those and
+            # no further (schema v2, decision 2026-09-24). So each chapter
+            # asks the library what reaches IT - the file's own readings
+            # are shared by all of them, as before.
+            chapter_readings, chapter_furigana = readings, furigana_ok
+            if new_pipeline and suite is not None:
+                scoped = suite_link.readings_for(suite, book, base)
+                extra = [r for r in scoped
+                         if not any(r["word"] == f["word"] for f in readings)]
+                chapter_readings = sorted(readings + extra, key=lambda r: -len(r["word"]))
+                chapter_furigana = suite_link.furigana_applied(suite, book, base)
+                dropped = len(furigana_ok) - len(chapter_furigana)
+                if dropped > 0:
+                    print(f"  {dropped} furigana decision(s) were made for other chapters "
+                          f"and are not applied to {base}")
+            summary = process_chapter_dynamic(chapter_file, assignment, engine,
+                                              chapter_readings, intro, chapter_furigana,
+                                              (book or {}).get("slug"))
             if summary and new_pipeline:
                 record_chapter(suite, book, seiyuu, summary)
         else:

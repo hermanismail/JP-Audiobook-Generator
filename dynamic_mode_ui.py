@@ -339,9 +339,17 @@ class ProfilePanel(ctk.CTkFrame):
     def _browse(self):
         current = self.path
         initial = os.path.dirname(current) if os.path.isfile(current) else os.getcwd()
-        chosen = filedialog.askopenfilename(title="Select Profile", initialdir=initial,
+        # The dialog must belong to the window the Browse button is in.
+        # Without `parent` it belongs to the root window, and Windows
+        # raises THAT one when the dialog closes - picking a profile in
+        # Customize sent Customize behind the settings window (found
+        # 2026-09-24). subtitle_window.py has always passed it.
+        top = self.winfo_toplevel()
+        chosen = filedialog.askopenfilename(parent=top,
+                                            title="Select Profile", initialdir=initial,
                                             filetypes=[("Profile", "profile_*.json"),
                                                        ("JSON", "*.json"), ("All files", "*.*")])
+        top.after(10, lambda: (top.lift(), top.focus_force()))
         if chosen:
             self.path_var.set(os.path.normpath(chosen))
 
