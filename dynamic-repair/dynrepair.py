@@ -50,6 +50,7 @@ however many times a chapter is repaired.
 
 import datetime
 import glob
+import importlib.util
 import json
 import os
 import re
@@ -68,6 +69,16 @@ for _path in (GENERATOR_DIR, REPAIR_DIR):
 import dynamic_profile  # noqa: E402
 import repair  # noqa: E402  - chapter-repair's engine, reused one-way
 import suite_link  # noqa: E402  - the generator's door to the library
+
+# book-profiler's scoring, by file path (its folder is not a package and
+# importing it as `score` must not drag the profiler's settings in).
+_score_spec = importlib.util.spec_from_file_location(
+    "profiler_score", os.path.join(GENERATOR_DIR, "book-profiler", "score.py"))
+try:
+    score = importlib.util.module_from_spec(_score_spec)
+    _score_spec.loader.exec_module(score)
+except Exception:                       # the profiler is optional
+    score = None
 
 DEFAULT_SETTINGS = {
     "irodori_root": "C:\\Irodori-TTS",
@@ -630,16 +641,50 @@ def scan(chapter, log, on_proc=None):
 
 
 def flagged(rows, threshold, min_chars):
-    """Worst first, as chapter-repair ranks them - minus the parts too short
-    to judge. A shortlist, never a verdict: Whisper mishears too."""
+    """Worst first - minus the parts too short to judge. A shortlist, never
+    a verdict: Whisper mishears too.
+
+    Since 2026-09-25 it uses book-profiler's scoring where that is
+    available (user decision): kana is FOLDED before comparing, so a
+    transcript's `リンゴ` matches a script's `りんご` instead of scoring
+    0.55, and `overrun` catches a tail spoken after the sentence ended,
+    which a similarity alone misses. Without the profiler on the machine
+    it falls back to exactly the old rule."""
     out = []
     for row in rows:
         if len(repair.normalise_for_compare(row["text"])) < min_chars:
+            continue
+        if score is not None:
+            judged = rescore(row)
+            if judged["flagged"]:
+                out.append(row)
             continue
         lr = row["length_ratio"]
         if row["similarity"] < threshold or lr is None or not (0.65 <= lr <= 1.45):
             out.append(row)
     return sorted(out, key=lambda r: r["similarity"])
+
+
+def rescore(row):
+    """{similarity, length_ratio, overrun, flagged} for one scanned part,
+    with kana folded. `row` is what repair.score_chapter() produced."""
+    if score is None:
+        return {"similarity": row.get("similarity"), "length_ratio": row.get("length_ratio"),
+                "overrun": 0, "flagged": None}
+    heard, script = row.get("heard") or "", row.get("text") or ""
+    settings = score.SCORE_DEFAULTS
+    # Kana folded on both sides, so a transcript's リンゴ matches りんご.
+    # compare() is repair.similarity() on folded text: (ratio, length ratio).
+    similarity, ratio = score.compare(script, heard)
+    over = score.overrun(script, heard)
+    flagged_now = (similarity < settings["similarity_threshold"]
+                   or ratio is None
+                   or not (settings["length_ratio_low"] <= ratio
+                           <= settings["length_ratio_high"])
+                   or over >= settings["overrun_chars"])
+    return {"similarity": round(similarity, 3),
+            "length_ratio": round(ratio, 3) if ratio is not None else None,
+            "overrun": over, "flagged": bool(flagged_now)}
 
 
 def listen_clip(chapter, index, pad=1.0):
@@ -745,6 +790,128 @@ def generate_takes(chapter, index, tts_text, request, style, count, readings_use
 
 # ------------------------------------------------------------ apply
 
+REPAIR_KINDS = ("hallucination", "reading", "pace", "preference", "other")
+
+
+def suggest_kind(chapter, index, edit, part=None):
+    """What this repair most likely was, from what actually changed - the
+    person confirms it before Apply (user decision 2026-09-25).
+
+        the TTS text changed   -> 'reading'   (a readings problem, and it
+                                               never counts against a voice)
+        the scan flagged it    -> 'hallucination'
+        a different request    -> 'pace'
+        nothing but the seed   -> 'preference'
+    """
+    # `part` is the state BEFORE the repair. apply() updates render.json in
+    # place, so by the time the library is told, chapter.part() already
+    # describes the new audio - the caller must hand the old state in.
+    part = part or chapter.part(index)
+    take = edit.get("take") or edit
+    if (take.get("tts_text") or part["tts_text"]) != part["tts_text"]:
+        return "reading"
+    # The scan row travels on the take record (the window puts it there).
+    row = edit.get("scan_row") or (edit.get("take") or {}).get("scan_row")
+    if row and (rescore(row)["flagged"] or row.get("similarity", 1) < 0.72):
+        return "hallucination"
+    if take.get("request") and take["request"] != part["request"]:
+        return "pace"
+    return "preference"
+
+
+def record_repairs(chapter, edits, log, kinds=None, reading_scope=None, before=None):
+    """Tell the library what was repaired, and why (2026-09-25).
+
+    `kinds` is {part index: kind}; anything missing is suggested. Readings
+    the repair used are written back with `reading_scope` - {word: "book"
+    or "chapter"} - because a decision should be as wide as the evidence
+    and a repair has seen ONE chapter (user decision: ask each time,
+    defaulting to the chapter).
+
+    Best-effort: a library that is not there must never fail an apply that
+    has already changed the audio."""
+    suite = open_library(chapter.settings)
+    if suite is None:
+        return {"recorded": 0, "readings": 0, "note": "library not reachable"}
+    written = readings_written = 0
+    try:
+        book = book_for(suite, chapter.book_slug, (chapter.profile or {}).get("book"),
+                        chapter.book)
+        if book is None or not suite_link.uses_new_pipeline(book):
+            return {"recorded": 0, "readings": 0,
+                    "note": "the library does not track this book - nothing recorded"}
+        seiyuu = None
+        try:
+            seiyuu = suite.seiyuu_by_path((chapter.profile or {}).get("speaker_path") or "")
+        except Exception:
+            seiyuu = None
+        for edit in edits:
+            index = edit["index"]
+            # The part as it was BEFORE this repair - apply() has already
+            # rewritten render.json by the time we get here.
+            part = (before or {}).get(index) or chapter.part(index)
+            take = edit.get("take") or {}
+            kind = (kinds or {}).get(index) or suggest_kind(chapter, index, edit, part)
+            row = edit.get("scan_row") or (take or {}).get("scan_row")
+            judged = rescore(row) if row else {}
+            new_readings = {w: r for w, r in (take.get("readings") or {}).items()
+                            if part["readings"].get(w) != r}
+            word, reading = next(iter(new_readings.items()), (None, None))
+            request = take.get("request") or {}
+            if suite.add_repair(
+                    book["id"], chapter.base, sync_index=index,
+                    seiyuu_id=(seiyuu or {}).get("id"),
+                    profile_path=(chapter.profile or {}).get("path"),
+                    style=take.get("style"), original_style=chapter.style,
+                    duration_scale=request.get("duration_scale"),
+                    kind=kind, source="applied",
+                    word=word, reading=reading,
+                    text_changed=(take.get("tts_text") or "") != part["tts_text"],
+                    similarity=judged.get("similarity"),
+                    length_ratio=judged.get("length_ratio"),
+                    overrun=bool(judged.get("overrun"))):
+                written += 1
+            for w, r in new_readings.items():
+                scope = (reading_scope or {}).get(w, "chapter")
+                suite.reading_upsert(
+                    book["id"], w, r, scope="book", origin="repair",
+                    chapter=chapter.base,
+                    chapters=None if scope == "book" else [chapter.base],
+                    on_conflict="overwrite")
+                readings_written += 1
+        note = (f"{written} repair(s) recorded against {book['slug']}"
+                + (f", {readings_written} reading(s) written to the library"
+                   if readings_written else ""))
+        return {"recorded": written, "readings": readings_written, "note": note}
+    except Exception as e:
+        return {"recorded": written, "readings": readings_written,
+                "note": f"not recorded ({type(e).__name__}: {e})"}
+    finally:
+        suite.close()
+
+
+def import_history(chapter):
+    """Recover the repairs this chapter's render.json already remembers
+    (user decision 2026-09-25: import them rather than start from today).
+    Safe to call every time the chapter is opened - a repair already in
+    the library is not added twice."""
+    suite = open_library(chapter.settings)
+    if suite is None:
+        return 0
+    try:
+        book = book_for(suite, chapter.book_slug, (chapter.profile or {}).get("book"),
+                        chapter.book)
+        if book is None or not suite_link.uses_new_pipeline(book):
+            return 0
+        seiyuu = suite.seiyuu_by_path((chapter.profile or {}).get("speaker_path") or "")
+        return suite.import_render_repairs(book["id"], chapter.base, chapter.render,
+                                           seiyuu_id=(seiyuu or {}).get("id"))
+    except Exception:
+        return 0
+    finally:
+        suite.close()
+
+
 def plan(chapter, selections):
     """The batch, worked out before anything is written: [edit], ascending.
     `selections` are take records (one per part)."""
@@ -767,7 +934,7 @@ def plan(chapter, selections):
             "later_parts": sum(1 for c in chapter.sync["chunks"] if c["start"] >= edits[0]["end"])}
 
 
-def apply(chapter, selections, log):
+def apply(chapter, selections, log, kinds=None, reading_scope=None):
     """Replaces the queued parts' audio IN PLACE and moves every time after
     them. No backup - the folder is the user's copy (decision 2026-09-18).
 
@@ -782,6 +949,9 @@ def apply(chapter, selections, log):
         raise RuntimeError(problem)
     p = plan(chapter, selections)
     edits = p["edits"]
+    # Every repaired part as it is NOW, for the library: render.json is
+    # rewritten below and chapter.part() then describes the new audio.
+    was = {e["index"]: dict(chapter.part(e["index"])) for e in edits}
     mapped = repair.build_time_map(edits)
     work = os.path.join(chapter.work_dir, "_apply")
     shutil.rmtree(work, ignore_errors=True)
@@ -866,6 +1036,13 @@ def apply(chapter, selections, log):
     for word, reading, what in changed:
         log(f"  readings.json: {what} {word} → {reading}")
 
+    # The library last: the audio and every file describing it are already
+    # written, so a library that is missing or slow cannot spoil a repair.
+    recorded = record_repairs(chapter, edits, log, kinds, reading_scope, before=was)
+    if recorded["note"]:
+        log(f"  library: {recorded['note']}")
+
     shutil.rmtree(work, ignore_errors=True)
     chapter.reload()
+    p["library"] = recorded
     return p

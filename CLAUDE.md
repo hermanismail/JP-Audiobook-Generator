@@ -833,6 +833,21 @@ reversing the 2026-09-18 rule, because the generator has measured the
 spoken text since Phase 3 and the two must not disagree; with no Irodori
 normaliser on the machine it falls back to the recorded length.
 
+**It tells the library what it repaired** (2026-09-25, phase C). On Apply
+a dialog asks what each repair WAS, suggesting the kind from what changed
+(text -> `reading`, a flagged scan row -> `hallucination`, a different
+request -> `pace`, nothing but the seed -> `preference`). Only a
+`hallucination` counts against the voice, so a misread name never damages
+a seiyuu's record - that is the whole reason the kind is stored. A reading
+the repair introduced is written to the library scoped to THIS chapter by
+default, with "everywhere in this book" one click away (user decision:
+ask each time, default the chapter). The library step runs LAST, after the
+audio and every file describing it, so a missing or slow library cannot
+spoil a repair. Opening a chapter imports the repairs its `render.json`
+already remembers, flagged `kind_guessed` so they never enter the ranking.
+The scan now scores with **book-profiler's** rules (kana folded, plus
+`overrun`), which is what catches a tail the old similarity missed.
+
 **`translation.json` carries its own `start`/`end` per chunk** (copied
 from `sync.json`), so it must be re-timed with the `.srt` - otherwise a
 later re-emit of the `.srt` would bring back the old times.
