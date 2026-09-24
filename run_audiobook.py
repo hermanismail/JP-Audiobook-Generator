@@ -1146,6 +1146,11 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
             "version": 1,
             "mode": "dynamic",
             "chapter": base,
+            # The book's slug in the suite library, so a tool working on a
+            # COPY of this folder (dynamic-repair) can still find the book;
+            # its own output folder no longer matches. Null for a book the
+            # library does not track.
+            "book_slug": book_slug,
             "rendered_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "checkpoint": MODEL_REF,
             "watermark": WATERMARK_AUDIO,
@@ -1181,6 +1186,11 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
             "skipped_texts": skipped,
             "pieces": [{
                 "sync_index": p.get("sync_index"),
+                # The source section (blank-line separated) this came from,
+                # and whether a person edited it in Preview Chapters - a
+                # repair must not "correct" a deliberate edit back.
+                "section": p.get("section"),
+                "edited": bool(p.get("edited")),
                 "sentence": p["sentence"],
                 "piece": p["piece"],
                 "display_text": p["display_text"],

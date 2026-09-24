@@ -489,7 +489,11 @@ calls for with that seiyuu.
   tail as normal mode (stitch, FLAC master, `sync.json`, tags) plus
   `<chapter>.render.json` - per `sync.json` entry the display and engine
   text, request, band, used seed, duration and gap, and the profile block.
-  `dynamic-repair` depends on it. The settings snapshot is named
+  `dynamic-repair` depends on it. Since 2026-09-25 it also carries
+  `book_slug` (a tool working on a COPY of the folder cannot match the
+  output folder any more) and, per piece, `section` and `edited` - so a
+  repair can see which lines a person wrote in Preview Chapters and must
+  not "correct" back. The settings snapshot is named
   `<book>_<mode>_YYYYMMDD_HHMM.json` and carries `_run.dynamic_plan`;
   Import refuses a snapshot of the other mode.
 - **Real render** (yojo-senki chapter_001 + chapter_007, 2026-09-17): the
