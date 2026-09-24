@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import datetime
 import subprocess
@@ -8,6 +9,18 @@ import shutil
 import text_pipeline
 import dynamic_profile
 import suite_link
+
+# This script prints Japanese - chapter text, readings, the seiyuu credit -
+# and the GUI runs it with its stdout on a PIPE, where Python falls back to
+# the Windows locale encoding (cp1252) and the first Japanese character
+# raises UnicodeEncodeError (CLAUDE.md: "A child Python writing Japanese to
+# a PIPE dies on cp1252"). Fixed here rather than in the caller's
+# environment, so running this script by hand behaves the same way.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):     # already wrapped, or not a stream
+        pass
 
 # --- Configuration ---
 # Settings are now stored in settings.json (same folder as this script)

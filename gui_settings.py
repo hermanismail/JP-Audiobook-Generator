@@ -2000,6 +2000,12 @@ class SettingsApp(ctk.CTk):
                 cwd=uv_project_dir,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
+                # The log carries Japanese (chapter text, readings, the
+                # seiyuu credit). Decode it as UTF-8, which is what the
+                # child writes; text=True alone would decode with the
+                # locale's cp1252 and show mojibake.
+                encoding="utf-8", errors="replace",
+                env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1"),
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except FileNotFoundError:
