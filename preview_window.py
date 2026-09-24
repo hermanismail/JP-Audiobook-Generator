@@ -76,6 +76,8 @@ class PreviewWindow(ctk.CTkToplevel):
         self.section_tags = {}
         self.open_section = None
         self.rest = []
+        self.detail = None
+        self._resize_job = None
         self.dirty = set()              # chapters with unsaved edits
         self.saved = set()              # chapters whose plan is on disk
 
@@ -128,10 +130,19 @@ class PreviewWindow(ctk.CTkToplevel):
         self.sections_frame = ctk.CTkScrollableFrame(self.pane, fg_color=COLOR_BG)
         self.sections_frame.pack(fill="both", expand=True)
 
+        self.bind("<Configure>", self._resized)
         self.protocol("WM_DELETE_WINDOW", self._close)
         if chapters:
             self.after(50, lambda: self.show(chapters[0][0]))
         self.after(80, lambda: (self.lift(), self.focus_force()))
+
+    def _resized(self, event=None):
+        """Debounced: a drag fires <Configure> dozens of times."""
+        if event is not None and event.widget is not self:
+            return
+        if getattr(self, "_resize_job", None):
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(120, self._fit_boxes)
 
     # ------------------------------------------------------------ building
     def _assignment(self, base):
@@ -255,6 +266,7 @@ class PreviewWindow(ctk.CTkToplevel):
             widget.destroy()
         section = next(s for s in self.rest if s["index"] == index)
         self._add_section(section, self.detail)
+        self.after(20, self._fit_boxes)
         for number, tag in self.section_tags.items():
             tag.configure(fg_color=self._tag_fill(number))
 
@@ -286,7 +298,10 @@ class PreviewWindow(ctk.CTkToplevel):
     def _add_section(self, section, parent):
         card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=10,
                             border_width=1, border_color=COLOR_CARD_BORDER)
-        card.pack(fill="x", pady=6)
+        # The section opened from a tag takes whatever room is left, so a
+        # big screen shows more of it instead of scrolling twice.
+        card.pack(fill="both" if parent is self.detail else "x",
+                  expand=parent is self.detail, pady=6)
         header = ctk.CTkFrame(card, fg_color="transparent")
         header.pack(fill="x", padx=12, pady=(8, 2))
         requests = ", ".join(
@@ -302,7 +317,7 @@ class PreviewWindow(ctk.CTkToplevel):
                      text_color=COLOR_SUBTITLE, font=ctk.CTkFont(size=11)).pack(side="left")
 
         columns = ctk.CTkFrame(card, fg_color="transparent")
-        columns.pack(fill="x", padx=12, pady=(0, 10))
+        columns.pack(fill="both", expand=True, padx=12, pady=(0, 10))
         for side, title in (("tts", "Text to TTS"), ("reader", "Text to Reader")):
             column = ctk.CTkFrame(columns, fg_color="transparent")
             column.pack(side="left", fill="both", expand=True,
@@ -314,8 +329,8 @@ class PreviewWindow(ctk.CTkToplevel):
             text = preview.as_text(section, side)
             held = self.held.get((section["index"], side))
             shown = held[0] if held else text
-            height = max(70, 24 * len(section["lines"]) + 16)
-            box = ctk.CTkTextbox(column, height=min(height, 420), corner_radius=8,
+            height = self._box_height(section)
+            box = ctk.CTkTextbox(column, height=height, corner_radius=8,
                                  border_width=1, border_color=COLOR_ENTRY_BORDER,
                                  fg_color="white", text_color=COLOR_ENTRY_TEXT,
                                  font=ctk.CTkFont(size=13), wrap="word")
@@ -324,6 +339,68 @@ class PreviewWindow(ctk.CTkToplevel):
             self._mark_readings(box, section, side)
             box.bind("<KeyRelease>", lambda _e, b=self.current: self._touched(b))
             self.boxes[(section["index"], side)] = (box, text)
+        self._link_scroll(section["index"])
+
+    def _box_height(self, section):
+        """As tall as the text needs, or as tall as the window allows -
+        whichever is smaller. A closed section is never taller than its own
+        content; the open one may fill the pane."""
+        content = max(70, 24 * len(section["lines"]) + 16)
+        spare = self._spare_height()
+        if section["index"] == self.open_section and spare:
+            return max(200, min(content, spare))
+        return min(content, 420)
+
+    def _spare_height(self):
+        """What is left under the header, section 1 and the tag strip."""
+        try:
+            self.update_idletasks()
+            if not self.detail.winfo_ismapped():
+                return 0
+            # In SCREEN coordinates: winfo_y() would be relative to the
+            # scrollable frame's inner canvas, which is as tall as its
+            # contents, not as tall as the window.
+            bottom = self.winfo_rooty() + self.winfo_height()
+            room = bottom - self.detail.winfo_rooty()
+        except Exception:
+            return 0
+        return max(0, room - 110) if room > 0 else 0
+
+    def _fit_boxes(self):
+        """Re-fit the open section when the window is resized."""
+        if self.open_section is None:
+            return
+        section = next((s for s in self.rest if s["index"] == self.open_section), None)
+        if section is None:
+            return
+        height = self._box_height(section)
+        for (index, _side), (box, _original) in self.boxes.items():
+            if index == self.open_section:
+                try:
+                    box.configure(height=height)
+                except Exception:
+                    pass
+
+    def _link_scroll(self, index):
+        """The two columns scroll together (user, 2026-09-24): a request is
+        one line on each side, so reading them apart is the whole point.
+
+        Each box's scroll callback moves its partner as well as its own
+        scrollbar; the partner's callback then fires back, which stops
+        because the fractions already match."""
+        pair = [self.boxes.get((index, side)) for side in ("tts", "reader")]
+        if not all(pair):
+            return
+        (left, _a), (right, _b) = pair
+        for source, other in ((left, right), (right, left)):
+            def follow(first, last, source=source, other=other):
+                source._y_scrollbar.set(first, last)
+                try:
+                    if abs(other._textbox.yview()[0] - float(first)) > 0.0005:
+                        other._textbox.yview_moveto(first)
+                except Exception:
+                    pass
+            source._textbox.configure(yscrollcommand=follow)
 
     def _mark_readings(self, box, section, side):
         """Highlight every stretch a reading or a furigana pair decided:

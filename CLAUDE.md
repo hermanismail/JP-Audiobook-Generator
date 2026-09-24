@@ -419,6 +419,14 @@ calls for with that seiyuu.
     chapters still to render and removes the rest.
   - An edited TTS line is re-priced from its new text (Phase 3's rule), and
     a small TTS-only change is offered as a book reading.
+  - The two columns **scroll together** (user, 2026-09-24 - a request is
+    one line on each side, so reading them apart defeats the point): each
+    box's `yscrollcommand` moves its partner as well as its own scrollbar,
+    and the partner's callback stops because the fractions already match.
+  - The open section's boxes **fill the window** rather than a fixed 420 px,
+    re-fitted on resize. The room is measured in SCREEN coordinates: inside
+    a CTkScrollableFrame `winfo_y()` is relative to an inner canvas as tall
+    as its contents, so it does not shrink with the window.
   - **Section 1 stays open** (the chapter header and the seiyuu credit, what
     a run is double-checked on); every later section is a numbered tag in a
     rounded box, and clicking one opens its two columns - yellow while
