@@ -1359,6 +1359,12 @@ sits in an 8KB buffer and arrives hours later, in one lump. `gui_settings.py`
 passes it when launching `run_audiobook.py`; `run_audiobook.py` passes it when
 launching `translate_pipeline.py`.
 
+**A file dialog with no `parent` belongs to the ROOT window.** When it
+closes Windows raises its owner, so Browse inside the Customize window
+sent Customize behind the settings window (2026-09-24). Pass
+`parent=self.winfo_toplevel()` - `subtitle_window.py` always did - and
+lift that window afterwards.
+
 **Tk packing order decides who gets space.** `_title_block` packs its frame
 immediately, so a title packed before a right-hand control with
 `expand=True` claims the whole row and the control renders at zero width. This
