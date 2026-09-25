@@ -124,6 +124,121 @@ class ResultRow(ctk.CTkFrame):
                        fg_color=PASTEL_VIOLET if selected else CARD)
 
 
+class RepairKindDialog(ctk.CTkToplevel):
+    """What each repair WAS, and how far a new reading should reach.
+
+    The kind is the whole point of recording a repair (user, 2026-09-25):
+    only a hallucination says anything about the voice, while a misread
+    name is a readings problem. A kind is suggested from what actually
+    changed and can be corrected in one click.
+
+    A reading the repair introduced is written to the library for THIS
+    chapter by default - the evidence is one chapter - with "everywhere in
+    this book" one click away, because a name like 子易さん runs through
+    many later chapters."""
+
+    KIND_LABELS = {
+        "hallucination": "hallucination - invented words, a tail, an abandoned sentence",
+        "reading": "misread word - the text was right, the engine read it wrong",
+        "pace": "pace - re-rendered at a different scale or style",
+        "preference": "preference - same text and settings, a different take",
+        "other": "other",
+    }
+
+    def __init__(self, parent, chapter, edits):
+        super().__init__(parent)
+        self.title("What were these repairs?")
+        self.configure(fg_color=BG)
+        self.geometry("880x640")
+        self.chapter = chapter
+        self.edits = edits
+        self.result = None
+        self.kind_vars = {}
+        self.scope_vars = {}
+
+        ctk.CTkLabel(self, text="What were these repairs?", text_color=TITLE,
+                     font=ctk.CTkFont(size=17, weight="bold")).pack(anchor="w", padx=20,
+                                                                    pady=(16, 2))
+        ctk.CTkLabel(self, anchor="w", justify="left", wraplength=820, text_color=SUBTITLE,
+                     font=ctk.CTkFont(size=12),
+                     text=("Only a hallucination counts against the seiyuu. A misread word "
+                           "is a readings problem and leaves the voice's record alone - so "
+                           "this is what makes the statistics worth having.")).pack(
+            anchor="w", padx=20, pady=(0, 10))
+
+        body = ctk.CTkScrollableFrame(self, fg_color=BG)
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        for edit in edits:
+            self._row(body, edit)
+
+        bar = ctk.CTkFrame(self, fg_color=CARD, corner_radius=0, height=60)
+        bar.pack(fill="x")
+        button(bar, "Apply", self._ok, width=130, primary=True).pack(side="right", padx=(8, 18),
+                                                                    pady=12)
+        button(bar, "Cancel", self._cancel, width=110).pack(side="right", pady=12)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.after(60, lambda: (self.lift(), self.focus_force(), self.grab_set()))
+
+    def _row(self, parent, edit):
+        index = edit["index"]
+        part = self.chapter.part(index)
+        take = edit.get("take") or {}
+        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=10, border_width=1,
+                            border_color=BORDER)
+        card.pack(fill="x", pady=5)
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=14, pady=10)
+        ctk.CTkLabel(inner, text=f"Part {index + 1}", text_color=TITLE,
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
+        ctk.CTkLabel(inner, text=part["text"][:90] + ("…" if len(part["text"]) > 90 else ""),
+                     text_color=SUBTITLE, font=ctk.CTkFont(size=11), anchor="w",
+                     justify="left", wraplength=780).pack(fill="x", pady=(2, 6))
+
+        suggested = dr.suggest_kind(self.chapter, index, edit)
+        var = ctk.StringVar(value=suggested)
+        self.kind_vars[index] = var
+        for kind in dr.REPAIR_KINDS:
+            ctk.CTkRadioButton(inner, text=self.KIND_LABELS[kind] +
+                               ("   (suggested)" if kind == suggested else ""),
+                               variable=var, value=kind, fg_color=ACCENT,
+                               hover_color=ACCENT_HOVER, text_color=ENTRY_TEXT,
+                               font=ctk.CTkFont(size=12)).pack(anchor="w", pady=1)
+
+        new_readings = {w: r for w, r in (take.get("readings") or {}).items()
+                        if part["readings"].get(w) != r}
+        for word, reading in new_readings.items():
+            scope = ctk.StringVar(value="chapter")
+            self.scope_vars[word] = scope
+            line = ctk.CTkFrame(inner, fg_color="transparent")
+            line.pack(fill="x", pady=(8, 0))
+            ctk.CTkLabel(line, text=f"{word} → {reading}", text_color=TITLE,
+                         font=ctk.CTkFont(size=12, weight="bold")).pack(side="left",
+                                                                        padx=(0, 12))
+            ctk.CTkRadioButton(line, text=f"this chapter only ({self.chapter.base})",
+                               variable=scope, value="chapter", fg_color=ACCENT,
+                               hover_color=ACCENT_HOVER, text_color=ENTRY_TEXT,
+                               font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 14))
+            ctk.CTkRadioButton(line, text="everywhere in this book", variable=scope,
+                               value="book", fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                               text_color=ENTRY_TEXT,
+                               font=ctk.CTkFont(size=12)).pack(side="left")
+
+    def _ok(self):
+        self.result = {"kinds": {i: v.get() for i, v in self.kind_vars.items()},
+                       "scope": {w: v.get() for w, v in self.scope_vars.items()}}
+        self.grab_release()
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.grab_release()
+        self.destroy()
+
+    def ask(self):
+        self.wait_window()
+        return self.result
+
+
 class RepairApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -143,6 +258,8 @@ class RepairApp(ctk.CTk):
         self.info = None
         self.chapter = None
         self.readings = []
+        self.file_readings = []
+        self.library_note = ""
         self.scan_rows = {}
         self.result_widgets = []
         self.selected = None
@@ -421,7 +538,11 @@ class RepairApp(ctk.CTk):
             ctk.CTkLabel(self.chapter_lines, text=line, anchor="w", justify="left",
                          text_color=colour, font=ctk.CTkFont(size=11), wraplength=960,
                          height=16).pack(fill="x")
-        self.readings = self.info["readings"] or []
+        # The folder's own readings.json. What actually applies to a
+        # chapter is decided when the chapter is loaded, because the
+        # library scopes readings per chapter (schema v2).
+        self.file_readings = self.info["readings"] or []
+        self.readings = list(self.file_readings)
         ready = self.info["ready"] if ok else []
         self.chapter_menu.configure(values=ready or ["(none)"])
         self.chapter_var.set(ready[0] if ready else "(none)")
@@ -436,6 +557,7 @@ class RepairApp(ctk.CTk):
         self.scan_rows = {}
         self.selected = None
         self.part_readings, self.part_text, self.queued = {}, {}, {}
+        self.readings = list(self.file_readings)
         if not self.info or base not in (self.info.get("ready") or []):
             self._render_results([], "")
             self._render_part()
@@ -448,14 +570,27 @@ class RepairApp(ctk.CTk):
             messagebox.showerror("Chapter", f"Could not read {base}: {e}")
             return
         problem = self.chapter.check_audio()
+        # What the library says about THIS chapter: its readings, scoped,
+        # and which of them came from furigana (2026-09-25).
+        library = self.chapter.read_library()
+        self.library_note = library["note"]
+        self.readings = self.chapter.readings_in_play(self.file_readings)
         style = dr.dynamic_profile.STYLE_LABELS.get(self.chapter.style, self.chapter.style)
         self.chapter_facts.configure(
             text=(f"✕ {problem}" if problem else
                   f"{self.chapter.total} parts · {dr.clock(self.chapter.chunks()[-1]['end'])} · "
-                  f"{dr.dynamic_profile.nickname(self.chapter.profile)} · {style}"),
+                  f"{dr.dynamic_profile.nickname(self.chapter.profile)} · {style}"
+                  + (f"\nlibrary: {self.library_note}" if self.library_note else "")),
             text_color=FAIL if problem else SUBTITLE)
         if problem:
             self.chapter = None
+        if self.chapter:
+            # Repairs this chapter's render.json already remembers, so the
+            # statistics do not start from today (user, 2026-09-25).
+            recovered = dr.import_history(self.chapter)
+            if recovered:
+                self.log(f"{recovered} earlier repair(s) recovered from render.json "
+                         f"into the library")
         cached = dr.load_scan(self.chapter) if self.chapter else None
         if cached:
             self.scan_rows = {r["index"]: r for r in cached["rows"]}
@@ -614,21 +749,36 @@ class RepairApp(ctk.CTk):
         row = self.scan_rows.get(part["index"])
         self.part_heard.configure(text="heard   " + (row["heard"] if row else "(not scanned)"))
         self.text_box.insert("1.0", self.part_text[part["index"]])
+        # Typing changes the length, and so the request - since 2026-09-25.
+        self.text_box.bind("<KeyRelease>", lambda _e: self._update_request())
         self._update_readings_note()
         self._update_request()
         self._render_takes()
 
     def _update_readings_note(self):
+        part = self.chapter.part(self.selected) if self.chapter else {}
         used = self.part_readings.get(self.selected) or {}
+        notes = []
+        if part.get("is_intro"):
+            notes.append("This Part is the seiyuu introduction. Its kana belongs to the "
+                         "voice's entry in the library, not to this chapter - change it "
+                         "there and re-render, rather than editing it here.")
+        if part.get("edited"):
+            notes.append("This line was written by hand in Preview Chapters - it is not "
+                         "what the planner produced.")
         if not used:
-            self.readings_note.configure(text="No reading applied to this Part.")
-            return
-        known = {r["word"] for r in self.readings}
-        rendered = self.chapter.part(self.selected)["readings"] if self.chapter else {}
-        self.readings_note.configure(text="Readings in this text: " + ",  ".join(
-            f"{w} → {r}" + (" (rendered with it)" if rendered.get(w) == r else "")
-            + ("" if w in known else " (new - saved to readings.json on Apply)")
-            for w, r in used.items()))
+            notes.append("No reading applied to this Part.")
+        else:
+            known = {r["word"] for r in self.readings}
+            from_furigana = set(part.get("from_furigana") or [])
+            rendered = part.get("readings") or {}
+            notes.append("Readings in this text: " + ",  ".join(
+                f"{w} → {r}"
+                + (" (furigana)" if w in from_furigana else "")
+                + (" (rendered with it)" if rendered.get(w) == r else "")
+                + ("" if w in known else " (new - saved on Apply)")
+                for w, r in used.items()))
+        self.readings_note.configure(text="\n".join(notes))
 
     def _remember_text(self):
         if self.selected is not None:
@@ -679,21 +829,39 @@ class RepairApp(ctk.CTk):
         except ValueError:
             self.request_label.configure(text="type a scale, e.g. 1.6", text_color=FAIL)
             return
-        rendered = self.chapter.part(self.selected)["request"]
+        part = self.chapter.part(self.selected)
+        rendered = part["request"]
+        length = self.chapter.length_for(self.selected, self._edited_text())
         self.request_label.configure(
             text=f"asks {describe_request(request)}"
                  + ("  (as rendered)" if request == rendered else
-                    f"  (rendered with {describe_request(rendered)})"),
+                    f"  (rendered with {describe_request(rendered)})")
+                 + (f"  ·  {length} chars, was {part['engine_len']}"
+                    if length != part["engine_len"] else ""),
             text_color=SUBTITLE)
 
     def _request(self):
+        """The request for what is in the box NOW. Since 2026-09-25 an
+        edited line is re-priced from its own text, like the generator -
+        see DynChapter.length_for()."""
         style = self._style()
+        text = self._edited_text()
         if style == dr.CUSTOM_STYLE:
             scale = float(self.scale_var.get())
             if not 0.5 <= scale <= 3.0:
                 raise ValueError("scale out of range")
-            return self.chapter.request_for(self.selected, style, scale)
-        return self.chapter.request_for(self.selected, style)
+            return self.chapter.request_for(self.selected, style, scale, tts_text=text)
+        return self.chapter.request_for(self.selected, style, tts_text=text)
+
+    def _edited_text(self):
+        """What is in the text box, or None when it is untouched."""
+        if self.selected is None:
+            return None
+        try:
+            text = self.text_box.get("1.0", "end").strip()
+        except Exception:
+            return None
+        return text or None
 
     def on_play_part(self):
         if self._busy or not self.chapter or self.selected is None:
@@ -841,6 +1009,8 @@ class RepairApp(ctk.CTk):
         if self._busy or not self.chapter or not self.queued:
             return
         takes = list(self.queued.values())
+        for take in takes:
+            take.setdefault("scan_row", self.scan_rows.get(take["index"]))
         p = dr.plan(self.chapter, takes)
         if not messagebox.askyesno(
                 "Apply repair",
@@ -851,11 +1021,16 @@ class RepairApp(ctk.CTk):
                   f"the folder are rewritten. No backup is made - this folder should be your "
                   f"copy.\n\nApply?", icon="warning"):
             return
+        answers = RepairKindDialog(self, self.chapter, p["edits"]).ask()
+        if answers is None:
+            self.log("apply cancelled at the repair-kind step - nothing was changed")
+            return
         chapter = self.chapter
 
         def work():
             self.log(f"applying {len(takes)} repair(s) to {chapter.name}")
-            dr.apply(chapter, takes, self.log)
+            dr.apply(chapter, takes, self.log, kinds=answers["kinds"],
+                     reading_scope=answers["scope"])
             self.ui(self._after_apply)
 
         self._start(work)

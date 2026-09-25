@@ -116,6 +116,10 @@ DEFAULT_SETTINGS = {
     "keep_flac_master": True,
     # Translation subtitles. See translate_pipeline.py.
     "auto_translate_after_run": False,
+    "scan_after_run": True,
+    "whisper_exe": "C:\\Transcribe\\.venv\\Scripts\\whisper.exe",
+    "whisper_model": "large-v3-turbo",
+    "whisper_language": "ja",
     "translation_backend": "vntl",
     "llama_server_url": "http://127.0.0.1:8080",
     # Used to start llama-server on demand when nothing is already listening,
@@ -409,6 +413,8 @@ class SettingsApp(ctk.CTk):
             value=1 if self.settings.get("keep_flac_master", True) else 0)
         self.auto_translate_var = ctk.IntVar(
             value=1 if self.settings.get("auto_translate_after_run", False) else 0)
+        self.scan_after_run_var = ctk.IntVar(
+            value=1 if self.settings.get("scan_after_run", True) else 0)
 
         # The Subtitle Generation Tool window, if it is open. Kept so a
         # second click raises the existing one rather than opening a rival
@@ -1165,6 +1171,7 @@ class SettingsApp(ctk.CTk):
         tr_card.pack(fill="x")
 
         self._add_auto_translate_row(tr_card)
+        self._add_scan_after_run_row(tr_card)
         self._add_backend_row(tr_card)
         self._add_endpoint_row(tr_card)
         # Kept short on purpose: _add_path_row's title block is a fixed
@@ -1214,6 +1221,35 @@ class SettingsApp(ctk.CTk):
             row, "Auto-generate after run",
             "Writes an .srt per chapter once the whole book has finished")
         text_frame.pack(side="left", fill="x", expand=True)
+
+    def _add_scan_after_run_row(self, parent):
+        """Whisper listens to the finished book and says which Parts are
+        worth a human ear, once at the end of the run (user decision
+        2026-09-25) - before publishing, and before an hour of subtitles is
+        spent on audio that may be re-rendered. Dynamic mode only: it is
+        keyed to sync.json Parts."""
+        row = self._row_shell(parent)
+        glyph, pastel_bg, icon_color = ICON_AUTO_TAG
+        IconBadge(row, glyph, pastel_bg, text_color=icon_color, font_size=16).pack(
+            side="left", padx=(0, 14))
+        self.scan_after_run_switch = ctk.CTkSwitch(
+            row, text=self._scan_after_run_text(bool(self.scan_after_run_var.get())),
+            variable=self.scan_after_run_var, onvalue=1, offvalue=0,
+            progress_color=COLOR_TOGGLE_ON, button_color="white",
+            switch_width=46, switch_height=24, text_color=COLOR_SUBTITLE,
+            font=ctk.CTkFont(size=12), command=self._on_scan_after_run_changed)
+        self.scan_after_run_switch.pack(side="right")
+        text_frame = self._title_block(
+            row, "Scan for bad reads after a run",
+            "Flags the Parts to listen to, and leaves the scan for dynamic-repair")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+    def _scan_after_run_text(self, enabled):
+        return "ON (dynamic runs)" if enabled else "OFF"
+
+    def _on_scan_after_run_changed(self):
+        self.scan_after_run_switch.configure(
+            text=self._scan_after_run_text(bool(self.scan_after_run_var.get())))
 
     def _auto_translate_text(self, enabled):
         return "ON (after every run)" if enabled else "OFF (manual only)"
@@ -1960,6 +1996,16 @@ class SettingsApp(ctk.CTk):
             "aac_bitrate": aac_bitrate,
             "keep_flac_master": bool(self.flac_master_var.get()),
             "auto_translate_after_run": bool(self.auto_translate_var.get()),
+            "scan_after_run": bool(self.scan_after_run_var.get()),
+            # No widgets: the Whisper paths are the same three every tool
+            # here uses, and are edited in settings.json on the rare
+            # machine where they differ.
+            "whisper_exe": self.settings.get("whisper_exe")
+            or DEFAULT_SETTINGS["whisper_exe"],
+            "whisper_model": self.settings.get("whisper_model")
+            or DEFAULT_SETTINGS["whisper_model"],
+            "whisper_language": self.settings.get("whisper_language")
+            or DEFAULT_SETTINGS["whisper_language"],
             "translation_backend": self.translation_backend_var.get(),
             "llama_server_url": self.vars["llama_server_url"].get().strip(),
             "llama_server_exe": self.vars["llama_server_exe"].get().strip(),
@@ -2025,6 +2071,7 @@ class SettingsApp(ctk.CTk):
         self.watermark_var.set(1 if merged["watermark_audio"] else 0)
         self.flac_master_var.set(1 if merged["keep_flac_master"] else 0)
         self.auto_translate_var.set(1 if merged["auto_translate_after_run"] else 0)
+        self.scan_after_run_var.set(1 if merged["scan_after_run"] else 0)
 
         for key in ("author_name", "book_title", "genre", "cover_art_path"):
             self.metadata_vars[key].set(merged[key])

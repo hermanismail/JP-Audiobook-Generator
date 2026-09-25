@@ -77,7 +77,19 @@ SCORE_DEFAULTS = {
     "length_ratio_high": 1.15,
     # Transcript characters after the sentence's ending was already heard -
     # catches a tail too short for any ratio (…葉を噛む、噛む。, +4%).
-    "overrun_chars": 2,
+    #
+    # 2 until 2026-09-25, when wall/chapter_008 part 37 got through: the
+    # seiyuu really says a word that is not in the script
+    # (インクの色は常にターコイズ・ブルー。 -> …ターコイズブルー客),
+    # Whisper really heard it, and ONE character was below the threshold
+    # while similarity 0.97 and ratio 1.06 said nothing. Measured over all
+    # 6,120 scored takes on this machine before changing it: 34 takes newly
+    # flagged (0.56% - tanya 0.00, moeshi 0.18, marinka 0.22, hayamin 0.33,
+    # mikku 2.92), and they are the same phenomenon (…無音だった沢,
+    # …置かれていない様, …してしまった。が、). Of 15 chapter recipes
+    # rebuilt both ways, 10 are identical and 5 pull the SLOWER edge in by
+    # one step; no comfortable length moved.
+    "overrun_chars": 1,
     # A take this far below its step's median similarity is flagged too.
     "step_drop": 0.15,
     # When the best take of a step scores below this, Whisper and the book

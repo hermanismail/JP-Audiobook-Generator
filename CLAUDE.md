@@ -485,11 +485,36 @@ calls for with that seiyuu.
   the file has, then write the database back over it), and records the
   chapter and the seiyuu's usage afterwards; re-rendering the same chapter
   with the same voice increments its count.
+- **QA scan at the end of a run** (`qa_scan.py`, 2026-09-25, dynamic only,
+  setting `scan_after_run`, default ON): Whisper listens to every chapter
+  the run produced and reports the Parts worth a human ear, BEFORE
+  translation - "is any of this worth re-rendering" is settled before an
+  hour of subtitles goes into it. It writes `<chapter>.qa.json` beside the
+  audio in dynamic-repair's cache format, so copying the folder gives that
+  tool its shortlist with no GPU spent. Its own process (`uv run
+  --project`, `-u`), and any failure only prints: a finished render is
+  never reported as failed because the scan stumbled.
+  - **The verify pass is the point.** The chapter-wide transcription
+    credits each Whisper segment to the Part its midpoint falls in, so a
+    segment starting late or swallowing a silence strips its neighbours
+    and flags perfect audio. Every flagged Part is therefore transcribed
+    AGAIN on its own - all of them in one whisper call - and dropped if it
+    comes back clean, keeping both transcripts. Measured on
+    wall/chapter_008: 5 flagged by the old scan, 4 of them artefacts
+    (43 `(nothing)`->`ドゥルーブラック`, 75, 162, 189 all clean alone), and
+    the real fault (37) was MISSED. After: `flagged [37, 190], dropped
+    [43, 75, 162, 189]` in 145 s for 204 parts.
+  - A bigger model does not fix it: large-v3 made part 75 worse (0.90 ->
+    0.71) at 25x the time. See the model comparison above.
 - **Output**: `process_chapter_dynamic()` -> the same `finish_chapter()`
   tail as normal mode (stitch, FLAC master, `sync.json`, tags) plus
   `<chapter>.render.json` - per `sync.json` entry the display and engine
   text, request, band, used seed, duration and gap, and the profile block.
-  `dynamic-repair` depends on it. The settings snapshot is named
+  `dynamic-repair` depends on it. Since 2026-09-25 it also carries
+  `book_slug` (a tool working on a COPY of the folder cannot match the
+  output folder any more) and, per piece, `section` and `edited` - so a
+  repair can see which lines a person wrote in Preview Chapters and must
+  not "correct" back. The settings snapshot is named
   `<book>_<mode>_YYYYMMDD_HHMM.json` and carries `_run.dynamic_plan`;
   Import refuses a snapshot of the other mode.
 - **Real render** (yojo-senki chapter_001 + chapter_007, 2026-09-17): the
@@ -813,6 +838,37 @@ the piece. The user copies the book's `readings.json` from the output
 folder into the repair folder; `load_readings`/`apply_readings` are
 `dynamic_profile`'s, so both tools apply the file identically.
 
+**It reads the suite library too** (2026-09-25, phase B of three).
+`suite_root` is a setting; everything is best-effort, so a machine without
+the library works exactly as before, from `readings.json` alone. Per
+chapter it asks for the readings **scoped to that chapter** (schema v2 - a
+reading decided while other chapters were selected does not reach this
+one), marks which came from furigana, and keeps any word only the file
+knows. The book is found by `render.json`'s `book_slug`, then the
+profile's book name (which covers every render made before 2026-09-25),
+then the folder's name - a repair folder is a COPY, so the output folder
+never matches. The credit Part is recognised from `intro_line` and says
+so: its kana belongs to the voice's row, not to the chapter. **An edited
+line is now re-priced from its new text** (user decision 2026-09-25),
+reversing the 2026-09-18 rule, because the generator has measured the
+spoken text since Phase 3 and the two must not disagree; with no Irodori
+normaliser on the machine it falls back to the recorded length.
+
+**It tells the library what it repaired** (2026-09-25, phase C). On Apply
+a dialog asks what each repair WAS, suggesting the kind from what changed
+(text -> `reading`, a flagged scan row -> `hallucination`, a different
+request -> `pace`, nothing but the seed -> `preference`). Only a
+`hallucination` counts against the voice, so a misread name never damages
+a seiyuu's record - that is the whole reason the kind is stored. A reading
+the repair introduced is written to the library scoped to THIS chapter by
+default, with "everywhere in this book" one click away (user decision:
+ask each time, default the chapter). The library step runs LAST, after the
+audio and every file describing it, so a missing or slow library cannot
+spoil a repair. Opening a chapter imports the repairs its `render.json`
+already remembers, flagged `kind_guessed` so they never enter the ranking.
+The scan now scores with **book-profiler's** rules (kana folded, plus
+`overrun`), which is what catches a tail the old similarity missed.
+
 **`translation.json` carries its own `start`/`end` per chunk** (copied
 from `sync.json`), so it must be re-timed with the `.srt` - otherwise a
 later re-emit of the `.srt` would bring back the old times.
@@ -948,6 +1004,37 @@ profiles byte-identical in bands/L/pace targets; marinka -> default only
 (x1.1-1.3 per band, L 98); **moeshi's longest step changed** - one x1.8
 tail used to void the whole step, so L 76 -> 98 with a new 77-98 band
 x1.1/1.4/1.7, all her other bands identical.
+
+### Does the Whisper model version change the shortlist? (2026-09-25)
+
+Never measured until now: `large-v3-turbo` is the default in
+chapter-repair, book-profiler and dynamic-repair alike, so every flag
+rate, the pace table and hayamin's window rest on one transcriber. One
+real chapter (wall/chapter_009, hayamin, 126 parts judged), transcribed
+twice and scored identically:
+
+| | large-v3-turbo | large-v3 |
+|---|---|---|
+| time for the chapter | **81 s** | 2,072 s (25x) |
+| parts flagged | 5 | 11 |
+| mean similarity | 0.9269 | 0.9247 |
+| transcripts identical to the other model | 2 of 126 | |
+
+**They agree on 3 flags out of 13.** The two models produce different text
+almost everywhere (124 of 126 parts differ), yet the same mean similarity.
+More interesting, `large-v3` is not the better judge here: it **loops**
+(part 48: `まるでカーテンの隙間から無人の影が見えた` three times), returns
+EMPTY for a clean part (71), drops an opening clause (70) and adds
+`だったのだ` where nothing was said (63, 69) - the failure modes we hunt in
+the TTS, coming from the transcriber. turbo's own miss is the opposite
+kind: an empty transcript for part 30.
+
+**So: keep turbo.** It is 25x faster and, on this sample, produces fewer
+false alarms. The real lesson is that an ABSOLUTE flag rate is a property
+of the model as much as of the seiyuu - only comparisons made with one
+model are meaningful, which is what every measurement here has been.
+Report: `scratchpad/whisper-compare/report.json`. One chapter, one voice -
+enough to settle "should we switch", not enough for a general claim.
 
 ### Whisper spells differently - two rules (2026-09-24)
 

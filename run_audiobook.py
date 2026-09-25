@@ -66,6 +66,13 @@ DEFAULT_SETTINGS = {
     "suite_root": r"F:\AUDIOBOOK-CREATION-SUITE",
     # Translation subtitles. See translate_pipeline.py.
     "auto_translate_after_run": False,
+    # Listen to the finished book with Whisper and say which Parts are
+    # worth a human ear, once at the end of the run (user decision
+    # 2026-09-25). Dynamic mode only - it is keyed to sync.json Parts.
+    "scan_after_run": True,
+    "whisper_exe": "C:\\Transcribe\\.venv\\Scripts\\whisper.exe",
+    "whisper_model": "large-v3-turbo",
+    "whisper_language": "ja",
     "translation_backend": "vntl",
     "llama_server_url": "http://127.0.0.1:8080",
     # Used to start llama-server on demand when nothing is already listening,
@@ -1146,6 +1153,11 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
             "version": 1,
             "mode": "dynamic",
             "chapter": base,
+            # The book's slug in the suite library, so a tool working on a
+            # COPY of this folder (dynamic-repair) can still find the book;
+            # its own output folder no longer matches. Null for a book the
+            # library does not track.
+            "book_slug": book_slug,
             "rendered_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "checkpoint": MODEL_REF,
             "watermark": WATERMARK_AUDIO,
@@ -1181,6 +1193,11 @@ def process_chapter_dynamic(chapter_path, assignment, engine, readings=None, int
             "skipped_texts": skipped,
             "pieces": [{
                 "sync_index": p.get("sync_index"),
+                # The source section (blank-line separated) this came from,
+                # and whether a person edited it in Preview Chapters - a
+                # repair must not "correct" a deliberate edit back.
+                "section": p.get("section"),
+                "edited": bool(p.get("edited")),
                 "sentence": p["sentence"],
                 "piece": p["piece"],
                 "display_text": p["display_text"],
@@ -1510,6 +1527,7 @@ def main():
             process_chapter(chapter_file)
 
     print("\nAll chapters completed successfully!")
+    rendered_bases = [os.path.splitext(os.path.basename(f))[0] for f in pending]
 
     # The shared silence wavs were kept alive across chapters by
     # clean_temp_dir()'s skip; now that the run is over they can go too.
@@ -1532,6 +1550,37 @@ def main():
     #     per-chapter progress would sit in an 8KB buffer and arrive in one
     #     lump hours later, which defeats the point (gui_settings.py passes
     #     -u when launching this script for exactly the same reason).
+    # The QA scan, before translation: it answers "is any of this worth
+    # re-rendering", which is a question to settle before spending an hour
+    # on subtitles for it. Dynamic mode only, because it reads Parts from
+    # sync.json and render.json. Its own process, in the GUI venv (Whisper
+    # is shelled out from there), unbuffered so the report arrives in the
+    # progress window as it happens - the same shape as translation below.
+    if GENERATION_MODE == "dynamic" and SETTINGS.get("scan_after_run", True) and rendered_bases:
+        print(f"\nScanning {len(rendered_bases)} chapter(s) for parts worth a listen - "
+              f"Whisper, a few minutes")
+        settings_path = os.path.join(TEMP_DIR, "qa_settings.json")
+        try:
+            os.makedirs(TEMP_DIR, exist_ok=True)
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump({k: SETTINGS.get(k) for k in
+                           ("whisper_exe", "whisper_model", "whisper_language", "device")
+                           if SETTINGS.get(k)}, f)
+            command = ["uv", "run", "--project", SCRIPT_DIR, "--no-sync", "python", "-u",
+                       os.path.join(SCRIPT_DIR, "qa_scan.py"),
+                       "--folder", OUTPUT_FOLDER,
+                       "--work-root", os.path.join(TEMP_DIR, "qa"),
+                       "--settings", settings_path,
+                       "--chapters", *rendered_bases]
+            code = subprocess.run(command).returncode
+            if code != 0:
+                print(f"  ! the scan exited with code {code} - the render is unaffected")
+        except Exception as e:
+            # A finished, correct render must never be reported as failed
+            # because the QA pass could not run.
+            print(f"  ! the scan could not run ({type(e).__name__}: {e}) - the render is "
+                  f"unaffected; open dynamic-repair to scan there")
+
     if SETTINGS.get("auto_translate_after_run", False):
         backend = SETTINGS.get("translation_backend", "vntl")
         # The chapter decision drives the subtitle decision - one answer to
