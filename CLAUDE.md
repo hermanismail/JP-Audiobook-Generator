@@ -540,6 +540,21 @@ person fixes the text** -> `metadata.csv` -> `prepare_manifest.py` ->
 `train.py` -> a hardlink at `seiyuu/list/<speaker>-<style>.speaker.safetensors`,
 which is what the generator's Speaker Path field points at.
 
+**Step 2 is Identity** (2026-09-25): the display name, its kana and the
+translation, REQUIRED before training. They go into the suite library
+when training publishes the speaker file - with `speaker_key` (the parent
+folder), `style`, the samples folder, `onboarded_at` and `trained_at` -
+so the generator, the profiler and dynamic-repair read a voice's name
+from one place instead of asking again. Onboarding a second STYLE of the
+same speaker fills the three fields in from the first, because the parent
+folder is the identity. A library that is not reachable blocks training,
+with a "train anyway" escape so an hour of GPU is not lost to an
+unplugged drive. It talks to the library through its own `library.py`,
+loading `creator_suite.client` BY PATH the way `suite_link.py` does - the
+folder still imports nothing of the generator's.
+*(Future, noted not built: a two-tier picker - choose seiyuu, then style -
+wherever a voice is selected.)*
+
 The pair `<speaker>/<style>` is the only input; every path derives from it.
 The gate is not automatable: Whisper returns unpunctuated lines AND mishears
 — the real `moeshi/calm-01` text opens with an `えへへ。` that is nowhere in
@@ -905,6 +920,15 @@ Own venv, own `settings.json` (gitignored). Output under a root - the
 window's "profile folder", or `--work-root`, defaulting to `work_root` in
 `settings.json` (`F:\tmp\book-profiler`) - as `<root>\<book>\<scope>\`,
 with the profiles in `recipe\<seiyuu>\profile_*.json`.
+
+**It records what it profiled** (2026-09-25): `recipe.py` writes a
+`profiles` row per profile it produces and a `profile_chapters` row per
+chapter actually MEASURED (takes, flagged, steps, when, with whom), and
+the generator stamps `last_used_at` when a render uses one. Best-effort,
+so a missing library never costs a recipe that took hours of GPU. Those
+rows plus `chapter_records` and `repairs` are what the future dashboard
+reads: `seiyuu_work()` for one voice's history, `book_production()` for a
+book's contributors and the chapters that needed the most repairs.
 
 | stage | script | GPU | what it does |
 |---|---|---|---|
