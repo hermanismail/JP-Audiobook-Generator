@@ -8,7 +8,7 @@ because the divergences are the interesting part.
 
 Everything in this file describes code that exists today.
 
-## State of play (2026-09-18) - start here
+## State of play (2026-09-25) - start here
 
 Everything below is merged to `main`. One generator, six separate tools:
 
@@ -61,6 +61,22 @@ hostname with no app is public, and the suite holds the whole library. The
 generator side of the monitor (the `%LOCALAPPDATA%\SHAMA-Monitor\state.json`
 file `progress_window.py` wrote) was never merged; its branch is deleted and
 the commit is `9ea0b09` if it is ever wanted back.
+
+**First full E2E run, library-tracked (2026-09-25) - passed, no issue
+found.** A new voice, **tomita**, was onboarded (Identity step, name
+written to the library), profiled by book-profiler on wall chapter_010 and
+chapter_011, and rendered in dynamic mode. Some readings were settled in
+Preview Chapters before the run; the QA scan ran after the render, and
+dynamic-repair picked its `.qa.json` up as soon as the chapter was opened.
+The shortlist held **only Parts with a genuine fault - no false flags**,
+which is the verify pass doing its job on a voice it had never seen. This
+is the chain the Audiobook Creation Suite will wrap.
+
+**Next: the suite design, in a fresh session.** The current process, tool
+by tool, is written up in
+`F:\AUDIOBOOK-CREATION-SUITE\docs\e2e-process-current.md` (two categories:
+seiyuu management, book creation in seven steps). The user will add the
+pain points and what the suite should improve; design starts from there.
 
 **Player side (user decision 2026-09-18): the Android app is FROZEN.**
 Development goes into the web client first, then the server. Player
