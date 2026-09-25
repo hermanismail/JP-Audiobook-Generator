@@ -1284,6 +1284,10 @@ def record_chapter(suite, book, seiyuu, summary):
         if seiyuu:
             suite.record_usage(seiyuu["id"], book["id"], summary["chapter"],
                                summary["profile_path"], summary["style"])
+        # The profile was MEASURED when book-profiler wrote it; this is
+        # when it was USED, which is the other half of the question
+        # "when did this book get made" (2026-09-25).
+        suite_link.profile_used(suite, summary["profile_path"])
         print(f"  library: recorded {summary['chapter']}"
               + (f" for {seiyuu['nickname']}" if seiyuu else ""))
     except Exception as e:

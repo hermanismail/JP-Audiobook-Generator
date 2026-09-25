@@ -6,10 +6,18 @@ The Seiyuu Onboarding window: wav samples in, a trained speaker file out.
 Five steps, in order, all derived from one <speaker>/<style> pair:
 
     1 source      point at audio/<speaker>/<style>
-    2 transcribe  Whisper, from the existing C:\\Transcribe venv
-    3 review      YOU fix the text - the pipeline parks here
-    4 manifest    prepare_manifest.py
-    5 train       train.py, then hardlink the result into seiyuu/list/
+    2 identity    who this voice is: name, kana, translation
+    3 transcribe  Whisper, from the existing C:\\Transcribe venv
+    4 review      YOU fix the text - the pipeline parks here
+    5 manifest    prepare_manifest.py
+    6 train       train.py, then hardlink the result into seiyuu/list/
+
+Step 2 is REQUIRED (user decision 2026-09-25): the three names go into
+the suite library when training publishes the speaker file, so everything
+downstream - the generator's credit line, the profiler, dynamic-repair -
+can read them instead of asking again. The names are prepopulated from
+any other style of the same speaker, because the parent folder is the
+identity.
 
 "Run remaining steps" walks 2 -> 5 and stops at step 3, because Whisper
 mishears and omits, and only a person can tell a good transcript from a
@@ -30,6 +38,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+import library
 import pipeline
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -148,6 +157,9 @@ class OnboarderApp(ctk.CTk):
 
         self.settings = load_settings()
         self.paths = None
+        self.display_var = ctk.StringVar()
+        self.kana_var = ctk.StringVar()
+        self.translation_var = ctk.StringVar()
         self.rows = []
         self._queue = queue.Queue()
         self._busy = False
@@ -218,6 +230,7 @@ class OnboarderApp(ctk.CTk):
         body.pack(fill="both", expand=True, padx=16, pady=(14, 0))
 
         self._build_source(body)
+        self._build_identity(body)
         self._build_transcribe(body)
         self._build_review(body)
         self._build_manifest(body)
@@ -261,9 +274,40 @@ class OnboarderApp(ctk.CTk):
             font=ctk.CTkFont(family="Consolas", size=11))
         self.paths_label.pack(fill="x", padx=16, pady=(0, 13))
 
+    def _build_identity(self, parent):
+        """Who this voice is. Required before training, because the row it
+        writes is what every other tool reads a voice's name from."""
+        card = self._card(parent)
+        self.id_badge, self.id_pill = self._section_head(card, 2, "Identity")
+        ctk.CTkLabel(card, anchor="w", justify="left", wraplength=820,
+                     text_color=SUBTITLE, font=ctk.CTkFont(size=12),
+                     text=("The name the reader sees, how the engine should say it, and "
+                           "how it is written in English. Saved to the library when "
+                           "training publishes the speaker file.")).pack(
+            fill="x", padx=16, pady=(0, 8))
+
+        fields = ctk.CTkFrame(card, fg_color="transparent")
+        fields.pack(fill="x", padx=16, pady=(0, 6))
+        for label, var, width, hint in (
+                ("Name", self.display_var, 190, "高野麻里佳"),
+                ("Reading (kana)", self.kana_var, 190, "こうのまりか"),
+                ("Translation", self.translation_var, 190, "Kouno Marika")):
+            box = ctk.CTkFrame(fields, fg_color="transparent")
+            box.pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(box, text=label, text_color=SUBTITLE,
+                         font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w")
+            ctk.CTkEntry(box, textvariable=var, width=width, height=34, corner_radius=8,
+                         border_width=1, border_color=ENTRY_BORDER, fg_color=CARD,
+                         text_color=ENTRY_TEXT, placeholder_text=hint).pack()
+
+        self.identity_note = ctk.CTkLabel(card, text="", text_color=SUBTITLE, anchor="w",
+                                          justify="left", wraplength=820,
+                                          font=ctk.CTkFont(size=12))
+        self.identity_note.pack(fill="x", padx=16, pady=(0, 13))
+
     def _build_transcribe(self, parent):
         card = self._card(parent)
-        self.tr_badge, self.tr_pill = self._section_head(card, 2, "Transcribe")
+        self.tr_badge, self.tr_pill = self._section_head(card, 3, "Transcribe")
 
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=(0, 12))
@@ -291,7 +335,7 @@ class OnboarderApp(ctk.CTk):
 
     def _build_review(self, parent):
         card = self._card(parent)
-        self.rev_badge, self.rev_pill = self._section_head(card, 3, "Review & clean")
+        self.rev_badge, self.rev_pill = self._section_head(card, 4, "Review & clean")
 
         ctk.CTkLabel(card, text="Whisper's text is a suggestion - fix it here before it "
                                "becomes training data.", text_color=SUBTITLE,
@@ -320,7 +364,7 @@ class OnboarderApp(ctk.CTk):
 
     def _build_manifest(self, parent):
         card = self._card(parent)
-        self.man_badge, self.man_pill = self._section_head(card, 4, "Manifest")
+        self.man_badge, self.man_pill = self._section_head(card, 5, "Manifest")
         self.man_cmd = ctk.CTkLabel(card, text="", text_color=SUBTITLE, anchor="w",
                                     justify="left",
                                     font=ctk.CTkFont(family="Consolas", size=11))
@@ -334,7 +378,7 @@ class OnboarderApp(ctk.CTk):
 
     def _build_train(self, parent):
         card = self._card(parent)
-        self.train_badge, self.train_pill = self._section_head(card, 5, "Train speaker")
+        self.train_badge, self.train_pill = self._section_head(card, 6, "Train speaker")
         self.train_cmd = ctk.CTkLabel(card, text="", text_color=SUBTITLE, anchor="w",
                                       justify="left",
                                       font=ctk.CTkFont(family="Consolas", size=11))
@@ -484,8 +528,67 @@ class OnboarderApp(ctk.CTk):
             self.paths = None
             return
         self.log(f"loaded {self.paths.name} from {self.paths.audio_dir}")
+        self._load_identity(speaker, style)
         self._build_rows()
         self.refresh()
+
+    def _load_identity(self, speaker, style):
+        """Fill the Identity fields in from the library: this exact voice
+        if it is already there, otherwise any other STYLE of the same
+        speaker - the parent folder is the identity (user, 2026-09-25)."""
+        known = library.known_voice(self.settings, self.paths.list_entry)
+        if known and known.get("display_name"):
+            self.display_var.set(known.get("display_name") or "")
+            self.kana_var.set(known.get("reading_kana") or "")
+            self.translation_var.set(known.get("translation_name") or "")
+            self._identity_note(f"The library already knows {self.paths.name}.", DONE)
+            return
+        names, from_style = library.names_for_speaker(self.settings, speaker)
+        if names:
+            self.display_var.set(names["display_name"])
+            self.kana_var.set(names["reading_kana"])
+            self.translation_var.set(names["translation_name"])
+            self._identity_note(f"Taken from {speaker}/{from_style}, already onboarded - "
+                                f"change them if this style is someone else.", DONE)
+            return
+        if library.open_library(self.settings) is None:
+            self._identity_note(f"Library not reachable ({library.error()}). Training is "
+                                f"blocked until it is, so no voice is trained that "
+                                f"nothing can name.", "#C4453C")
+            return
+        self._identity_note("New voice - fill these in before training.", SUBTITLE)
+
+    def _identity_note(self, text, colour):
+        if hasattr(self, "identity_note"):
+            self.identity_note.configure(text=text, text_color=colour)
+
+    def identity(self):
+        return {"display_name": self.display_var.get().strip(),
+                "reading_kana": self.kana_var.get().strip(),
+                "translation_name": self.translation_var.get().strip()}
+
+    def identity_problem(self):
+        """Why training cannot start, or None.
+
+        The names are required so that everything downstream can read a
+        voice from the library instead of asking for it again. A library
+        that is not there blocks too - with an escape, because an hour of
+        GPU should not be lost to an unplugged drive."""
+        names = self.identity()
+        missing = [label for label, key in (("Name", "display_name"),
+                                            ("Reading (kana)", "reading_kana"),
+                                            ("Translation", "translation_name"))
+                   if not names[key]]
+        if missing:
+            return ("Fill in " + ", ".join(missing) + " in step 2 first.\n\n"
+                    "They are what the generator credits this voice with and what the "
+                    "engine is told to say, and they are stored once, here.")
+        if library.open_library(self.settings) is None:
+            return (f"The library is not reachable ({library.error()}).\n\n"
+                    f"Training would produce a voice that nothing downstream can name. "
+                    f"Reconnect it, or train anyway and add the names later in the "
+                    f"generator's Verify seiyuu name box.")
+        return None
 
     def _build_rows(self):
         for row in self.rows:
@@ -605,7 +708,22 @@ class OnboarderApp(ctk.CTk):
         self.ui(self.refresh)
 
     def on_train(self):
+        if not self._identity_ready():
+            return
         self._start(self._do_train)
+
+    def _identity_ready(self):
+        """True when training may start. A missing name simply stops it; a
+        missing library asks, because an hour of GPU should not be lost to
+        an unplugged drive (see identity_problem())."""
+        problem = self.identity_problem()
+        if problem is None:
+            return True
+        if "not reachable" in problem:
+            return messagebox.askyesno("Library not reachable", problem + "\n\nTrain anyway?",
+                                       icon="warning")
+        messagebox.showerror("Identity", problem)
+        return False
 
     def _do_train(self):
         cmd = pipeline.train_command(self.settings, self.paths)
@@ -629,7 +747,27 @@ class OnboarderApp(ctk.CTk):
             raise RuntimeError(f"train.py exited with code {code}.")
         mode, dest = pipeline.publish_to_list(self.paths)
         self.log(f"{mode}: {dest}")
+        self._record_voice(dest)
         self.ui(self.refresh)
+
+    def _record_voice(self, speaker_path):
+        """Write the voice into the library, now that the speaker file
+        exists. `onboarded_at` is stamped here rather than when the form
+        was filled, because this is the moment the voice is real."""
+        row, what = library.record_voice(
+            self.settings, speaker_path, self.identity(),
+            speaker_key=self.paths.speaker, style=self.paths.style,
+            samples_folder=self.paths.audio_dir)
+        if row is None:
+            self.log(f"! the library was not updated ({what}) - add the names in the "
+                     f"generator's Verify seiyuu name box")
+            return
+        names = self.identity()
+        self.log(f"library: {what} {names['display_name']} ({names['reading_kana']}) "
+                 f"= {names['translation_name']}")
+        self.ui(lambda: self._identity_note(
+            f"Saved to the library: {names['display_name']} - the generator will credit "
+            f"chapters to this name.", DONE))
 
     def on_cancel(self):
         self._cancel.set()
@@ -646,6 +784,8 @@ class OnboarderApp(ctk.CTk):
             subprocess.Popen(["explorer", os.path.normpath(self.paths.list_dir)])
 
     def on_run_remaining(self):
+        if not self._identity_ready():
+            return
         self._start(self._do_run_remaining)
 
     def _do_run_remaining(self):
@@ -731,11 +871,11 @@ class OnboarderApp(ctk.CTk):
             self.copy_button.configure(state="disabled")
             self.open_button.configure(state="disabled")
 
-        step = ("5 of 5 \u00b7 done" if state["published"] else
-                "5 of 5 \u00b7 train" if state["metadata_done"] and state["manifest_done"] else
-                "4 of 5 \u00b7 manifest" if state["metadata_done"] else
-                "3 of 5 \u00b7 waiting for your review" if state["transcribed_all"] else
-                "2 of 5 \u00b7 transcribe")
+        step = ("6 of 6 \u00b7 done" if state["published"] else
+                "6 of 6 \u00b7 train" if state["metadata_done"] and state["manifest_done"] else
+                "5 of 6 \u00b7 manifest" if state["metadata_done"] else
+                "4 of 6 \u00b7 waiting for your review" if state["transcribed_all"] else
+                "3 of 6 \u00b7 transcribe")
         self.head_sub.configure(
             text=f"{len(wavs)} sample(s) \u00b7 step {step}",
             text_color=WAIT if "review" in step else SUBTITLE)

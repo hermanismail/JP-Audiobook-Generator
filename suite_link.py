@@ -180,6 +180,18 @@ def intro_readings(intro):
             for word in sorted(forms, key=len, reverse=True)]
 
 
+def profile_used(suite, profile_path):
+    """Stamp a profile as used by a render. Best-effort, like everything
+    here: it is a statistic, not a step of the pipeline."""
+    if suite is None or not profile_path:
+        return False
+    try:
+        suite.profile_used(profile_path)
+        return True
+    except Exception:
+        return False
+
+
 def sync_readings(suite, book, output_folder):
     """Import anything only the file has, then write the DB back over it.
     Returns the import result, or None when there is nothing to sync."""

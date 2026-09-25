@@ -579,6 +579,70 @@ def render_md(book, speaker, chapters, book_bands, viable, book_limit, apply_boo
     return "\n".join(o)
 
 
+def record_profiles(args, speaker, out_dir, chapters, scores, in_scope, book_limit,
+                    book_speeds, work_root):
+    """Write a row per profile written, and one per chapter MEASURED.
+
+    The library is a separate party: this goes through the generator's
+    `suite_link`, which loads the client by path and answers None when the
+    library is not there. Nothing here can fail a recipe."""
+    try:
+        import suite_link
+    except Exception:
+        return
+    suite = suite_link.open_suite({})
+    if suite is None:
+        print(f"library: not recorded ({suite_link.load_error()})")
+        return
+    try:
+        book = suite.book_by_slug(args.book)
+        seiyuu = suite.seiyuu_by_path(speaker)
+        if book is None:
+            print(f"library: no book called '{args.book}' - the profile is not recorded")
+            return
+        takes = {s["chapter"]: sum(len(r.get("takes") or []) for r in s.get("rows") or [])
+                 for s in scores}
+        flagged = {s["chapter"]: sum(1 for r in s.get("rows") or []
+                                     for t in (r.get("takes") or []) if t.get("flags"))
+                   for s in scores}
+        steps = {s["chapter"]: len(s.get("rows") or []) for s in scores}
+        written = 0
+        for c in chapters:
+            path = os.path.join(out_dir, f"profile_{c['chapter']}.json")
+            if not os.path.isfile(path):
+                continue
+            row, _what = suite.profile_upsert(
+                path, book_id=book["id"], seiyuu_id=(seiyuu or {}).get("id"),
+                scope="chapter", version=PROFILE_VERSION,
+                comfortable_length=c["comfortable_length"], available_speeds=c.get("speeds"),
+                bands=c["bands"], chapters=[c["chapter"]], work_root=work_root)
+            suite.profile_chapter_add(row["id"], c["chapter"], book_id=book["id"],
+                                      seiyuu_id=(seiyuu or {}).get("id"),
+                                      takes=takes.get(c["chapter"]),
+                                      flagged=flagged.get(c["chapter"]),
+                                      steps=steps.get(c["chapter"]))
+            written += 1
+        book_path = os.path.join(out_dir, "profile_book.json")
+        if os.path.isfile(book_path):
+            row, _what = suite.profile_upsert(
+                book_path, book_id=book["id"], seiyuu_id=(seiyuu or {}).get("id"),
+                scope="book", version=PROFILE_VERSION, comfortable_length=book_limit,
+                available_speeds=book_speeds, chapters=in_scope, work_root=work_root)
+            for c in chapters:
+                suite.profile_chapter_add(row["id"], c["chapter"], book_id=book["id"],
+                                          seiyuu_id=(seiyuu or {}).get("id"),
+                                          takes=takes.get(c["chapter"]),
+                                          flagged=flagged.get(c["chapter"]),
+                                          steps=steps.get(c["chapter"]))
+            written += 1
+        name = (seiyuu or {}).get("display_name") or sweep.nickname_for(speaker)
+        print(f"library: {written} profile(s) recorded for {args.book} with {name}")
+    except Exception as e:
+        print(f"library: not recorded ({type(e).__name__}: {e})")
+    finally:
+        suite.close()
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Book profiler, stage 4b: recipe")
@@ -680,6 +744,12 @@ def main():
     elif os.path.isfile(book_path):
         # A book profile from an earlier run would read as this run's answer.
         os.remove(book_path)
+    # Tell the library what was profiled, for what book, with whom and
+    # when (user decision 2026-09-25). Best-effort: a missing library must
+    # never cost a recipe that took hours of GPU to measure.
+    record_profiles(args, speaker, out_dir, chapters, scores, in_scope,
+                    book_limit if viable and book_bands else None, book_speeds, base)
+
     with open(os.path.join(out_dir, "recipe.md"), "w", encoding="utf-8") as f:
         f.write(render_md(args.book, speaker, chapters, book_bands, viable, book_limit,
                           apply_book, costs, book_speeds, no_window))

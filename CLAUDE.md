@@ -8,7 +8,7 @@ because the divergences are the interesting part.
 
 Everything in this file describes code that exists today.
 
-## State of play (2026-09-18) - start here
+## State of play (2026-09-25) - start here
 
 Everything below is merged to `main`. One generator, six separate tools:
 
@@ -61,6 +61,22 @@ hostname with no app is public, and the suite holds the whole library. The
 generator side of the monitor (the `%LOCALAPPDATA%\SHAMA-Monitor\state.json`
 file `progress_window.py` wrote) was never merged; its branch is deleted and
 the commit is `9ea0b09` if it is ever wanted back.
+
+**First full E2E run, library-tracked (2026-09-25) - passed, no issue
+found.** A new voice, **tomita**, was onboarded (Identity step, name
+written to the library), profiled by book-profiler on wall chapter_010 and
+chapter_011, and rendered in dynamic mode. Some readings were settled in
+Preview Chapters before the run; the QA scan ran after the render, and
+dynamic-repair picked its `.qa.json` up as soon as the chapter was opened.
+The shortlist held **only Parts with a genuine fault - no false flags**,
+which is the verify pass doing its job on a voice it had never seen. This
+is the chain the Audiobook Creation Suite will wrap.
+
+**Next: the suite design, in a fresh session.** The current process, tool
+by tool, is written up in
+`F:\AUDIOBOOK-CREATION-SUITE\docs\e2e-process-current.md` (two categories:
+seiyuu management, book creation in seven steps). The user will add the
+pain points and what the suite should improve; design starts from there.
 
 **Player side (user decision 2026-09-18): the Android app is FROZEN.**
 Development goes into the web client first, then the server. Player
@@ -540,6 +556,21 @@ person fixes the text** -> `metadata.csv` -> `prepare_manifest.py` ->
 `train.py` -> a hardlink at `seiyuu/list/<speaker>-<style>.speaker.safetensors`,
 which is what the generator's Speaker Path field points at.
 
+**Step 2 is Identity** (2026-09-25): the display name, its kana and the
+translation, REQUIRED before training. They go into the suite library
+when training publishes the speaker file - with `speaker_key` (the parent
+folder), `style`, the samples folder, `onboarded_at` and `trained_at` -
+so the generator, the profiler and dynamic-repair read a voice's name
+from one place instead of asking again. Onboarding a second STYLE of the
+same speaker fills the three fields in from the first, because the parent
+folder is the identity. A library that is not reachable blocks training,
+with a "train anyway" escape so an hour of GPU is not lost to an
+unplugged drive. It talks to the library through its own `library.py`,
+loading `creator_suite.client` BY PATH the way `suite_link.py` does - the
+folder still imports nothing of the generator's.
+*(Future, noted not built: a two-tier picker - choose seiyuu, then style -
+wherever a voice is selected.)*
+
 The pair `<speaker>/<style>` is the only input; every path derives from it.
 The gate is not automatable: Whisper returns unpunctuated lines AND mishears
 — the real `moeshi/calm-01` text opens with an `えへへ。` that is nowhere in
@@ -905,6 +936,15 @@ Own venv, own `settings.json` (gitignored). Output under a root - the
 window's "profile folder", or `--work-root`, defaulting to `work_root` in
 `settings.json` (`F:\tmp\book-profiler`) - as `<root>\<book>\<scope>\`,
 with the profiles in `recipe\<seiyuu>\profile_*.json`.
+
+**It records what it profiled** (2026-09-25): `recipe.py` writes a
+`profiles` row per profile it produces and a `profile_chapters` row per
+chapter actually MEASURED (takes, flagged, steps, when, with whom), and
+the generator stamps `last_used_at` when a render uses one. Best-effort,
+so a missing library never costs a recipe that took hours of GPU. Those
+rows plus `chapter_records` and `repairs` are what the future dashboard
+reads: `seiyuu_work()` for one voice's history, `book_production()` for a
+book's contributors and the chapters that needed the most repairs.
 
 | stage | script | GPU | what it does |
 |---|---|---|---|
