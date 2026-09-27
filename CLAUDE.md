@@ -49,15 +49,20 @@ The user is slowly re-rendering older books in dynamic mode.
    `gcloud auth application-default login`; their trial credits cannot pay
    for AI Studio, only Agent Platform.
 
-**The tunnel (2026-09-25).** The `audiobook` Cloudflare tunnel
-(`C:\Users\herma\.cloudflared\config.yml`, started by hand - there is no
-Windows service) now routes **creator.shamareader.online -> localhost:3232**,
-alongside `audiobook.shamareader.online -> 3939`. Port 3232 is the SHAMA log
-monitor's, and the monitor is being **shelved**: the suite takes the port
-over, and the `monitor-log` hostname comes out of the config once the suite
-serves something. Until then creator answers 502.
-**It still needs its own Access app** (owner only, like `monitor-log`) - a
-hostname with no app is public, and the suite holds the whole library. The
+**The tunnel (2026-09-25, a Windows service since then).** The `audiobook`
+Cloudflare tunnel runs as the **`cloudflared` Windows service** (Automatic,
+starts before login) - installed with
+`F:\AUDIOBOOK-CREATION-SUITE\tools\Install-TunnelService.ps1`. Its config is
+the COPY in `C:\Windows\System32\config\systemprofile\.cloudflared\config.yml`
+(the one in `C:\Users\herma\.cloudflared\` is no longer read): edit that one
+and `Restart-Service cloudflared`. Do not start `cloudflared` by hand as well.
+It routes **creator.shamareader.online -> localhost:3232** (the Audiobook
+Creation Suite, behind its own owner-only **Access app**, verified) alongside
+`audiobook.shamareader.online -> 3939`. The SHAMA log monitor that used port
+3232 is shelved; its `monitor-log` hostname can come out of the config.
+The suite itself starts at logon through the Task Scheduler task "Audiobook
+Creation Suite", which must run **as herma** - see
+`F:\AUDIOBOOK-CREATION-SUITE\docs\remote-access-setup.md`. The
 generator side of the monitor (the `%LOCALAPPDATA%\SHAMA-Monitor\state.json`
 file `progress_window.py` wrote) was never merged; its branch is deleted and
 the commit is `9ea0b09` if it is ever wanted back.
