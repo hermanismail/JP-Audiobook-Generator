@@ -194,23 +194,34 @@ def step_recipe(step_row, settings):
                 "usable": True, "judged": False, "why_not": "too short",
                 "faster": None, "default": None, "slower": None}
     # Whisper and the book spell this sentence differently at every scale
-    # (score.flag_takes' low_agreement), so nothing it says about this step
-    # is about the seiyuu. Not judged, exactly like a too-short step: its
-    # lengths take the next longer step's recipe, and spelling noise cannot
-    # set a band (user decision 2026-09-24).
-    if any(t.get("low_agreement") for t in step_row["takes"]):
-        return {"step": step_row["step"], "tts_len": step_row["tts_len"],
-                "text": step_row["text"], "clean": {}, "word_slips": slips,
-                "usable": True, "judged": False, "why_not": "script and transcript never agree",
-                "faster": None, "default": None, "slower": None}
+    # (score.flag_takes' low_agreement): similarity, the length ratio and
+    # the step's median are then about spelling, not the seiyuu (user
+    # decision 2026-09-24). Until 2026-09-28 such a step was not judged at
+    # all and took the next longer step's recipe - which also threw away
+    # its TAILS. machi/ayaneru-07-narration: きみ/ぼく are written in kana
+    # and heard as 君/僕, so the 17-character step never scored above 0.80
+    # although it ad-libbed a tail at 4 of 6 takes at x1.3 and 6 of 6
+    # above; the band borrowed x1.3/1.7 from the next step and 34 of the
+    # rendered chapter's 39 QA flags were tails at x1.3. A tail is
+    # `overrun` - characters heard after the script's own last characters -
+    # which cannot come from spelling: an ending spelled differently is
+    # simply not found (0). So such a step is judged on tails (and the
+    # 30 s ceiling) alone (user decision 2026-09-28).
+    spelling = any(t.get("low_agreement") for t in step_row["takes"])
     clean = {}
     for scale in scales:
         takes = [t for t in step_row["takes"] if t["scale"] == scale]
-        flagged = sum(1 for t in takes if t["flags"] and not t["word_slip"])
+        if spelling:
+            flagged = sum(1 for t in takes
+                          if (t.get("overrun") or 0)
+                          >= settings.get("overrun_chars", score.SCORE_DEFAULTS["overrun_chars"]))
+        else:
+            flagged = sum(1 for t in takes if t["flags"] and not t["word_slip"])
         capped = sum(1 for t in takes if t["at_ceiling"])
         clean[scale] = flagged == 0 and capped == 0
     base = {"step": step_row["step"], "tts_len": step_row["tts_len"], "text": step_row["text"],
-            "clean": {f"{s:.1f}": clean[s] for s in scales}, "word_slips": slips}
+            "clean": {f"{s:.1f}": clean[s] for s in scales}, "word_slips": slips,
+            "judged_on": "tails" if spelling else "all"}
     window = clean_window(scales, clean)
     if not window:
         return dict(base, usable=False, judged=True, window=None,
@@ -573,6 +584,9 @@ def render_md(book, speaker, chapters, book_bands, viable, book_limit, apply_boo
             if not s["judged"]:
                 note = (f"{s.get('why_not', 'too short')} - not judged, uses the next step's "
                         f"recipe" + (f"; {note}" if note else ""))
+            elif s.get("judged_on") == "tails":
+                note = ("Whisper spells it differently - judged on tails only"
+                        + (f"; {note}" if note else ""))
             o.append(f"| {s['step']} | {s['tts_len']} | {marks} | {fmt(s['faster'])} | "
                      f"{fmt(s['default'])} | {fmt(s['slower'])} | {note} |")
         o.append("")

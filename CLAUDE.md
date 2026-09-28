@@ -1100,6 +1100,24 @@ x0.8, which made the book recipe non-viable. The audio was fine.
 
 With both, hayamin's book recipe came out viable, L=115, default + faster.
 
+**…but a step Whisper spells differently still has TAILS (2026-09-28).**
+The "not judged" rule above also threw away the one signal spelling cannot
+fake: `overrun`, characters heard after the script's own last characters
+(an ending spelled differently is simply not found, so it counts 0). Found
+on the first suite render, machi (= wall) chapter_001 with
+ayaneru-07-narration: the text writes `きみ` / `ぼく` in kana, Whisper writes
+君 / 僕, so the 17-character step never scored above 0.80 - yet it ad-libbed
+a tail at 4 of 6 takes at x1.3 and 6 of 6 above. Unjudged, it borrowed the
+29-character step's x1.3/1.7, and **34 of the chapter's 39 QA flags were
+tails at x1.3**. Now such a step is judged on tails (and the 30 s ceiling)
+alone; `recipe.md` says "judged on tails only". Old vs new recipe over every
+measured set on disk (copies): tanya, tomita, mikku, marinka, moeshi
+(ch 1-20) and chanyui identical; ayaneru's 1-29 band splits into 1-17
+x0.9/1.1/1.2 and 18-29 x0.9/1.3/1.7; hayamin gains judged steps (chapter_008
+24-42 becomes x1.0/1.1, was 1.1/1.3); moeshi's wall-chapter-01 splits a band
+with identical values. Profiles already on disk are NOT rewritten - rebuild
+a recipe (no GPU, from its score.json) to pick the rule up.
+
 ### Readings in the profiler (2026-09-22)
 
 `--readings <the book's readings.json>` on every stage, and an optional
