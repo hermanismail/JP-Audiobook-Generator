@@ -129,7 +129,9 @@ def _paragraphs(raw, title):
     for p in re.findall(r"<p\b[^>]*>(.*?)</p>", raw, re.S):
         t = html.unescape(re.sub(r"<[^>]+>", "", p))
         t = re.sub(r"\s+", " ", t).strip()
-        if not t:
+        # scene breaks (`*`, `* * *`, `◇`): nothing to read, and as a 0-1
+        # group they would be glued onto the previous cue
+        if not t or not re.search(r"\w", t):
             continue
         # running heads: the book's title, and "Chapter 34, <title>"
         if title and (t == title or t.startswith(title + ",")):
