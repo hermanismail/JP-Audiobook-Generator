@@ -32,6 +32,7 @@ import os
 import re
 import zipfile
 import posixpath
+from urllib.parse import unquote
 
 import numpy as np
 
@@ -115,7 +116,9 @@ def _spine(z):
         i = re.search(r'\bid="([^"]+)"', tag)
         h = re.search(r'\bhref="([^"]+)"', tag)
         if i and h:
-            items[i.group(1)] = posixpath.normpath(posixpath.join(base, html.unescape(h.group(1))))
+            # hrefs are URLs: a Calibre epub writes spaces as %20
+            href = unquote(html.unescape(h.group(1)).split("#")[0])
+            items[i.group(1)] = posixpath.normpath(posixpath.join(base, href))
     title = re.search(r"<dc:title[^>]*>(.*?)</dc:title>", opf, re.S)
     order = [items[r] for r in re.findall(r'<itemref\b[^>]*idref="([^"]+)"', opf) if r in items]
     return order, html.unescape(title.group(1)).strip() if title else ""
