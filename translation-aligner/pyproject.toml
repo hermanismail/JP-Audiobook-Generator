@@ -1,0 +1,24 @@
+[project]
+name = "translation-aligner"
+version = "0.1.0"
+description = "Fit a published English translation onto a chapter's sync.json, as <chapter>.en.srt"
+readme = "README.md"
+authors = [
+    { name = "hermanismail", email = "hermanismail@gmail.com" }
+]
+requires-python = ">=3.12"
+# CPU torch on purpose: LaBSE embeds a chapter in about a minute on the CPU,
+# and the GPU stays free for the TTS. Measured 2026-10-01 on yojo-senki and
+# machi chapter_001.
+dependencies = [
+    "customtkinter>=6.0.0",
+    "sentence-transformers>=6.1.0",
+    "torch>=2.14.1",
+]
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cpu"
+
+[tool.uv]
+package = false
+index-strategy = "unsafe-best-match"

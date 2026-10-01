@@ -21,6 +21,7 @@ Everything below is merged to `main`. One generator, six separate tools:
 | `seiyuu-audition/` | hear a seiyuu at given settings | stable |
 | `seiyuu-onboarder/` | train a new seiyuu | stable |
 | `scene-illustrator/` | one zen-mode image per chapter: Google (Gemini on Agent Platform) reads and draws with cast sheets, local Qwen-Image for refused scenes; Read / Cast / Chapters / Output tabs | built 2026-09-22, used on all of after-dark |
+| `translation-aligner/` | fits a published English epub onto `sync.json` -> `<chapter>.en.srt` for the reader's English mode (style D) | built 2026-10-01, proven on yojo-senki + machi ch.1; reader side not yet taught |
 
 The user is slowly re-rendering older books in dynamic mode.
 
@@ -1178,6 +1179,42 @@ A module-path trap: `profiler_runner` puts `seiyuu-audition/` on
 `sys.path`, so `import app` from anywhere that imported it finds the
 AUDITION tool's `app.py`. The window runs as `__main__` and is unaffected;
 a test harness must load it by file path.
+
+## `translation-aligner/` — the published English translation, timed (2026-10-01)
+
+The reader's English mode (text style D, `F:\JPAudiobookPlayer`) shows the
+`.srt` as pages while the Japanese plays. This tool lets it show the REAL
+English edition instead of VNTL: it aligns an epub's sentences with a
+chapter's `sync.json` chunks and writes `<chapter>.en.srt`. Own venv (CPU
+torch + sentence-transformers), imports nothing from the generator, reads
+only `sync.json`, `.srt` and `glossary.json`, writes only `.en.srt` in the
+book folder (state goes under `work_root`). Separate tool, not a
+`translate_pipeline` backend: a backend is one chunk in, one line out, and
+this is many-to-many over a chapter with a human review in the middle.
+
+- **Alignment**: LaBSE embeddings of spans of 1-3 chunks / sentences, a
+  monotonic DP with groups 1-1, 1-2, 2-1, 1-3, 3-1 and skips; each group
+  scores `similarity - 0.30`, a skip 0. **Not weighted by group size** -
+  weighted, 140 of yojo's 260 groups came out 2-2 and the sentence timing
+  was lost. A 0-1 beside a 1-0 is re-paired afterwards (`証明終了。` = "I
+  rest my case." scored under 0.30).
+- **Similarity is a weak signal**: correct pairs were seen at 0.32. The
+  review flags SKIPS (and re-paired rows), not low scores.
+- **Measured** (user checked by eye): yojo-senki ch.1 x vol. 1 prologue,
+  432 x 430, 347 + 6 one-to-one; machi ch.1, 121 x 114, 105 one-to-one,
+  every group right. yojo ch.4 (1,964 x 1,972) stays in step to the end,
+  73 rows to look at, 377 s on CPU. Chapter pairing from the openings was
+  right for every chapter of both books, joining yojo's split files
+  (`chapter003` + `003b` + `003d`, by file stem) and skipping front matter,
+  `footnote.xhtml` and the newsletter page.
+- **`.en.srt` (user decisions)**: a NEW sidecar for English mode only; the
+  `.srt` contract otherwise, but a cue may span several chunks and a chunk
+  without English has no cue. The credit line comes from `glossary.json`,
+  falling back to the `.srt`'s cue for it (VNTL translated it with the
+  glossary). Footnotes (yojo's `解説`) are skipped: the screen keeps the
+  last page while they are read.
+- **Reader side**: mode D must learn to prefer `.en.srt` - handed over as a
+  prompt for a `F:\JPAudiobookPlayer` session.
 
 ## Conventions worth not breaking
 
