@@ -224,3 +224,6 @@ dynamic-repair/settings.json
 # scene-illustrator too
 scene-illustrator/settings.json
 scene-illustrator/window_errors.log
+# translation-aligner too
+translation-aligner/settings.json
+translation-aligner/gui_state.json
