@@ -1213,8 +1213,17 @@ this is many-to-many over a chapter with a human review in the middle.
   falling back to the `.srt`'s cue for it (VNTL translated it with the
   glossary). Footnotes (yojo's `解説`) are skipped: the screen keeps the
   last page while they are read.
-- **Reader side**: mode D must learn to prefer `.en.srt` - handed over as a
-  prompt for a `F:\JPAudiobookPlayer` session.
+- **epub text rules**: hrefs are %-decoded (Calibre writes `%20`);
+  paragraphs with no letters or digits (scene breaks `*`, `* * *`) are
+  dropped; a footnote reference - a NUMBER in `<sup>`, linked or not - is
+  removed, or "Londinium.<sup>6</sup>" becomes the stray sentence "6 If…"
+  (found by the player 2026-10-02). `1<sup>st</sup>` stays. Re-align and
+  re-write `.en.srt` files written before this fix.
+- **Reader side**: built 2026-10-02 - style D reads `.en.srt` (falling back
+  to `.srt`), a "T" box shows it above the Japanese in A-C, and the C menu
+  picks AI subtitle or book text. Next, from the player's
+  `PLAYER-HANDOVER.md`: an English AUDIOBOOK (`.en.m4a` + `.en.sync.json`
+  mapped to Japanese time) - not designed yet.
 
 ## Conventions worth not breaking
 

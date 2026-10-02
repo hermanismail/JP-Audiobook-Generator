@@ -127,6 +127,12 @@ def _spine(z):
 def _paragraphs(raw, title):
     out = []
     for p in re.findall(r"<p\b[^>]*>(.*?)</p>", raw, re.S):
+        # footnote references (`Londinium.<a href="footnote.xhtml#..">
+        # <sup>6</sup></a>`) would become text: "Londinium.6", then a
+        # stray sentence "6 If..." (found by the player, 2026-10-02).
+        # Only a NUMBER (or * / †) in superscript goes; `1<sup>st</sup>` stays.
+        p = re.sub(r"<a\b[^>]*>\s*<sup\b[^>]*>\s*[\d*†‡]+\s*</sup>\s*</a>", "", p, flags=re.S)
+        p = re.sub(r"<sup\b[^>]*>\s*(?:<a\b[^>]*>)?\s*[\d*†‡]+\s*(?:</a>)?\s*</sup>", "", p, flags=re.S)
         t = html.unescape(re.sub(r"<[^>]+>", "", p))
         t = re.sub(r"\s+", " ", t).strip()
         # scene breaks (`*`, `* * *`, `◇`): nothing to read, and as a 0-1
