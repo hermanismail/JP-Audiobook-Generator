@@ -34,7 +34,10 @@ import zipfile
 import posixpath
 from urllib.parse import unquote
 
-import numpy as np
+# numpy (and sentence-transformers) are imported only where the embedding
+# work happens, so the ePub reading, the review edits and the .en.srt writer
+# load with the stdlib alone - the Audiobook Creation Suite's server imports
+# this module from its own venv (2026-10-03).
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(SCRIPT_DIR, "settings.json")
@@ -223,6 +226,7 @@ def suggest_pairing(chapters, units, model_name):
     window shows it for confirmation."""
     if not chapters or not units:
         return [None] * len(chapters)
+    import numpy as np
     m = model(model_name)
     def body(chunks):
         return [c["text"] for c in chunks if not CREDIT_RE.match(c["text"])]
