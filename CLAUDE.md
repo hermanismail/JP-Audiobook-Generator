@@ -1219,6 +1219,13 @@ this is many-to-many over a chapter with a human review in the middle.
   removed, or "Londinium.<sup>6</sup>" becomes the stray sentence "6 If…"
   (found by the player 2026-10-02). `1<sup>st</sup>` stays. Re-align and
   re-write `.en.srt` files written before this fix.
+- **In the suite** (2026-10-03, `F:\AUDIOBOOK-CREATION-SUITE\docs\
+  english-text-plan.md`): an optional book feature - upload the English
+  ePub, confirm the pairing, review/approve per chapter on a page, RIERY
+  aligns in the CPU lane right after each render and publishes `.en.srt`
+  with the chapter. The suite loads THIS `aligner.py` by path, so it must
+  import without numpy (numpy is imported inside `suggest_pairing` only;
+  `align()` gets arrays from the model). Legacy books stay on `app.py`.
 - **Reader side**: built 2026-10-02 - style D reads `.en.srt` (falling back
   to `.srt`), a "T" box shows it above the Japanese in A-C, and the C menu
   picks AI subtitle or book text. Next, from the player's
