@@ -1226,6 +1226,13 @@ this is many-to-many over a chapter with a human review in the middle.
   with the chapter. The suite loads THIS `aligner.py` by path, so it must
   import without numpy (numpy is imported inside `suggest_pairing` only;
   `align()` gets arrays from the model). Legacy books stay on `app.py`.
+  **Since 2026-10-04 the suite embeds on the GPU, in its GPU lane**: the
+  CPU lane was starved on a busy desktop (10-25 min a chapter against
+  ~1 min idle). `model()` / `suggest_pairing()` / `align()` take a
+  `device` (default `cpu` - the desktop tool and this venv's CPU torch are
+  unchanged; "cuda" falls back to the CPU with a message when torch has no
+  CUDA). The suite's own CUDA venv is `F:\venvs\suite-aligner`. Measured:
+  ~23 s a chapter, almost all model load, and groups identical to the CPU's.
 - **Reader side**: built 2026-10-02 - style D reads `.en.srt` (falling back
   to `.srt`), a "T" box shows it above the Japanese in A-C, and the C menu
   picks AI subtitle or book text. Next, from the player's

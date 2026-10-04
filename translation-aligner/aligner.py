@@ -48,6 +48,10 @@ DEFAULTS = {
     "skip_cost": 0.30,      # a group must beat this similarity to be taken
     "low_sim": 0.45,        # shown red in review; NOT a flag on its own
     "credit_template": "Narrated by {name}",
+    # Where the embeddings run. The desktop tool stays on the CPU (its venv
+    # has CPU torch, and the GPU may be rendering); the suite passes "cuda"
+    # and queues the job in its GPU lane (2026-10-04).
+    "device": "cpu",
 }
 
 BEADS = [(1, 1), (1, 2), (2, 1), (1, 3), (3, 1), (1, 0), (0, 1)]
@@ -208,18 +212,25 @@ def epub_units(path):
 _MODEL = {}
 
 
-def model(name):
-    if name not in _MODEL:
+def model(name, device="cpu"):
+    """device "cuda" falls back to the CPU when this venv's torch has no
+    CUDA (the desktop tool's does not), and says so."""
+    if device != "cpu":
+        import torch
+        if not torch.cuda.is_available():
+            print(f"aligner: no CUDA in this venv - embedding on the CPU instead of {device}", flush=True)
+            device = "cpu"
+    if (name, device) not in _MODEL:
         from sentence_transformers import SentenceTransformer
-        _MODEL[name] = SentenceTransformer(name, device="cpu")
-    return _MODEL[name]
+        _MODEL[(name, device)] = SentenceTransformer(name, device=device)
+    return _MODEL[(name, device)]
 
 
 def _embed(m, texts):
     return m.encode(texts, normalize_embeddings=True, batch_size=64, show_progress_bar=False)
 
 
-def suggest_pairing(chapters, units, model_name):
+def suggest_pairing(chapters, units, model_name, device="cpu"):
     """For each JP chapter, the (first, last) unit index it most likely
     covers, or None. Opening and closing text are compared and the chapters
     are kept in order (a unit is never used twice). Only a proposal: the
@@ -227,7 +238,7 @@ def suggest_pairing(chapters, units, model_name):
     if not chapters or not units:
         return [None] * len(chapters)
     import numpy as np
-    m = model(model_name)
+    m = model(model_name, device)
     def body(chunks):
         return [c["text"] for c in chunks if not CREDIT_RE.match(c["text"])]
     jo = _embed(m, ["".join(body(ch)[1:12]) for _, ch in chapters])
@@ -263,13 +274,13 @@ def suggest_pairing(chapters, units, model_name):
     return out
 
 
-def align(jp_texts, en_sents, model_name, skip_cost):
+def align(jp_texts, en_sents, model_name, skip_cost, device="cpu"):
     """Monotonic alignment -> groups [{jp:[start,n], en:[start,n], sim}].
     Each group's score is its similarity minus skip_cost, so a skip (worth 0)
     is taken only when nothing pairs better. Scores are NOT weighted by
     group size: weighted, 140 of 260 yojo groups came out 2-2 and the
     sentence-level timing was thrown away."""
-    m = model(model_name)
+    m = model(model_name, device)
     N, M = len(jp_texts), len(en_sents)
     def spans(xs, sep):
         keys, texts = [], []
@@ -447,7 +458,7 @@ def align_chapter(book_folder, base, chunks, epub_path, units, unit_range, setti
     first, last = unit_range
     sents = [s for u in units[first:last + 1] for s in u["sentences"]]
     jp = [c["text"] for c in chunks]
-    groups = align(jp, sents, settings["model"], settings["skip_cost"])
+    groups = align(jp, sents, settings["model"], settings["skip_cost"], settings.get("device", "cpu"))
     return {"version": 1, "base": base, "book_folder": book_folder,
             "epub": epub_path, "units": [u["key"] for u in units[first:last + 1]],
             "unit_range": [first, last], "jp": jp, "en": sents,
