@@ -34,6 +34,15 @@ The scoring is book-profiler's: kana folded before comparing, and
 `overrun` for a tail spoken after the sentence ended (part 37's `客`,
 which nothing else caught).
 
+## The seiyuu credit is judged on its length only
+
+`朗読者：上田麗奈` is a NAME, and Whisper writes a name its own way
+(`朗読者 植田玲奈`), so its similarity says nothing. On machi the credit
+was flagged in 9 of 16 scanned chapters and never once wrong - a third of
+all false alarms (2026-10-05). It is recognised from `render.json`'s
+`intro_line` and flagged only when something was ADDED or dropped: a tail
+after the name, or a transcript far longer or shorter than the line.
+
 ## What it writes
 
 `<chapter>.qa.json` beside the audio, in dynamic-repair's own cache
@@ -70,13 +79,14 @@ DEFAULTS = {
 }
 
 
-def judge(script, heard):
+def judge(script, heard, spelling_free=False):
     """{similarity, length_ratio, overrun, flagged} for one Part, scored
-    the profiler's way."""
+    the profiler's way. `spelling_free` (the seiyuu credit) leaves the
+    similarity out of the verdict."""
     settings = profiler_score.SCORE_DEFAULTS
     similarity, ratio = profiler_score.compare(script or "", heard or "")
     over = profiler_score.overrun(script or "", heard or "")
-    flagged = (similarity < settings["similarity_threshold"]
+    flagged = ((similarity < settings["similarity_threshold"] and not spelling_free)
                or ratio is None
                or not (settings["length_ratio_low"] <= ratio <= settings["length_ratio_high"])
                or over >= settings["overrun_chars"])
@@ -100,6 +110,17 @@ class Chapter:
         self.work_dir = work_dir or os.path.join(self.folder, "_qa", base)
         with open(self.sync_path, "r", encoding="utf-8") as f:
             self.sync = json.load(f)
+        # The credit line as the reader shows it, when this render has one.
+        self.intro_line = None
+        try:
+            with open(os.path.join(self.folder, base + ".render.json"), "r",
+                      encoding="utf-8") as f:
+                self.intro_line = json.load(f).get("intro_line") or None
+        except (OSError, ValueError):
+            pass
+
+    def is_credit(self, text):
+        return bool(self.intro_line) and (text or "").strip() == self.intro_line.strip()
 
     def audio_source(self):
         # The lossless master when the run kept one, else the published file.
@@ -162,7 +183,8 @@ def verify(chapter, rows, indexes, log):
             except (OSError, ValueError):
                 heard = ""
         row = next(r for r in rows if r["index"] == index)
-        out[index] = dict(judge(row["text"], heard), heard_alone=heard)
+        out[index] = dict(judge(row["text"], heard, chapter.is_credit(row["text"])),
+                          heard_alone=heard)
     return out
 
 
@@ -181,7 +203,9 @@ def scan_chapter(folder, base, settings=None, log=print, work_dir=None):
             row["judged"] = False
             continue
         row["judged"] = True
-        row.update(judge(row["text"], row["heard"]))
+        if chapter.is_credit(row["text"]):
+            row["credit"] = True
+        row.update(judge(row["text"], row["heard"], row.get("credit", False)))
         if row["flagged"]:
             judged.append(row["index"])
     verified = verify(chapter, rows, judged, log)
