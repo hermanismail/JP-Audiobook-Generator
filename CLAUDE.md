@@ -23,6 +23,10 @@ Everything below is merged to `main`. One generator, six separate tools:
 | `scene-illustrator/` | one zen-mode image per chapter: Google (Gemini on Agent Platform) reads and draws with cast sheets, local Qwen-Image for refused scenes; Read / Cast / Chapters / Output tabs | built 2026-09-22, used on all of after-dark |
 | `translation-aligner/` | fits a published English epub onto `sync.json` -> `<chapter>.en.srt` for the reader's English mode (style D) | built 2026-10-01, proven on yojo-senki + machi ch.1; reader side not yet taught |
 
+**Since 2026-10-06 the suite renders from a VOICE CALIBRATION, not a book
+profile** - see "Voice calibration" under `book-profiler/` below. The
+profiler's per-book recipe stays for the desktop tools and legacy books.
+
 The user is slowly re-rendering older books in dynamic mode.
 
 **Open threads, roughly in the order they were raised:**
@@ -1179,6 +1183,68 @@ A module-path trap: `profiler_runner` puts `seiyuu-audition/` on
 `sys.path`, so `import app` from anywhere that imported it finds the
 AUDITION tool's `app.py`. The window runs as `__main__` and is unaffected;
 a test harness must load it by file path.
+
+### Voice calibration - one setting per voice (`calibrate.py`, 2026-10-06)
+
+The per-book recipe answered "which scale keeps THIS chapter's sentences
+clean with this voice" and put default in the middle of the window. After
+machi chapters 1-15 were published and repaired, the library said what
+actually matters (2,366 Parts, 16 renders, a human verdict on every flag):
+
+- **43 hallucinations repaired; 42 were ad-libbed tails, and all 43 were
+  fixed by a SHORTER take** (x0.9 in 31 cases). Mean pace 3.2 -> 4.15 ch/s.
+- **Pace predicts it; scale, length, band and window width do not** (each
+  flat at about 2%). Library Parts hallucinated / profiler takes ran long:
+  under 3.0 ch/s 16% / 74%; 3.0-3.5 10.6% / 42%; 3.5-4.0 2.1% / 19%;
+  4.0-4.5 0.5% / 6%; 4.5-6.0 **0 of 857 / 0**. Two independent data sets.
+- **The same scale is a different pace per voice**: natural pace at x1.0
+  runs from 4.0 ch/s (tomita, maeda) to 6.0 (shama natural, moeshi).
+- **A question as a step sentence hides tails**: under 3.8 ch/s, takes
+  ending `？` ran long 14% against 53% for `。` (production: 0 of 26
+  against 40 of 444). tomita's x1.4 band was measured on one.
+- **Whole chapters at one flat scale** (same text and gaps as the library
+  render, only the scale changed, QA scan after): x0.9 took tomita 14 -> 1,
+  maeda 8 -> 0, hayamin 6 -> 0; shama 6 -> 0 at x1.0/1.1/1.3. **Too fast
+  has its own fault**: mikku swallowed half a sentence at 7.3 ch/s (x0.9)
+  and was clean at x1.0; shama read cleanly up to 8.5.
+- **A fixed x1.0/1.1/1.3 by length does not transfer**: clean for shama,
+  9 tails for ayaneru and 20 for tomita.
+- **The formula alone is not enough**: five voices on five chapters they
+  had never read, at natural pace / 5.0: 4 hallucinations in 829 Parts, all
+  chanyui's - her pace had come from 50 Parts of another chapter (pace
+  measured on one chapter is off by up to 8% on another) and she is the
+  most tail-prone voice. Hence a fixed template and a check.
+
+The user chose **5.0 ch/s** by ear (tomita and maeda at 4.5 and 5.0), one
+setting only, repairs by typed duration scale.
+
+`calibrate.py --speaker <file> --out <folder>`: probe the 33 sentences of
+`calibration_template.txt` once at x1.0 (a take's length is text x scale,
+so one take IS the natural pace); scale = pace / 5.0 to 0.05; check with 4
+draws each and the profiler's tail rules; two or more tails -> one step
+faster, tails among sentences of 12 characters or fewer only -> those get
+their own lower scale, two or more swallowed -> one step slower; at most
+three checks. Writes `profile_voice.json` - an ordinary v3 profile, scope
+`voice`, one band (two with a short scale), one speed - plus
+`calibration.json` / `.md`. Exit 4 = written but not settled.
+
+Proven on seven voices (924 check takes, 0 faults, ~9.5 min each): tomita
+x0.85, maeda and ayaneru x0.90, hayamin x0.95, mikku x1.00, chanyui x1.05,
+shama natural x1.20. **The adjust step never fired** - the template is
+easy text and did not reproduce chanyui's slow short dialogue lines.
+
+Two fixes rode along:
+- **Printed-form kanji** (`text_pipeline.standard_kanji`, TTS text only,
+  applied LAST in `plan_pieces` so a reading keyed to 頰 still matches):
+  頰噓剝繫摑搔瘦蟬禱簞鷗 -> 頬嘘剥繋掴掻痩蝉祷箪鴎. Probe: each read 0-2 of
+  6 times in printed form and 5-6 of 6 in standard form (鷗 0 and 0 -
+  closer, still wrong). 嚙 壺 藪 are NOT mapped: no gain, 藪 worse. On
+  machi 25 Parts held one and 8 needed repair (32% against 2%). 13,322
+  pieces planned both ways: 101 TTS texts differ, nothing else.
+- **The seiyuu credit is judged on length only** in `qa_scan.py`
+  (recognised from `render.json`'s `intro_line`): Whisper spells a name its
+  own way. 17 stored credit lines re-judged: 11 flagged before, 0 after; a
+  credit with words added is still flagged.
 
 ## `translation-aligner/` — the published English translation, timed (2026-10-01)
 

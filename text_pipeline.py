@@ -688,6 +688,44 @@ def prepare_tts_text_dynamic(text):
     return text
 
 
+# Printed-form kanji the engine misreads, and the standard form it reads
+# correctly. Books print 頰 / 噓 / 剝; the engine was trained on 頬 / 嘘 / 剥
+# and guesses at the printed ones: on machi chapters 1-15, 25 Parts held one
+# and 8 of them needed a repair (32% against 2% for every other Part), 頰
+# alone fixed by hand four times (2026-10-05).
+#
+# Measured 2026-10-06: one carrier sentence per character, both forms, two
+# voices, three draws each, Whisper's transcript. Correct reads out of 6:
+#
+#     printed -> standard     printed   standard
+#     頰 -> 頬                   0         5      (雛 / 被害 / 死骸 / 飛眼)
+#     噓 -> 嘘                   0         6      (数 / カス)
+#     剝 -> 剥                   0         6      (弾ました / 恥がした)
+#     繫 -> 繋                   2         6      (素材で / すだいで)
+#     摑 -> 掴                   0         6      (すぐんだ / つるんだ)
+#     搔 -> 掻                   0         6      (かすいた / くぐいた)
+#     瘦 -> 痩                   0         6      (悟せて / さどせて)
+#     蟬 -> 蝉                   0         6      (海 / 麦 / グミ)
+#     禱 -> 祷                   4         6      (寄稿)
+#     簞 -> 箪                   0         6      (サンス -> タンス)
+#     鷗 -> 鴎                   0         0      (羊 / オイ -> カモエ: closer,
+#                                                  still wrong - give 鷗 a reading)
+#
+# NOT mapped, because the standard form gained nothing: 嚙 (6 and 6), 壺 (6
+# and 6), and 藪, where the printed form was read right 6 times and the
+# standard one 4. A new character goes in only with a row like these.
+STANDARD_KANJI = str.maketrans("頰噓剝繫摑搔瘦蟬禱簞鷗", "頬嘘剥繋掴掻痩蝉祷箪鴎")
+
+
+def standard_kanji(text):
+    """`text` with the printed-form kanji above replaced by the form the
+    engine reads. For the TTS text ONLY, as its last step - after the book's
+    readings, so a reading keyed to the printed form (頰 -> ほお) still
+    applies - and one character for one, so no length, cut or band moves.
+    The reader keeps the book's spelling."""
+    return text.translate(STANDARD_KANJI)
+
+
 def split_lines(section_text):
     """A section's author lines, cleaned exactly as split_paragraphs()
     cleans a paragraph - inline whitespace, invisibles, ── -> ─ - but NOT

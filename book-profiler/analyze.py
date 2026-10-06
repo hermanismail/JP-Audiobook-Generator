@@ -186,8 +186,8 @@ def apply_run_options(settings, args):
 def tts_text(text, settings):
     """What the engine is sent for `text`: the generator's dynamic rule,
     then the book's readings - the same order plan_pieces() uses."""
-    return dynamic_profile.apply_readings(tp.prepare_tts_text_dynamic(text),
-                                          settings.get("readings"))[0]
+    return tp.standard_kanji(dynamic_profile.apply_readings(
+        tp.prepare_tts_text_dynamic(text), settings.get("readings"))[0])
 
 
 def spoken_text(text, settings):
