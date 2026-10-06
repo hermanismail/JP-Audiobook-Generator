@@ -353,6 +353,8 @@ def plan_pieces(sentences, profile, style_key, engine, first_gap="section", read
             band, beyond = band_for(profile, piece_len)
             tts_text, used = apply_readings(
                 tp.prepare_tts_text_dynamic(furigana.spoken(piece, spans)), readings)
+            # Last, so a reading keyed to a printed form still matched above.
+            tts_text = tp.standard_kanji(tts_text)
             used = dict(furigana.applied_in(piece, spans), **used)
             out.append({
                 # The source section this came from (blank-line separated),
