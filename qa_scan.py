@@ -69,6 +69,9 @@ for _path in (os.path.join(SCRIPT_DIR, "chapter-repair"),
 
 import repair  # noqa: E402  - chapter-repair's Whisper pass and scoring
 import score as profiler_score  # noqa: E402  - kana folding and overrun
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+import reading_compare  # noqa: E402  - same reading, other characters (2026-10-17)
 
 DEFAULTS = {
     "whisper_exe": r"C:\Transcribe\.venv\Scripts\whisper.exe",
@@ -95,6 +98,21 @@ def judge(script, heard, spelling_free=False):
             "overrun": over, "flagged": bool(flagged)}
 
 
+def judge_part(script, heard, tts_text=None, readings=None, spelling_free=False):
+    """judge(), then a flag is DROPPED when the transcript reads exactly like
+    the TTS text (reading_compare: Whisper wrote 地下 for a correct ちか).
+    Never adds a flag. The result says why: `reading_match` with both kana."""
+    result = judge(script, heard, spelling_free)
+    if result["flagged"] and not spelling_free and tts_text:
+        match, expected, got = reading_compare.same_reading(tts_text, heard, readings)
+        if match is not None:
+            result["reading_expected"], result["reading_heard"] = expected, got
+            if match:
+                result["flagged"] = False
+                result["reading_match"] = True
+    return result
+
+
 class Chapter:
     """The little that repair.py's scan needs: it duck-types
     dynamic-repair's DynChapter, so both tools scan identically."""
@@ -112,12 +130,26 @@ class Chapter:
             self.sync = json.load(f)
         # The credit line as the reader shows it, when this render has one.
         self.intro_line = None
+        # What each Part was SENT as, and every reading the chapter used -
+        # the reading comparison checks the transcript against these.
+        self.tts = {}
+        self.readings = {}
         try:
             with open(os.path.join(self.folder, base + ".render.json"), "r",
                       encoding="utf-8") as f:
-                self.intro_line = json.load(f).get("intro_line") or None
+                render = json.load(f)
+            self.intro_line = render.get("intro_line") or None
+            for p in render.get("pieces") or []:
+                if p.get("sync_index") is not None:
+                    self.tts[p["sync_index"]] = p.get("tts_text")
+                self.readings.update(p.get("readings") or {})
         except (OSError, ValueError):
             pass
+
+    def spoken(self, index):
+        """(TTS text, chapter readings) for a Part - (None, {}) for a
+        chapter with no render.json (normal mode)."""
+        return self.tts.get(index), self.readings
 
     def is_credit(self, text):
         return bool(self.intro_line) and (text or "").strip() == self.intro_line.strip()
@@ -183,9 +215,27 @@ def verify(chapter, rows, indexes, log):
             except (OSError, ValueError):
                 heard = ""
         row = next(r for r in rows if r["index"] == index)
-        out[index] = dict(judge(row["text"], heard, chapter.is_credit(row["text"])),
+        tts_text, readings = spoken(chapter, index)
+        out[index] = dict(judge_part(row["text"], heard, tts_text, readings,
+                                     chapter.is_credit(row["text"])),
                           heard_alone=heard)
     return out
+
+
+def spoken(chapter, index):
+    """(TTS text, readings) of a Part, from this module's Chapter or from
+    dynamic-repair's DynChapter (whose part() carries both)."""
+    if hasattr(chapter, "spoken"):
+        return chapter.spoken(index)
+    try:
+        part = chapter.part(index)
+        readings = {}
+        for r in (chapter.library or {}).get("readings") or []:
+            readings[r["word"]] = r["reading"]
+        readings.update(part.get("readings") or {})
+        return part.get("tts_text"), readings
+    except Exception:
+        return None, {}
 
 
 def scan_chapter(folder, base, settings=None, log=print, work_dir=None):

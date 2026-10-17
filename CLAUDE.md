@@ -532,6 +532,21 @@ calls for with that seiyuu.
     [43, 75, 162, 189]` in 145 s for 204 parts.
   - A bigger model does not fix it: large-v3 made part 75 worse (0.90 ->
     0.71) at 25x the time. See the model comparison above.
+  - **Same reading, other characters** (`reading_compare.py`, 2026-10-17):
+    Whisper writes a correct ちか as 地下, リンゴ for 林檎. A flag the
+    verify pass would keep is DROPPED when the transcript reads exactly
+    like the Part's TTS text (both turned into hiragana by fugashi +
+    unidic-lite; the chapter's readings applied to the transcript too, so a
+    name Whisper writes in kanji matches; numbers spelled out). Exact match
+    only - one kana is a real fault (肯いた read うなぬいた). Never adds a
+    flag; `reading_match` + both kana are kept in the row. Measured on all
+    166 flagged Parts with a person's verdict: false alarms 87 -> 27,
+    genuine faults kept 77 of 79 (the 2 lost were heard by Whisper exactly
+    as written - judged by ear, no text rule can see them). SudachiPy left
+    36. Shared by the QA scan, dynamic-repair's scan and the suite's
+    background reading repair (`judge_part`); profiler and calibration
+    scoring are unchanged on purpose. fugashi is in the generator and
+    dynamic-repair venvs; without it the old rule applies.
 - **Output**: `process_chapter_dynamic()` -> the same `finish_chapter()`
   tail as normal mode (stitch, FLAC master, `sync.json`, tags) plus
   `<chapter>.render.json` - per `sync.json` entry the display and engine
