@@ -8,6 +8,54 @@ because the divergences are the interesting part.
 
 Everything in this file describes code that exists today.
 
+## PAUSED 2026-10-18 - where we stopped (read this first)
+
+The user paused development on 2026-10-18 for other commitments and plans
+to come back. Everything below was merged to `main` and pushed in all three
+repos (this one, `F:\AUDIOBOOK-CREATION-SUITE`, `F:\JPAudiobookPlayer`);
+no feature branch was left open. Each repo carries its own note like this
+one. Session transcripts and Claude's memory notes are in
+`C:\Users\herma\.claude\projects\C--JP-Audiobook-Generator\` (`*.jsonl`
+and `memory\`).
+
+**The last work (2026-10-14..17), generator + suite:**
+- Suite queue status: "this run" (progress by time + n of m jobs)
+  replaced the lifetime "completion" figure (suite schema v22).
+- **Readings check**: adding / changing / deleting a reading on
+  `readings.html` finds the rendered chapters spoken the old way
+  (`creator_suite/reading_check.py`, a query over `pieces`); a card per
+  chapter opens `reading-check.html`, where Parts are ticked (v23).
+- **Background reading repair**: ticked Parts get a take each at the
+  voice's setting in ONE GPU job, checked by Whisper, up to 3 draws; all
+  clean -> applied and republished with no person; anything flagged -> a
+  "Readings repair" card, the repair page opens with clean takes chosen
+  (`jobs/repair_job.py auto`, job kind `reading_repair`, table
+  `reading_auto`, v24). Suite schema is **v24**.
+- **QA by reading** (`reading_compare.py` here, `qa_scan.judge_part`): a
+  flag is dropped when Whisper's transcript READS like the TTS text
+  (地下 for a correct ちか). Measured: false alarms 87 -> 27, genuine
+  faults kept 77 of 79. See "Same reading, other characters" below.
+
+**Not yet proven in real use:**
+- the background repair's 2nd and 3rd draws (in the one real run all 19
+  Parts of maho-shojo-ikusei-01 chapter_002 were clean on the first take),
+  and its flagged / failed cards (simulated on a DB copy only);
+- whether the live suite was restarted (server + runner) after the last
+  merges, and what happened to the 19 ticked Parts of maho chapter_002 and
+  the 20-Part card for machi chapter_030 (子易 -> こやす, unanswered).
+  Check Needs attention and the queue first.
+
+**Known test noise (not regressions):** in the suite, `test_library.py`
+fails inside a worktree (no `creator.db` there) and passes on `main`;
+`test_restart.py` reports "the server did not answer" on `main` too.
+
+**Open, not started:** the English AUDIOBOOK described in
+`PLAYER-HANDOVER.md` (the player side's request; generator builds the
+audio first); the older open threads in the next section.
+
+**Housekeeping:** `F:\tmp\suite-reading-auto` is an empty folder Windows
+held locked - delete it. C: had 32.5 GB free on 2026-10-15.
+
 ## State of play (2026-09-25) - start here
 
 Everything below is merged to `main`. One generator, six separate tools:
