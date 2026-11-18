@@ -638,6 +638,15 @@ DYNAMIC_SILENCE_KINDS = ("comma", "sentence", "section")
 # "×××××××××××" is a redaction, not something to read).
 DYNAMIC_STRIP_RE = re.compile("[×]")
 
+# Symbols the seiyuu cannot read, also stripped (user decision 2026-11-18,
+# from maho-shojo-ikusei-02 on; books already rendered are left as they
+# are). maho-shojo-ikusei-01 sent 29 Parts like 「☆ペチカ」 - the series
+# heads each scene with the girl's name after a ☆ - and the seiyuu
+# stumbled on the symbol. Kept, because they ARE read: ＋ (武器＋７), ～
+# (８～12), ＝, and ○ (a censored word, said "maru"). A Part made of these
+# symbols alone is sent unchanged rather than empty.
+SPOKEN_SYMBOL_RE = re.compile("[☆★♪♫♡♥◆◇※〒©＊]")
+
 # A year written in positional kanji digits - 二〇一三年, 一九二三年 - becomes
 # arabic digits for the TTS (user decision 2026-09-16). Irodori's normaliser
 # otherwise turns 〇 into the circle ○. Four digits only: 二三年 is "two or
@@ -677,11 +686,14 @@ def convert_kanji_numbers(text):
 
 def prepare_tts_text_dynamic(text):
     """Dynamic mode's version of prepare_tts_text(). Same steps, plus:
-    kanji years and 〇-numbers to arabic digits, × stripped, and parentheses treated like
+    kanji years and 〇-numbers to arabic digits, × and the unreadable
+    symbols (SPOKEN_SYMBOL_RE) stripped, and parentheses treated like
     「」 - removed at an edge or next to punctuation, otherwise a 、, so the
     seiyuu voices the pause itself. The reader-facing text keeps all of it."""
     text = convert_kanji_numbers(text)
     text = DYNAMIC_STRIP_RE.sub("", text)
+    if SPOKEN_SYMBOL_RE.sub("", text).strip():
+        text = SPOKEN_SYMBOL_RE.sub("", text)
     text = DASH_RUN_RE.sub(COMMA, text)
     text = _convert_brackets(text, DYNAMIC_BRACKETS)
     text = _collapse_redundant_punctuation(text)
