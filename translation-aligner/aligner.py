@@ -131,9 +131,20 @@ def _spine(z):
     return order, html.unescape(title.group(1)).strip() if title else ""
 
 
+def _blocks(raw):
+    """Paragraph blocks: every <p>. An ePub with no <p> text at all (some
+    Calibre conversions, e.g. Dance Dance Dance, 2026-11-24) puts each
+    paragraph in a <div> holding no other <div>; those are used instead.
+    A file with any <p> text is read exactly as before."""
+    ps = re.findall(r"<p\b[^>]*>(.*?)</p>", raw, re.S)
+    if any(re.search(r"\w", re.sub(r"<[^>]+>", "", p)) for p in ps):
+        return ps
+    return re.findall(r"<div\b[^>]*>((?:(?!<div\b).)*?)</div>", raw, re.S)
+
+
 def _paragraphs(raw, title):
     out = []
-    for p in re.findall(r"<p\b[^>]*>(.*?)</p>", raw, re.S):
+    for p in _blocks(raw):
         # footnote references (`Londinium.<a href="footnote.xhtml#..">
         # <sup>6</sup></a>`) would become text: "Londinium.6", then a
         # stray sentence "6 If..." (found by the player, 2026-10-02).
