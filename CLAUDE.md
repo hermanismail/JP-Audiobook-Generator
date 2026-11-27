@@ -8,6 +8,27 @@ because the divergences are the interesting part.
 
 Everything in this file describes code that exists today.
 
+## 2026-11-18: symbols the seiyuu cannot read are left out (LIVE)
+
+maho-shojo-ikusei-01 sent 29 Parts like 「☆ペチカ」 to the engine (the
+series heads each scene with the girl's name after a ☆), and the seiyuu
+stumbled on the symbol. `prepare_tts_text_dynamic()` now strips
+`SPOKEN_SYMBOL_RE` = `☆★♪♫♡♥◆◇※〒©＊`, beside the `×` that
+`DYNAMIC_STRIP_RE` already removed. Decisions all the user's:
+
+- **Kept, because they ARE read**: `＋` (武器＋７), `～` (８～12), `＝`,
+  and `○` (a censored word, said "maru").
+- **A Part made of these symbols alone is sent unchanged**, never empty
+  (「☆☆☆」 stays 「☆☆☆」).
+- **Only what the engine hears changes** - the reader-facing text (sync
+  .json, subtitles, the player) keeps every symbol.
+- **From maho-shojo-ikusei-02 on**; books already rendered are left as
+  they are (no back-apply, no re-render).
+
+`tests/test_spoken_symbols.py` (17 checks, 17/17 on 2026-11-27: each
+stripped symbol, the four kept, the symbols-only Part). Merge `b66dd14`, pushed; branch
+`spoken-symbols` and its worktree `F:\tmp\gen-sym` deleted 2026-11-27.
+
 ## PAUSED 2026-10-18 - where we stopped (read this first)
 
 The user paused development on 2026-10-18 for other commitments and plans
@@ -346,7 +367,9 @@ is deliberate.
     `DYNAMIC_MIN_PIECE` (5). A greedy latest-cut-that-fits was tried first
     and stranded requests like `と。` and `だから、`.
   - `prepare_tts_text_dynamic(text)` - `prepare_tts_text()` plus: `×` is
-    stripped; `（）()` are treated like `「」` (removed at an edge, else `、`);
+    stripped, and so are `☆★♪♫♡♥◆◇※〒©＊` (`SPOKEN_SYMBOL_RE`, 2026-11-18;
+    `＋～＝○` are read and stay; a Part of those symbols alone is sent
+    unchanged); `（）()` are treated like `「」` (removed at an edge, else `、`);
     four-digit kanji years (`一九二三年` -> `1923年`) and every other
     positional kanji number holding a `〇` (`高度四三〇〇` -> `4300`) go to
     digits, because Irodori's normaliser turns `〇` into `○`. A run touching
@@ -1862,7 +1885,7 @@ knobs:
 | `DYNAMIC_COMMA_AFTER` / `DYNAMIC_COMMA_BEFORE` | `text_pipeline.py` | `、」）)` / `「（(` - cut points, 0.7 s |
 | `DYNAMIC_SENTENCE_AFTER` | `text_pipeline.py` | `！!?` - cut points, 1.0 s |
 | `DYNAMIC_MIN_PIECE` | `text_pipeline.py` | 5 engine chars |
-| `DYNAMIC_STRIP_RE`, `KANJI_YEAR_RE`, `KANJI_ZERO_NUMBER_RE` | `text_pipeline.py` | `×`; kanji years and 〇-numbers to digits |
+| `DYNAMIC_STRIP_RE`, `SPOKEN_SYMBOL_RE`, `KANJI_YEAR_RE`, `KANJI_ZERO_NUMBER_RE` | `text_pipeline.py` | `×`; `☆★♪♫♡♥◆◇※〒©＊` (unless a Part is nothing else); kanji years and 〇-numbers to digits |
 | silences | profile JSON | section 1.5 / sentence 1.0 / comma 0.7 |
 | recipe bands, comfortable length L | profile JSON | from `book-profiler/recipe.py` |
 
